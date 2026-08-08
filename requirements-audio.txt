@@ -1,0 +1,4 @@
+# Optional local vocal separation used by "Tách lời gốc, chỉ giữ nhạc nền".
+# Install with: py -3.12 -m pip install -r requirements-audio.txt
+demucs>=4.0.1,<5
+numpy>=1.26,<3
