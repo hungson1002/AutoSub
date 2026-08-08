@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown } from './Icons';
+import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
 
 export type SelectOption = { value: string; label: string; description?: string; disabled?: boolean };
 
 export function SelectField({ value, options, onChange, ariaLabel, disabled = false, className = '' }: { value: string; options: SelectOption[]; onChange: (value: string) => void; ariaLabel: string; disabled?: boolean; className?: string }) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const dropdownId = useRef<DropdownId>({});
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [position, setPosition] = useState({ top: 0, left: 0, width: 240, maxHeight: 280 });
@@ -23,6 +25,7 @@ export function SelectField({ value, options, onChange, ariaLabel, disabled = fa
   };
 
   useLayoutEffect(() => { if (open) updatePosition(); }, [open, options.length]);
+  useEffect(() => listenForOtherDropdowns(dropdownId.current, () => setOpen(false)), []);
   useEffect(() => {
     if (!open) return;
     const close = (event: PointerEvent) => { if (!buttonRef.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) setOpen(false); };
@@ -40,6 +43,10 @@ export function SelectField({ value, options, onChange, ariaLabel, disabled = fa
     setOpen(false);
     buttonRef.current?.focus();
   };
+  const toggle = () => {
+    if (open) setOpen(false);
+    else { announceDropdownOpen(dropdownId.current); setOpen(true); }
+  };
   const moveActive = (direction: number) => {
     if (!options.length) return;
     let next = activeIndex;
@@ -48,8 +55,8 @@ export function SelectField({ value, options, onChange, ariaLabel, disabled = fa
   };
 
   return <>
-    <button ref={buttonRef} type="button" className={`select-field-trigger ${open ? 'open' : ''} ${className}`} aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { setActiveIndex(Math.max(0, options.findIndex((option) => option.value === value))); setOpen((current) => !current); }} onKeyDown={(event) => {
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); if (!open) setOpen(true); else moveActive(event.key === 'ArrowDown' ? 1 : -1); }
+    <button ref={buttonRef} type="button" className={`select-field-trigger ${open ? 'open' : ''} ${className}`} aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { setActiveIndex(Math.max(0, options.findIndex((option) => option.value === value))); toggle(); }} onKeyDown={(event) => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); if (!open) { announceDropdownOpen(dropdownId.current); setOpen(true); } else moveActive(event.key === 'ArrowDown' ? 1 : -1); }
       if (event.key === 'Enter' || event.key === ' ') { if (open) { event.preventDefault(); choose(activeIndex); } }
       if (event.key === 'Escape') setOpen(false);
     }}>

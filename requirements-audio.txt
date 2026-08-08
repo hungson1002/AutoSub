@@ -2,3 +2,6 @@
 # Install with: py -3.12 -m pip install -r requirements-audio.txt
 demucs>=4.0.1,<5
 numpy>=1.26,<3
+# Optional local CPU speech VAD used by STT timestamp refinement.
+# The Node server falls back safely when this package is not installed.
+silero-vad>=6.2,<7

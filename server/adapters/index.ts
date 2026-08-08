@@ -36,7 +36,7 @@ export function translateBatch(provider: AIProvider, model: string, items: Trans
   return openai.translateBatch(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary);
 }
 
-export function transcribe(provider: AIProvider, model: string, audio: Buffer, filename: string, language: string): Promise<{ text: string; segments: SubtitleSegment[] }> {
+export function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string): Promise<{ text: string; segments: SubtitleSegment[] }> {
   return isElevenLabs(provider) ? elevenlabs.transcribe(provider, model, audio, filename, language) : openai.transcribe(provider, model, audio, filename, language);
 }
 

@@ -5,7 +5,7 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { createDubbingJob, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, recoverDubbingJob, retryDubbingOperation, startDubbingJob } from './dubbingJobs';
+import { buildTimelineMixFilter, createDubbingJob, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, recoverDubbingJob, retryDubbingOperation, startDubbingJob } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
@@ -25,6 +25,12 @@ async function waitForTerminal(id: string) {
   throw new Error(`Job ${id} did not reach a terminal state in time.`);
 }
 
+test('timeline mix preserves cue gain instead of normalizing it by batch size', () => {
+  const filter = buildTimelineMixFilter(29, 79_180);
+  assert.match(filter, /amix=inputs=29:duration=longest:dropout_transition=0:normalize=0/);
+  assert.match(filter, /alimiter=limit=0\.95/);
+});
+
 test('persists synthetic jobs with 100, 1000 and 3000 cues', { timeout: 120_000 }, async () => {
   const ids: string[] = [];
   try {
@@ -36,6 +42,7 @@ test('persists synthetic jobs with 100, 1000 and 3000 cues', { timeout: 120_000 
       assert.equal(status.doneCues, 0);
       assert.equal(status.progressPercent, 0);
       assert.equal(status.config.batchSize, 30);
+      assert.deepEqual(status.config.audioMix, { keepOriginal: true, originalVolume: 0.25, separateVocals: false });
       assert.equal(status.providerInfo.length, 1);
     }
   } finally { await Promise.all(ids.map(cleanup)); }
@@ -66,6 +73,8 @@ test('crash recovery resets processing cues but keeps done and failed checkpoint
 
 test('retry classifier retries 429, 5xx and network failures but not auth/client failures', () => {
   assert.equal(isTransientDubbingError(new ProviderError('rate limited', 429)), true);
+  assert.equal(isTransientDubbingError(new ProviderError('usage_exceeded', 400)), false);
+  assert.equal(isTransientDubbingError(new ProviderError('quota exceeded', 429)), false);
   assert.equal(isTransientDubbingError(new ProviderError('server', 500)), true);
   assert.equal(isTransientDubbingError(new TypeError('fetch failed')), true);
   assert.equal(isTransientDubbingError(new ProviderError('bad request', 400)), false);
@@ -84,6 +93,14 @@ test('an unchanged or longer AI rewrite falls back instead of failing forever', 
   assert.equal(isUsefulDubbingRewrite('Một câu khá dài', 'Một câu khá dài'), false);
   assert.equal(isUsefulDubbingRewrite('Một câu khá dài', 'Một câu còn dài hơn nữa'), false);
   assert.equal(isUsefulDubbingRewrite('Một câu khá dài', 'Câu ngắn'), true);
+});
+
+test('rejects a shorter rewrite that repeats an adjacent cue', () => {
+  assert.equal(isUsefulDubbingRewrite(
+    'Đã thấy bạn mình ngồi thẫn thờ trên giường.',
+    'Nhưng vừa đáp xuống đã thở phào.',
+    ['Nhưng vừa đáp xuống, thở phào một cái'],
+  ), false);
 });
 
 test('retry operation recovers from simulated 429 and 500, but stops on 400', { timeout: 10_000 }, async () => {

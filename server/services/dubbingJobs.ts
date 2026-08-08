@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { AIProvider } from '../types';
 import { chat, ProviderError, synthesize } from '../adapters';
 import { run, workdir } from './ffmpeg';
+import { resolveUpload } from './uploads';
 
 export type TimingMode = 'natural' | 'strict';
 export type CueStatus = 'pending' | 'translating' | 'rewriting' | 'tts' | 'fitting' | 'done' | 'failed';
@@ -33,7 +34,7 @@ export interface DubbingJobConfig {
   ttsConcurrency: number;
   llmConcurrency: number;
   maxRetries: number;
-  audioMix: { keepOriginal: boolean; originalVolume: number };
+  audioMix: { keepOriginal: boolean; originalVolume: number; separateVocals: boolean };
   rewriteProviderRef?: string;
   rewriteModel?: string;
 }
@@ -99,7 +100,7 @@ interface CreateJobInput {
   ttsConcurrency?: number;
   llmConcurrency?: number;
   maxRetries?: number;
-  audioMix?: { keepOriginal?: boolean; originalVolume?: number };
+  audioMix?: { keepOriginal?: boolean; originalVolume?: number; separateVocals?: boolean };
   rewrite?: { provider?: AIProvider; model?: string };
 }
 
@@ -123,7 +124,7 @@ const DEFAULTS = {
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
 const safeName = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'item';
-const normalizeAudioMix = (value?: { keepOriginal?: boolean; originalVolume?: number }) => ({ keepOriginal: value?.keepOriginal ?? true, originalVolume: clamp(Number(value?.originalVolume ?? 0.25), 0, 1) });
+const normalizeAudioMix = (value?: { keepOriginal?: boolean; originalVolume?: number; separateVocals?: boolean }) => ({ keepOriginal: value?.keepOriginal ?? true, originalVolume: clamp(Number(value?.originalVolume ?? 0.25), 0, 1), separateVocals: Boolean(value?.separateVocals && (value?.keepOriginal ?? true)) });
 const jobDir = (id: string) => path.join(jobsRoot, safeName(id));
 const cueDir = (id: string) => path.join(jobDir(id), 'cues');
 const providerDir = (id: string) => path.join(jobDir(id), 'providers');
@@ -133,6 +134,13 @@ const resultDir = (id: string) => path.join(jobDir(id), 'result');
 const jobFile = (id: string) => path.join(jobDir(id), 'job.json');
 const cueFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.json`);
 const audioFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.wav`);
+
+export const buildTimelineMixFilter = (inputCount: number, durationMs: number) => {
+  const count = Math.max(1, Math.floor(inputCount));
+  const mixed = Array.from({ length: count }, (_value, index) => `[a${index}]`).join('');
+  const duration = Math.max(durationMs, 100);
+  return `${mixed}amix=inputs=${count}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95,apad,atrim=duration=${(duration / 1000).toFixed(3)},asetpts=N/SR/TB[out]`;
+};
 
 async function writeJsonAtomic(file: string, value: unknown) {
   await mkdir(path.dirname(file), { recursive: true });
@@ -167,7 +175,7 @@ async function readJson<T>(file: string) {
 async function probeDuration(file: string) {
   const probe = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file]);
   const seconds = Number(probe.stdout.trim());
-  if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('FFprobe could not read the generated audio duration.');
+  if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('FFprobe không đọc được thời lượng audio đã tạo.');
   return Math.round(seconds * 1000);
 }
 
@@ -190,18 +198,40 @@ function normalizeRewrite(value: string) {
   return value.replace(/^```(?:text|plaintext)?\s*/i, '').replace(/\s*```$/i, '').trim().replace(/^['"]|['"]$/g, '').trim();
 }
 
-export function isUsefulDubbingRewrite(currentText: string, rewrittenText: string) {
+function comparableWords(value: string) {
+  return normalizeRewrite(value).toLocaleLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+}
+
+function repeatsAdjacentPhrase(candidate: string, adjacent: string) {
+  const candidateWords = comparableWords(candidate);
+  const adjacentWords = comparableWords(adjacent);
+  if (candidateWords.length < 3 || adjacentWords.length < 3) return false;
+  if (candidateWords.join(' ') === adjacentWords.join(' ')) return true;
+  let longest = 0;
+  for (let start = 0; start < candidateWords.length; start += 1) {
+    for (let adjacentStart = 0; adjacentStart < adjacentWords.length; adjacentStart += 1) {
+      let length = 0;
+      while (candidateWords[start + length] && candidateWords[start + length] === adjacentWords[adjacentStart + length]) length += 1;
+      longest = Math.max(longest, length);
+    }
+  }
+  return longest >= 3 && longest >= Math.ceil(Math.min(candidateWords.length, adjacentWords.length) * 0.5);
+}
+
+export function isUsefulDubbingRewrite(currentText: string, rewrittenText: string, forbiddenTexts: string[] = []) {
   const current = currentText.trim();
   const rewritten = normalizeRewrite(rewrittenText);
-  return rewritten.length >= 2 && rewritten.length < current.length;
+  return rewritten.length >= 2
+    && rewritten.length < current.length
+    && !forbiddenTexts.some((text) => repeatsAdjacentPhrase(rewritten, text));
 }
 
 async function rewriteTranslation(cue: StoredCue, provider: AIProvider, model: string, currentText: string, targetDurationMs: number, signal: AbortSignal) {
   const seconds = (targetDurationMs / 1000).toFixed(2);
-  const system = 'You are a Vietnamese dubbing dialogue editor. Return exactly one natural Vietnamese sentence, without markdown or explanation.';
-  const prompt = `Rewrite the dialogue below to be concise while preserving its meaning and context. It must sound natural when spoken in about ${seconds} seconds.\n\nOriginal: ${cue.input.originalText}\nCurrent translation: ${currentText}\nPrevious: ${cue.input.previousText || '(none)'}\nNext: ${cue.input.nextText || '(none)'}\nTarget duration: ${seconds} seconds.`;
+  const system = 'You are a Vietnamese dubbing dialogue editor. Return exactly one natural Vietnamese sentence, without markdown or explanation. Never copy or borrow content from another subtitle cue.';
+  const prompt = `Rewrite ONLY the current dialogue to sound natural in about ${seconds} seconds. Preserve every important fact, action, subject, and clause from the current translation. Do not merge it with another cue, do not continue it with the next cue, and do not replace it with the previous or next cue. If it cannot be shortened without losing meaning, return the current translation unchanged.\n\nOriginal source cue: ${cue.input.originalText}\nCurrent translation to preserve: ${currentText}\nAdjacent cues are boundaries only; do not use their wording: previous=${cue.input.previousText ? '[present]' : '[none]'}, next=${cue.input.nextText ? '[present]' : '[none]'}\nTarget duration: ${seconds} seconds.`;
   const result = normalizeRewrite(await chat(provider, model, [{ role: 'system', content: system }, { role: 'user', content: prompt }], signal));
-  if (!result || result.length < 2) throw new Error('LLM did not return a valid shorter sentence.');
+  if (!result || result.length < 2) throw new Error('AI không trả về câu rút gọn hợp lệ.');
   return result;
 }
 
@@ -216,7 +246,11 @@ function tempoFilter(tempo: number, targetDurationMs?: number) {
 }
 
 export function isTransientDubbingError(error: unknown) {
-  if (error instanceof ProviderError) return error.status === 429 || error.status >= 500;
+  if (error instanceof ProviderError) {
+    const providerText = `${error.message} ${error.detail || ''}`;
+    if (/usage[_ -]?exceeded|insufficient[_ -]?quota|quota.{0,24}(exceed|exhaust|limit|empty)|(?:credit|credits).{0,24}(exhaust|used|limit|insufficient)|billing|monthly limit|plan limit/i.test(providerText)) return false;
+    return error.status === 429 || error.status >= 500;
+  }
   if (error instanceof TypeError) return true;
   if (error instanceof Error) return /timeout|timed out|network|fetch failed|socket|ECONN|ETIMEDOUT/i.test(error.message);
   return false;
@@ -232,7 +266,7 @@ export function isRewriteUnavailableError(error: unknown) {
 function sleep(ms: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
-    const abort = () => { clearTimeout(timer); reject(new Error('Dubbing job cancelled.')); };
+    const abort = () => { clearTimeout(timer); reject(new Error('Dubbing job đã được hủy.')); };
     if (signal.aborted) abort();
     else signal.addEventListener('abort', abort, { once: true });
   });
@@ -296,7 +330,7 @@ async function loadProvider(jobId: string, ref: string) {
 }
 
 export async function createDubbingJob(input: CreateJobInput) {
-  if (!input.cues?.length) throw new Error('No cues were supplied for the dubbing job.');
+  if (!input.cues?.length) throw new Error('Chưa có cue nào để tạo dubbing job.');
   const id = `dub-${Date.now()}-${createHash('sha1').update(`${Math.random()}-${Date.now()}`).digest('hex').slice(0, 8)}`;
   const rewriteProvider = input.rewrite?.provider;
   const rewriteModel = input.rewrite?.model?.trim();
@@ -468,7 +502,7 @@ class DubbingRunner {
         rewriteWarning = `Cue ${cue.index} could not use the configured provider for rewriting; speed will be capped at ${DEFAULTS.hardSpeedMax.toFixed(2)}x.`;
         break;
       }
-      if (!isUsefulDubbingRewrite(finalText, rewritten)) {
+      if (!isUsefulDubbingRewrite(finalText, rewritten, [cue.input.previousText || '', cue.input.nextText || ''])) {
         rewriteWarning = `Cue ${cue.index}: AI rewrite did not produce a shorter sentence; keeping the original text and capping speed at ${DEFAULTS.hardSpeedMax.toFixed(2)}x.`;
         break;
       }
@@ -513,7 +547,7 @@ class DubbingRunner {
 
   private async buildTimeline(cues: StoredCue[]) {
     const completed = cues.filter((cue) => cue.status === 'done' && cue.audioFile && cue.metadata);
-    if (completed.length !== this.job.totalCues) throw new Error('Cannot render the final timeline until every required cue is done.');
+    if (completed.length !== this.job.totalCues) throw new Error('Chưa thể dựng timeline cuối vì vẫn còn cue chưa hoàn tất.');
     await rm(timelineDir(this.job.id), { recursive: true, force: true });
     await mkdir(timelineDir(this.job.id), { recursive: true });
     const segments: string[] = [];
@@ -531,8 +565,7 @@ class DubbingRunner {
         args.push('-i', path.join(jobDir(this.job.id), cue.audioFile as string));
         filters.push(`[${index}:a]volume=${clamp(cue.input.volume ?? 1, 0, 2).toFixed(3)},adelay=${delay}|${delay}[a${index}]`);
       });
-      const mixed = batch.map((_cue, index) => `[a${index}]`).join('');
-      filters.push(`${mixed}amix=inputs=${batch.length}:duration=longest:dropout_transition=0,apad,atrim=duration=${(durationMs / 1000).toFixed(3)},asetpts=N/SR/TB[out]`);
+      filters.push(buildTimelineMixFilter(batch.length, durationMs));
       const output = path.join(timelineDir(this.job.id), `segment-${String(segments.length).padStart(5, '0')}.wav`);
       await run('ffmpeg', [...args, '-filter_complex', filters.join(';'), '-map', '[out]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', output], this.controller.signal);
       segments.push(output);
@@ -541,10 +574,34 @@ class DubbingRunner {
     await writeFile(listFile, segments.map((file) => `file '${file.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'), 'utf8');
     const finalPath = path.join(resultDir(this.job.id), 'dub-track.wav');
     await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', finalPath], this.controller.signal);
-    const durationMs = await probeDuration(finalPath);
+    let outputPath = finalPath;
+    if (this.job.config.audioMix.separateVocals) {
+      if (!this.job.videoId) throw new Error('Tách lời gốc cần video nguồn đã được upload trong Editor.');
+      const source = await resolveUpload(this.job.videoId);
+      const separationDir = path.join(jobDir(this.job.id), 'source-stems');
+      const sourceBase = path.parse(source.absolutePath).name;
+      const backgroundPath = path.join(separationDir, 'htdemucs', sourceBase, 'no_vocals.wav');
+      const mixedPath = path.join(resultDir(this.job.id), 'dub-track-mixed.wav');
+      const temporaryMixedPath = `${mixedPath}.${process.pid}.${Date.now()}.tmp.wav`;
+      await rm(separationDir, { recursive: true, force: true });
+      await mkdir(separationDir, { recursive: true });
+      try {
+        await run('py', ['-3.12', '-m', 'demucs', '--two-stems', 'vocals', '-n', 'htdemucs', '--out', separationDir, source.absolutePath], this.controller.signal);
+        await stat(backgroundPath);
+        const originalVolume = clamp(this.job.config.audioMix.originalVolume, 0, 1).toFixed(3);
+        await run('ffmpeg', ['-y', '-i', finalPath, '-i', backgroundPath, '-filter_complex', `[1:a]volume=${originalVolume}[background];[0:a]anull[dub];[dub][background]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[audioout]`, '-map', '[audioout]', '-ar', '48000', '-ac', '2', temporaryMixedPath], this.controller.signal);
+        await rm(mixedPath, { force: true });
+        await rename(temporaryMixedPath, mixedPath);
+        outputPath = mixedPath;
+      } finally {
+        await rm(separationDir, { recursive: true, force: true });
+        await rm(temporaryMixedPath, { force: true });
+      }
+    }
+    const durationMs = await probeDuration(outputPath);
     const metadata = completed.map((cue) => cue.metadata);
     await writeJsonAtomic(path.join(resultDir(this.job.id), 'metadata.json'), metadata);
-    return { audioFile: path.relative(jobDir(this.job.id), finalPath), metadataFile: path.relative(jobDir(this.job.id), path.join(resultDir(this.job.id), 'metadata.json')), durationMs };
+    return { audioFile: path.relative(jobDir(this.job.id), outputPath), metadataFile: path.relative(jobDir(this.job.id), path.join(resultDir(this.job.id), 'metadata.json')), durationMs };
   }
 
   private async run() {
@@ -552,7 +609,7 @@ class DubbingRunner {
       await this.recoverProcessing();
       await this.commit((job) => { job.status = 'running'; });
       while (true) {
-        if (this.cancelRequested) throw new Error('Dubbing job cancelled.');
+        if (this.cancelRequested) throw new Error('Dubbing job đã được hủy.');
         if (this.pauseRequested) { await this.commit((job) => { job.status = 'paused'; }); return; }
         const cues = await loadCues(this.job.id);
         const pending = cues.filter((cue) => cue.status === 'pending');
@@ -571,7 +628,7 @@ class DubbingRunner {
       }
     } catch (error) {
       if (this.cancelRequested || this.controller.signal.aborted) await this.commit((job) => { job.status = 'cancelled'; });
-      else await this.commit((job) => { job.status = 'failed'; job.warnings = [error instanceof Error ? error.message : 'Dubbing job failed.']; });
+      else await this.commit((job) => { job.status = 'failed'; job.warnings = [error instanceof Error ? error.message : 'Dubbing job thất bại.']; });
     } finally {
       this.active = false;
       this.onFinish();
@@ -608,7 +665,7 @@ export async function retryFailedDubbingJob(id: string) {
 
 export async function getDubbingResult(id: string) {
   const job = await readDubbingJob(id);
-  if (job.status !== 'completed' || !job.result) throw new Error('Dubbing job is not completed yet.');
+  if (job.status !== 'completed' || !job.result) throw new Error('Dubbing job chưa hoàn tất.');
   const metadata = await readJson<DubbingMetadata[]>(path.join(jobDir(id), job.result.metadataFile));
   return { job, metadata, audioFile: path.join(jobDir(id), job.result.audioFile) };
 }
@@ -624,10 +681,12 @@ export async function initializeDubbingJobs() {
   }
 }
 
-export async function openDubbingAudio(id: string) {
+export async function openDubbingAudio(id: string, range?: { start: number; end: number }) {
   const result = await getDubbingResult(id);
   const file = await stat(result.audioFile);
-  return { stream: createReadStream(result.audioFile), size: file.size };
+  const start = range?.start ?? 0;
+  const end = range?.end ?? Math.max(0, file.size - 1);
+  return { stream: createReadStream(result.audioFile, { start, end }), size: end - start + 1, totalSize: file.size, start, end };
 }
 
 export async function legacyTrackJob(input: CreateJobInput) {

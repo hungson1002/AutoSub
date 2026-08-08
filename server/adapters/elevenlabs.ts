@@ -1,6 +1,8 @@
-import type { AIModel, AIVoice, AIProvider, SubtitleSegment } from '../types';
+import type { AIModel, AIVoice, AIProvider, SubtitleSegment, SubtitleWord } from '../types';
+import { openAsBlob } from 'node:fs';
 import { buildAuthHeaders, endpoint, providerBase, withAuthQuery } from '../providers/base';
 import { providerResponseError, ProviderError } from './errors';
+import { normalizeSttLanguage } from './openaiCompatible';
 
 const headers = buildAuthHeaders;
 
@@ -58,14 +60,22 @@ export async function testConnection(provider: AIProvider) {
   return { ok: true };
 }
 
-export async function transcribe(provider: AIProvider, model: string, audio: Buffer, filename: string, language: string) {
+export async function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string) {
   const form = new FormData();
-  form.append('file', new Blob([audio]), filename);
+  const blob = typeof audio === 'string' ? await openAsBlob(audio, { type: 'audio/wav' }) : new Blob([audio]);
+  form.append('file', blob, filename);
   form.append('model_id', model);
-  if (language !== 'Auto Detect') form.append('language_code', language);
+  const languageCode = normalizeSttLanguage(language);
+  if (languageCode) form.append('language_code', languageCode);
   const response = await fetch(withAuthQuery(endpoint(provider, 'stt', '/speech-to-text'), provider), { method: 'POST', headers: headers(provider), body: form });
   const data = await responseJson(response, provider, 'ElevenLabs STT không phản hồi.');
-  return { text: typeof data.text === 'string' ? data.text : '', segments: (Array.isArray(data.segments) ? data.segments : []) as SubtitleSegment[] };
+  const text = typeof data.text === 'string' ? data.text : '';
+  const rawSegments = (Array.isArray(data.segments) ? data.segments : []) as SubtitleSegment[];
+  const rawWords = (Array.isArray(data.words) ? data.words : []) as SubtitleWord[];
+  const segments = rawSegments.length || !rawWords.length || !text
+    ? rawSegments
+    : [{ start: rawWords[0]?.start, end: rawWords.at(-1)?.end, text, words: rawWords }];
+  return { text, segments };
 }
 
 export async function synthesize(provider: AIProvider, model: string, voice: string, text: string, options: { signal?: AbortSignal }) {

@@ -5,6 +5,7 @@ export const providerTypeOptions: Array<[ProviderType, string]> = [
   ['openai-compatible', 'OpenAI-compatible'],
   ['groq', 'Groq'],
   ['elevenlabs', 'ElevenLabs'],
+  ['hiiu-tts', 'HiiuTTS'],
   ['vbee', 'Vbee'],
   ['custom', 'Custom'],
 ];
@@ -16,6 +17,7 @@ export function detectProviderType(baseUrl: string): DetectedProviderType | unde
   try { hostname = new URL(/^https?:\/\//i.test(baseUrl.trim()) ? baseUrl.trim() : `https://${baseUrl.trim()}`).hostname.toLowerCase(); } catch { return undefined; }
   if (hostname === 'api.groq.com') return 'groq';
   if (hostname === 'api.elevenlabs.io') return 'elevenlabs';
+  if (hostname === 'hiiu-tts.netlify.app') return 'hiiu-tts';
   return undefined;
 }
 
@@ -28,7 +30,7 @@ export function resolvedProviderType(provider: Pick<AIProvider, 'providerType' |
 }
 
 export function isPresetProvider(providerType: ProviderType) {
-  return providerType === 'groq' || providerType === 'elevenlabs';
+  return providerType === 'groq' || providerType === 'elevenlabs' || providerType === 'hiiu-tts';
 }
 
 export function hasKnownPreset(provider: Pick<AIProvider, 'providerType' | 'baseUrl'>) {
@@ -38,20 +40,23 @@ export function hasKnownPreset(provider: Pick<AIProvider, 'providerType' | 'base
 export function presetCapabilities(providerType: ProviderType): ProviderCapabilities {
   if (providerType === 'groq') return { chat: true, stt: true, tts: true };
   if (providerType === 'elevenlabs') return { stt: true, tts: true };
+  if (providerType === 'hiiu-tts') return { tts: true };
   return {};
 }
 
 export function presetAuthType(providerType: ProviderType): ProviderAuthType {
-  return providerType === 'elevenlabs' ? 'custom-header' : 'bearer';
+  return providerType === 'elevenlabs' ? 'custom-header' : providerType === 'hiiu-tts' ? 'none' : 'bearer';
 }
 
 export function presetAuth(providerType: ProviderType) {
   if (providerType === 'elevenlabs') return { authType: 'custom-header' as const, authHeaderName: 'xi-api-key', authPrefix: '' };
+  if (providerType === 'hiiu-tts') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
   return { authType: 'bearer' as const, authHeaderName: undefined, authPrefix: 'Bearer' };
 }
 
 export function presetEndpoints(providerType: ProviderType): ProviderEndpoints {
   if (providerType === 'elevenlabs') return { models: '/models', voices: '/voices', stt: '/speech-to-text', tts: '/text-to-speech/{voice_id}' };
+  if (providerType === 'hiiu-tts') return { models: '/tts/models', tts: '/audio/speech' };
   if (providerType === 'groq' || providerType === 'openai-compatible' || providerType === 'vbee') return { models: '/models', chat: '/chat/completions', stt: '/audio/transcriptions', tts: '/audio/speech' };
   return {};
 }
@@ -59,6 +64,7 @@ export function presetEndpoints(providerType: ProviderType): ProviderEndpoints {
 export function presetBaseUrl(providerType: ProviderType, current = '') {
   if (providerType === 'groq') return 'https://api.groq.com/openai/v1';
   if (providerType === 'elevenlabs') return 'https://api.elevenlabs.io/v1';
+  if (providerType === 'hiiu-tts') return 'https://hiiu-tts.netlify.app/v1';
   return current;
 }
 

@@ -1,7 +1,7 @@
 export type VoiceGroup = 'G1' | 'G2' | 'G3';
 export type Capability = 'translation' | 'vision' | 'stt' | 'tts';
 export type ProviderCapability = 'chat' | 'vision' | 'stt' | 'tts';
-export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'vbee' | 'custom';
+export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'hiiu-tts' | 'vbee' | 'custom';
 export type ProviderAuthType = 'bearer' | 'xi-api-key' | 'x-api-key' | 'api-key' | 'query-param' | 'none' | 'custom-header';
 export type ProviderCapabilities = Partial<Record<ProviderCapability, boolean>>;
 
@@ -25,6 +25,7 @@ export interface SubtitleCue {
   translatedText: string;
   voiceGroup: VoiceGroup;
   enabled: boolean;
+  words?: Array<{ word?: string; text?: string; start?: number; end?: number; startMs?: number; endMs?: number; probability?: number; confidence?: number }>;
   dubbing?: DubbingMetadata;
 }
 
@@ -54,7 +55,7 @@ export interface DubbingJobStatus {
   doneCues: number;
   failedCues: number;
   currentBatch: number;
-  config: { timingMode: 'natural' | 'strict'; batchSize: number; ttsConcurrency: number; llmConcurrency: number; maxRetries: number; audioMix: { keepOriginal: boolean; originalVolume: number }; rewriteProviderRef?: string; rewriteModel?: string };
+  config: { timingMode: 'natural' | 'strict'; batchSize: number; ttsConcurrency: number; llmConcurrency: number; maxRetries: number; audioMix: { keepOriginal: boolean; originalVolume: number; separateVocals?: boolean }; rewriteProviderRef?: string; rewriteModel?: string };
   providerInfo: Array<{ ref: string; providerId: string; name: string; baseUrl: string }>;
   warnings: string[];
   progressPercent: number;
@@ -84,6 +85,7 @@ export interface AIProvider {
   voices?: AIVoice[];
 }
 export interface ProviderAssignment { providerId: string; model: string; }
+export type CapabilityAssignments = Record<Capability, ProviderAssignment[]>;
 export type ModelTestStatus = 'unknown' | 'passed' | 'failed';
 export interface ModelPreference { bookmarked: boolean; status: ModelTestStatus; lastTestedAt?: number; error?: string; }
 export type ModelPreferences = Record<string, ModelPreference>;
@@ -108,6 +110,12 @@ export interface SubtitleStyle {
 
 export interface AppSettings {
   assignments: Record<Capability, ProviderAssignment>;
+  /**
+   * Provider/model choices available for each capability. `assignments` is
+   * kept as the default choice for backwards compatibility with old local
+   * settings.
+   */
+  providersByCapability: CapabilityAssignments;
   subtitleStyle: SubtitleStyle;
   workdir: string;
 }
@@ -123,13 +131,14 @@ export interface BlurRegion {
   wholeVideo: boolean;
   mode: 'blur' | 'neighbor';
   blurStrength: number;
+  borderRadius?: number;
   expandTop: number;
   expandBottom: number;
 }
 
 export interface GlossaryEntry { id: string; source: string; target: string; enabled: boolean; }
 export interface PronunciationEntry { id: string; source: string; reading: string; enabled: boolean; }
-export interface VideoAsset { name: string; path?: string; url: string; type: string; file?: File; durationMs?: number; }
+export interface VideoAsset { name: string; path?: string; url: string; type: string; file?: File; uploadId?: string; storedPath?: string; durationMs?: number; }
 export type LogoPosition = 'top-left' | 'top-center' | 'top-right' | 'middle-left' | 'center' | 'middle-right' | 'bottom-left' | 'bottom-center' | 'bottom-right' | 'custom';
 export interface LogoOverlay { name: string; url?: string; file?: File; enabled: boolean; kind: 'image' | 'text'; text: string; fontFamily: string; fontSize: number; textColor: string; outlineColor: string; position: LogoPosition; xPercent: number; yPercent: number; widthPercent: number; opacity: number; }
 
@@ -138,5 +147,6 @@ export const defaultStyle: SubtitleStyle = {
 };
 export const defaultSettings: AppSettings = {
   assignments: { translation: { providerId: '', model: '' }, vision: { providerId: '', model: '' }, stt: { providerId: '', model: '' }, tts: { providerId: '', model: '' } },
+  providersByCapability: { translation: [], vision: [], stt: [], tts: [] },
   subtitleStyle: defaultStyle, workdir: 'workdir',
 };

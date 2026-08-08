@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently \"vite\" \"tsx watch server/index.ts\"",
     "build": "tsc -b && vite build",
-    "test": "tsx --test server/services/dubbingJobs.test.ts src/lib/api.test.ts",
+    "test": "tsx --test server/adapters/openaiCompatible.test.ts server/services/dubbingJobs.test.ts server/services/uploads.test.ts server/services/subtitles.test.ts server/services/timestampRefinement.test.ts server/services/textAudioAlignment.test.ts server/routes/dubbing.test.ts server/routes/extraction.test.ts src/lib/api.test.ts src/lib/settings.test.ts",
     "start": "tsx server/index.ts",
     "server": "tsx server/index.ts"
   },

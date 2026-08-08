@@ -5,6 +5,7 @@ export function inferProviderType(baseUrl: string): Exclude<ProviderType, 'auto'
   try { hostname = new URL(/^https?:\/\//i.test(baseUrl.trim()) ? baseUrl.trim() : `https://${baseUrl.trim()}`).hostname.toLowerCase(); } catch { return 'openai-compatible'; }
   if (hostname === 'api.groq.com') return 'groq';
   if (hostname === 'api.elevenlabs.io') return 'elevenlabs';
+  if (hostname === 'hiiu-tts.netlify.app') return 'hiiu-tts';
   return 'openai-compatible';
 }
 
@@ -15,7 +16,7 @@ export function resolveProviderType(provider: Pick<AIProvider, 'providerType' | 
 export function buildAuthHeaders(provider: AIProvider): Record<string, string> {
   const apiKey = provider.apiKey?.trim();
   const providerType = resolveProviderType(provider);
-  const presetType: ProviderAuthType = providerType === 'elevenlabs' ? 'custom-header' : 'bearer';
+  const presetType: ProviderAuthType = providerType === 'elevenlabs' ? 'custom-header' : providerType === 'hiiu-tts' ? 'none' : 'bearer';
   const useOverride = provider.providerType === 'custom' || provider.overrideAuthentication === true;
   const type: ProviderAuthType = useOverride ? provider.authType || presetType : presetType;
   if (!apiKey || type === 'none' || type === 'query-param') return {};
@@ -44,7 +45,7 @@ export function providerBase(provider: AIProvider): string {
     const url = new URL(raw);
     const type = resolveProviderType(provider);
     if (type === 'openai-compatible' && (url.hostname === 'api.opencode.ai' || (url.hostname === 'opencode.ai' && !url.pathname.startsWith('/zen/')))) return 'https://opencode.ai/zen/v1';
-    const endpointSuffixes = ['/audio/speech', '/audio/transcriptions', '/audio/translations', '/chat/completions', '/text-to-speech', '/speech-to-text', '/models', '/voices'];
+    const endpointSuffixes = ['/audio/speech', '/audio/transcriptions', '/audio/translations', '/chat/completions', '/text-to-speech', '/speech-to-text', '/tts/models', '/models', '/voices'];
     const suffix = endpointSuffixes.find((item) => url.pathname.toLowerCase().endsWith(item));
     if (suffix) {
       url.pathname = url.pathname.slice(0, -suffix.length).replace(/\/+$/, '');
@@ -59,7 +60,9 @@ export function endpoint(provider: AIProvider, key: keyof NonNullable<AIProvider
   const canOverride = provider.providerType === 'custom' || provider.overrideEndpoints === true;
   const preset: Partial<Record<keyof NonNullable<AIProvider['endpoints']>, string>> = type === 'elevenlabs'
     ? { models: '/models', voices: '/voices', stt: '/speech-to-text', tts: '/text-to-speech/{voice_id}' }
-    : { models: '/models', chat: '/chat/completions', stt: '/audio/transcriptions', tts: '/audio/speech' };
+    : type === 'hiiu-tts'
+      ? { models: '/tts/models', tts: '/audio/speech' }
+      : { models: '/models', chat: '/chat/completions', stt: '/audio/transcriptions', tts: '/audio/speech' };
   const configured = canOverride ? provider.endpoints?.[key] : undefined;
   const target = configured || preset[key] || fallback;
   if (/^https?:\/\//i.test(target)) return target.replace(/\/+$/, '');

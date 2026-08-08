@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AIModel, AIProvider, Capability, ModelPreference, ModelPreferences, ProviderAssignment, ProviderCapability } from '../types';
-import { api } from '../lib/api';
+import { api, friendlyErrorMessage } from '../lib/api';
 import { storage } from '../lib/storage';
+import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
 import { Bookmark, Bot, BrainCircuit, Check, ChevronDown, CircleCheck, CirclePlay, CircleX, Cpu, LoaderCircle, Search, Sparkles } from './Icons';
 
 const preferenceKey = (providerId: string, modelId: string, capability: Capability) => `${providerId}::${capability}::${modelId}`;
@@ -50,6 +51,8 @@ export function ProviderSelector({ providers, value, onChange, label = 'Provider
   const enabledProviders = providers.filter((item) => item.enabled);
   const providerRef = useRef<HTMLDivElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
+  const providerDropdownId = useRef<DropdownId>({});
+  const modelDropdownId = useRef<DropdownId>({});
   const [providerOpen, setProviderOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [providerQuery, setProviderQuery] = useState('');
@@ -70,6 +73,8 @@ export function ProviderSelector({ providers, value, onChange, label = 'Provider
     window.addEventListener('autosub:model-preferences-changed', sync);
     return () => window.removeEventListener('autosub:model-preferences-changed', sync);
   }, []);
+  useEffect(() => listenForOtherDropdowns(providerDropdownId.current, () => setProviderOpen(false)), []);
+  useEffect(() => listenForOtherDropdowns(modelDropdownId.current, () => setModelOpen(false)), []);
 
   useEffect(() => {
     const close = (event: PointerEvent) => {
@@ -145,7 +150,7 @@ export function ProviderSelector({ providers, value, onChange, label = 'Provider
       updatePreference(model.id, { status: 'passed', lastTestedAt: Date.now(), error: undefined });
       onNotice?.(`${model.id} · ${capabilityName} hoạt động · ${result.latencyMs}ms`, 'success');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Test model thất bại.';
+      const message = friendlyErrorMessage(error, 'Test model thất bại.');
       updatePreference(model.id, { status: 'failed', lastTestedAt: Date.now(), error: message });
       onNotice?.(`${model.id} · ${capabilityName}: ${message}`, 'error');
     } finally {
@@ -159,6 +164,7 @@ export function ProviderSelector({ providers, value, onChange, label = 'Provider
       const hasPassed = provider.models.some((model) => readPreference(model.id).status === 'passed');
       setModelFilter(selectedPreference.status === 'failed' ? 'all' : hasPassed ? 'passed' : 'all');
     }
+    if (nextOpen) announceDropdownOpen(modelDropdownId.current);
     setModelOpen(nextOpen);
     setQuery('');
     setProviderOpen(false);
@@ -166,7 +172,7 @@ export function ProviderSelector({ providers, value, onChange, label = 'Provider
 
   return <div className="field-grid">
     <div className="field" ref={providerRef}><span>{label}</span><div className="provider-picker">
-      <button type="button" className={`provider-picker-trigger ${providerOpen ? 'open' : ''}`} disabled={!enabledProviders.length} onClick={() => { setProviderOpen((current) => !current); setProviderQuery(''); setModelOpen(false); }}><ProviderGlyph provider={provider} /><span className="provider-trigger-copy"><strong>{provider?.name || (enabledProviders.length ? 'Chọn provider' : 'Chưa có provider bật')}</strong>{provider && <small>{provider.baseUrl}</small>}</span><ChevronDown className="provider-chevron" size={16} /></button>
+      <button type="button" className={`provider-picker-trigger ${providerOpen ? 'open' : ''}`} disabled={!enabledProviders.length} onClick={() => { if (!providerOpen) announceDropdownOpen(providerDropdownId.current); setProviderOpen((current) => !current); setProviderQuery(''); setModelOpen(false); }}><ProviderGlyph provider={provider} /><span className="provider-trigger-copy"><strong>{provider?.name || (enabledProviders.length ? 'Chọn provider' : 'Chưa có provider bật')}</strong>{provider && <small>{provider.baseUrl}</small>}</span><ChevronDown className="provider-chevron" size={16} /></button>
       {providerOpen && <div className="provider-popover"><div className="provider-search"><Search size={15} /><input autoFocus value={providerQuery} onChange={(event) => setProviderQuery(event.target.value)} placeholder="Tìm provider…" /></div><div className="provider-option-list">{visibleProviders.map((item) => { const capabilityState = item.capabilities?.[providerCapability] === true ? 'ready' : item.capabilities?.[providerCapability] === false ? 'unsupported' : 'unknown'; const capabilityText = capabilityState === 'ready' ? 'Sẵn sàng' : capabilityState === 'unsupported' ? `Không hỗ trợ ${capabilityName}` : 'Chưa xác định'; return <button type="button" className={`provider-option ${item.id === value.providerId ? 'selected' : ''}`} key={item.id} onClick={() => selectProvider(item.id)}><ProviderGlyph provider={item} /><span className="provider-option-copy"><strong>{item.name}</strong><small>{item.baseUrl}</small></span><span className={`provider-capability-status ${capabilityState}`}>{capabilityText}</span><span className={`provider-enabled-dot ${capabilityState}`} />{item.id === value.providerId && <Check size={15} />}</button>; })}{!visibleProviders.length && <div className="provider-empty">Không tìm thấy provider bật.</div>}</div><div className="provider-popover-foot">Hiển thị mọi provider Enabled. “Chưa xác định” chỉ là trạng thái; provider vẫn có thể được chọn và test.</div></div>}
     </div></div>
     <div className="field" ref={modelRef}><span>Model <small>· test {capabilityName}</small></span><div className="model-picker">

@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
 import type { AIProvider } from '../types';
 import { ProviderError, synthesize } from '../adapters';
@@ -24,7 +25,7 @@ const errorPayload = (error: unknown, fallback: string) => ({
 
 const idFrom = (request: { params: unknown }) => (request.params as { id?: string }).id || '';
 
-async function sendRouteError(reply: { code: (status: number) => { type: (value: string) => { send: (value: unknown) => unknown } } }, error: unknown, fallback = 'Dubbing job request failed.') {
+async function sendRouteError(reply: { code: (status: number) => { type: (value: string) => { send: (value: unknown) => unknown } } }, error: unknown, fallback = 'Không thể xử lý yêu cầu dubbing.') {
   const status = error instanceof ProviderError ? error.status : error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT' ? 404 : 400;
   return reply.code(status).type('application/json').send(errorPayload(error, fallback));
 }
@@ -34,14 +35,14 @@ export async function dubbingRoutes(app: FastifyInstance) {
 
   app.post('/api/dubbing/test', async (request, reply) => {
     const body = request.body as { provider?: AIProvider; model?: string; voice?: string; speed?: number; text?: string };
-    if (!body.provider?.baseUrl || !body.model) return reply.code(400).type('application/json').send({ error: 'Test voice needs a provider and model ID.' });
-    if (!body.voice) return reply.code(400).type('application/json').send({ error: 'This TTS model requires a Voice ID.' });
+    if (!body.provider?.baseUrl || !body.model) return reply.code(400).type('application/json').send({ error: 'Test voice cần Provider và Model ID.' });
+    if (!body.voice && resolveProviderType(body.provider) !== 'hiiu-tts') return reply.code(400).type('application/json').send({ error: 'Model TTS này yêu cầu Voice ID.' });
     try {
-      const audio = await synthesize(body.provider, body.model, body.voice, body.text || 'This is an AutoSub voice test.', { speed: body.speed || 1, format: 'wav' });
+      const audio = await synthesize(body.provider, body.model, body.voice || '', body.text || 'This is an AutoSub voice test.', { speed: body.speed || 1, format: 'wav' });
       reply.header('Content-Type', resolveProviderType(body.provider) === 'elevenlabs' ? 'audio/mpeg' : 'audio/wav');
       return reply.send(audio);
     } catch (error) {
-      return reply.code(error instanceof ProviderError ? error.status : 502).type('application/json').send(errorPayload(error, 'Voice test failed.'));
+      return reply.code(error instanceof ProviderError ? error.status : 502).type('application/json').send(errorPayload(error, 'Không thể test voice.'));
     }
   });
 
@@ -49,54 +50,71 @@ export async function dubbingRoutes(app: FastifyInstance) {
     try {
       const job = await createDubbingJob(request.body as Parameters<typeof createDubbingJob>[0]);
       return reply.code(201).send({ jobId: job.id, status: job.status, totalCues: job.totalCues });
-    } catch (error) { return sendRouteError(reply, error, 'Could not create dubbing job.'); }
+    } catch (error) { return sendRouteError(reply, error, 'Không thể tạo dubbing job.'); }
   });
 
   app.post('/api/dubbing/jobs/:id/start', async (request, reply) => {
     try { return reply.send(await startDubbingJob(idFrom(request))); }
-    catch (error) { return sendRouteError(reply, error, 'Could not start dubbing job.'); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể bắt đầu dubbing job.'); }
   });
 
   app.get('/api/dubbing/jobs/:id/status', async (request, reply) => {
     try { return reply.send(await getDubbingJobStatus(idFrom(request))); }
-    catch (error) { return sendRouteError(reply, error, 'Could not read dubbing job status.'); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể đọc trạng thái dubbing job.'); }
   });
 
   app.post('/api/dubbing/jobs/:id/pause', async (request, reply) => {
     try { return reply.send(await pauseDubbingJob(idFrom(request))); }
-    catch (error) { return sendRouteError(reply, error, 'Could not pause dubbing job.'); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể tạm dừng dubbing job.'); }
   });
 
   app.post('/api/dubbing/jobs/:id/resume', async (request, reply) => {
     try { return reply.send(await resumeDubbingJob(idFrom(request))); }
-    catch (error) { return sendRouteError(reply, error, 'Could not resume dubbing job.'); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể tiếp tục dubbing job.'); }
   });
 
   app.post('/api/dubbing/jobs/:id/cancel', async (request, reply) => {
     try { return reply.send(await cancelDubbingJob(idFrom(request))); }
-    catch (error) { return sendRouteError(reply, error, 'Could not cancel dubbing job.'); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể hủy dubbing job.'); }
   });
 
   app.post('/api/dubbing/jobs/:id/retry-failed', async (request, reply) => {
     try { return reply.send(await retryFailedDubbingJob(idFrom(request))); }
-    catch (error) { return sendRouteError(reply, error, 'Could not retry failed cues.'); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể chạy lại các cue lỗi.'); }
   });
 
   app.get('/api/dubbing/jobs/:id/result', async (request, reply) => {
     try {
       const result = await getDubbingResult(idFrom(request));
       return reply.send({ job: result.job, metadata: result.metadata, audioUrl: `/api/dubbing/jobs/${encodeURIComponent(result.job.id)}/result/audio` });
-    } catch (error) { return sendRouteError(reply, error, 'Dubbing result is not ready.'); }
+    } catch (error) { return sendRouteError(reply, error, 'Bản kết quả dubbing chưa sẵn sàng.'); }
   });
 
   app.get('/api/dubbing/jobs/:id/result/audio', async (request, reply) => {
     try {
-      const audio = await openDubbingAudio(idFrom(request));
+      const rangeHeader = request.headers.range;
+      let range: { start: number; end: number } | undefined;
+      if (rangeHeader) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+        if (!match) return reply.code(416).header('Content-Range', 'bytes */0').send();
+        const start = match[1] ? Number(match[1]) : undefined;
+        const requestedEnd = match[2] ? Number(match[2]) : undefined;
+        const result = await getDubbingResult(idFrom(request));
+        const total = (await stat(result.audioFile)).size;
+        const actualStart = start ?? Math.max(0, total - (requestedEnd || 0));
+        const actualEnd = Math.min(total - 1, requestedEnd ?? total - 1);
+        if (!Number.isFinite(actualStart) || !Number.isFinite(actualEnd) || actualStart < 0 || actualStart > actualEnd || actualStart >= total) return reply.code(416).header('Content-Range', `bytes */${total}`).send();
+        range = { start: actualStart, end: actualEnd };
+      }
+      const audio = await openDubbingAudio(idFrom(request), range);
+      reply.code(range ? 206 : 200);
       reply.header('Content-Type', 'audio/wav');
       reply.header('Content-Length', String(audio.size));
+      reply.header('Accept-Ranges', 'bytes');
+      if (range) reply.header('Content-Range', `bytes ${audio.start}-${audio.end}/${audio.totalSize}`);
       reply.header('Content-Disposition', 'attachment; filename="autosub-dub-track.wav"');
       return reply.send(audio.stream);
-    } catch (error) { return sendRouteError(reply, error, 'Dubbing audio is not ready.'); }
+    } catch (error) { return sendRouteError(reply, error, 'Audio dubbing chưa sẵn sàng.'); }
   });
 
   // Compatibility entry point. It now creates and starts a job, but never
@@ -105,6 +123,6 @@ export async function dubbingRoutes(app: FastifyInstance) {
     try {
       const status = await legacyTrackJob(request.body as Parameters<typeof legacyTrackJob>[0]);
       return reply.code(202).send({ jobId: status.id, status });
-    } catch (error) { return sendRouteError(reply, error, 'Could not create dubbing job.'); }
+    } catch (error) { return sendRouteError(reply, error, 'Không thể tạo dubbing job.'); }
   });
 }

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AIProvider, AppSettings, BlurRegion, DubbingJobStatus, LogoOverlay, PronunciationEntry, ProviderAssignment, SubtitleCue, SubtitleStyle, VideoAsset, VoiceGroup } from '../types';
-import { api } from '../lib/api';
+import { api, friendlyErrorMessage } from '../lib/api';
 import { storage } from '../lib/storage';
-import { AudioLines, Captions, Download, Image as ImageIcon, Languages, Plus, Scissors, Settings2, Upload } from '../components/Icons';
+import { AudioLines, Captions, ChevronDown, Download, Image as ImageIcon, Languages, Plus, Scissors, Settings2, Upload } from '../components/Icons';
 import { VideoPlayer } from '../editor/VideoPlayer';
 import { SubtitleList } from '../editor/SubtitleList';
 import { SubtitleTimeline } from '../editor/SubtitleTimeline';
@@ -11,8 +11,12 @@ import { BlurEditor } from '../editor/BlurEditor';
 import { DubbingModal, type DubbingRunOptions, type VoiceConfig } from '../editor/DubbingModal';
 import { ExportModal } from '../editor/ExportModal';
 import { ProgressModal } from '../components/ProgressModal';
-import { cssOutlineShadow } from '../lib/subtitles';
+import { TranslationSetupModal, type TranslationSetup } from '../components/TranslationSetupModal';
+import { cuesToAss, cuesToSrt, cssOutlineShadow, downloadText, validateCues } from '../lib/subtitles';
+import { capabilityAssignments } from '../lib/settings';
 import { LogoModal } from '../editor/LogoModal';
+import { LatestUploadGuard } from '../lib/latestUpload';
+import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
 
 function applyPronunciation(text: string, entries: PronunciationEntry[]) {
   return entries.filter((entry) => entry.enabled && entry.source.trim()).reduce((value, entry) => value.split(entry.source).join(entry.reading), text);
@@ -25,6 +29,10 @@ function saveBlob(name: string, blob: Blob) {
   link.download = name;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function cps(text: string, durationMs: number) {
+  return text.replace(/\s/g, '').length / Math.max(durationMs / 1000, 0.001);
 }
 
 type EditorProps = {
@@ -41,6 +49,7 @@ type EditorProps = {
 export function EditorPage({ providers, settings, onSettingsChange, cues, onCuesChange, asset, onAssetChange, onNotice }: EditorProps) {
   const [selectedId, setSelectedId] = useState(cues[0]?.id);
   const [currentTime, setCurrentTime] = useState(0);
+  const [seekRequest, setSeekRequest] = useState<{ id: number; timeMs: number }>();
   const [panel, setPanel] = useState<'style' | 'none'>('none');
   const [blurOpen, setBlurOpen] = useState(false);
   const [blurEditMode, setBlurEditMode] = useState(false);
@@ -53,14 +62,59 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
   const [pronunciation, setPronunciation] = useState<PronunciationEntry[]>(storage.pronunciation);
   const [fontFile, setFontFile] = useState<File>();
   const [dubTrack, setDubTrack] = useState<Blob>();
+  const [dubAudioUrl, setDubAudioUrl] = useState<string>();
+  const [dubAudioMix, setDubAudioMix] = useState<{ keepOriginal: boolean; originalVolume: number; separateVocals?: boolean }>();
+  const [audioPreviewMode, setAudioPreviewMode] = useState<'original' | 'dubbed'>('original');
   const [dubbingJob, setDubbingJob] = useState<DubbingJobStatus>();
   const dubbingTerminalNoticeRef = useRef('');
   const [working, setWorking] = useState(false);
+  const [translationOpen, setTranslationOpen] = useState(false);
+  const [translationWorking, setTranslationWorking] = useState(false);
+  const [translationProgress, setTranslationProgress] = useState(0);
+  const [translationStage, setTranslationStage] = useState('Chuẩn bị dịch subtitle');
+  const [translationSetup, setTranslationSetup] = useState<TranslationSetup>(() => ({ providerId: settings.assignments.translation.providerId, model: settings.assignments.translation.model, mode: 'quality', style: 'Phổ thông', customPrompt: '', sourceLanguage: 'Auto Detect', targetLanguage: 'Tiếng Việt', glossary: storage.glossary() }));
+  const [uploadingVideo, setUploadingVideo] = useState(false);
+  const [subtitleDownloadOpen, setSubtitleDownloadOpen] = useState(false);
+  const subtitleDownloadRef = useRef<HTMLDivElement>(null);
+  const subtitleDownloadId = useRef<DropdownId>({});
   const controllerRef = useRef<AbortController | undefined>(undefined);
+  const translationControllerRef = useRef<AbortController | undefined>(undefined);
+  const translationProgressTimerRef = useRef<number | undefined>(undefined);
+  const seekRequestIdRef = useRef(0);
+  const uploadGuardRef = useRef(new LatestUploadGuard());
+  const assetRef = useRef(asset);
   const selected = cues.find((cue) => cue.id === selectedId);
+  const activeCueId = useMemo(() => cues.reduce<SubtitleCue | undefined>((active, cue) => {
+    if (!cue.enabled || currentTime < cue.startMs || currentTime >= cue.endMs) return active;
+    return !active || cue.startMs > active.startMs || (cue.startMs === active.startMs && cue.index > active.index) ? cue : active;
+  }, undefined)?.id, [cues, currentTime]);
+  const editorMetrics = useMemo(() => {
+    const enabled = cues.filter((cue) => cue.enabled);
+    const average = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+    const original = average(enabled.map((cue) => cps(cue.originalText, cue.endMs - cue.startMs)));
+    const translated = average(enabled.map((cue) => cps(cue.translatedText || cue.originalText, cue.endMs - cue.startMs)));
+    const groups = (['G1', 'G2', 'G3'] as const).map((group) => {
+      const groupCues = enabled.filter((cue) => cue.voiceGroup === group);
+      return { group, value: average(groupCues.map((cue) => cps(cue.translatedText || cue.originalText, cue.endMs - cue.startMs))) };
+    });
+    const standard = groups.reduce((best, current) => Math.abs(current.value - 18) < Math.abs(best.value - 18) ? current : best, groups[0] || { group: 'G1', value: 0 });
+    return { original, translated, groups, standard };
+  }, [cues]);
   const assignments = useMemo<Record<VoiceGroup, ProviderAssignment>>(() => ({ G1: settings.assignments.tts, G2: settings.assignments.tts, G3: settings.assignments.tts }), [settings.assignments.tts]);
 
   useEffect(() => { storage.savePronunciation(pronunciation); }, [pronunciation]);
+  useEffect(() => listenForOtherDropdowns(subtitleDownloadId.current, () => setSubtitleDownloadOpen(false)), []);
+  useEffect(() => {
+    const close = (event: globalThis.PointerEvent) => {
+      if (!subtitleDownloadRef.current?.contains(event.target as Node)) setSubtitleDownloadOpen(false);
+    };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, []);
+  useEffect(() => { assetRef.current = asset; }, [asset]);
+  useEffect(() => () => { uploadGuardRef.current.cancel(); translationControllerRef.current?.abort(); if (translationProgressTimerRef.current !== undefined) window.clearInterval(translationProgressTimerRef.current); }, []);
+  useEffect(() => { if (!translationSetup.model && settings.assignments.translation.model) setTranslationSetup((current) => ({ ...current, providerId: settings.assignments.translation.providerId, model: settings.assignments.translation.model })); }, [settings.assignments.translation.providerId, settings.assignments.translation.model, translationSetup.model]);
+  useEffect(() => { if ((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV) console.info(`[EDITOR STATE] ${JSON.stringify({ cueCount: cues.length, cues: cues.slice(0, 5).map((cue) => ({ text: cue.originalText, startMs: cue.startMs, endMs: cue.endMs })) })}`); }, [cues]);
   useEffect(() => { if (cues.length && !cues.some((cue) => cue.id === selectedId)) setSelectedId(cues[0]?.id); }, [cues, selectedId]);
   useEffect(() => {
     if (!dubbingJob || !['queued', 'running'].includes(dubbingJob.status)) return;
@@ -69,30 +123,57 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
       try {
         const next = await api.getDubbingJobStatus(dubbingJob.id);
         if (disposed) return;
-        setDubbingJob(next);
         if (['completed', 'completed_with_errors', 'cancelled', 'failed'].includes(next.status) && dubbingTerminalNoticeRef.current !== `${next.id}:${next.status}`) {
-          dubbingTerminalNoticeRef.current = `${next.id}:${next.status}`;
           if (next.status === 'completed') {
             const result = await api.getDubbingResult(next.id);
-            if (!disposed) {
-              const metadataById = new Map(result.metadata.map((item) => [item.cueId, item]));
-              onCuesChange(cues.map((cue) => metadataById.has(cue.id) ? { ...cue, dubbing: metadataById.get(cue.id) } : cue));
-              onNotice(`Dubbing hoàn tất ${next.doneCues}/${next.totalCues} cue. Dub track được lưu trên server theo job ${next.id}.`, 'success');
-            }
+            if (disposed) return;
+            dubbingTerminalNoticeRef.current = `${next.id}:${next.status}`;
+            const metadataById = new Map(result.metadata.map((item) => [item.cueId, item]));
+            setDubbingJob(next);
+            onCuesChange(cues.map((cue) => metadataById.has(cue.id) ? { ...cue, dubbing: metadataById.get(cue.id) } : cue));
+            setDubAudioUrl(result.audioUrl);
+            setDubAudioMix({ keepOriginal: next.config.audioMix.keepOriginal, originalVolume: next.config.audioMix.originalVolume, separateVocals: next.config.audioMix.separateVocals });
+            setAudioPreviewMode('dubbed');
+            onNotice(`Dubbing hoàn tất ${next.doneCues}/${next.totalCues} cue. Dub track được lưu trên server theo job ${next.id}.`, 'success');
           } else if (next.status === 'completed_with_errors') {
+            dubbingTerminalNoticeRef.current = `${next.id}:${next.status}`;
+            setDubbingJob(next);
             const firstFailure = next.failedCueErrors?.[0];
-            const detail = firstFailure ? ` Cue #${firstFailure.index}, bước ${firstFailure.stage}: ${firstFailure.error}` : '';
+            const detail = firstFailure ? ` Cue #${firstFailure.index}, bước ${firstFailure.stage}: ${friendlyErrorMessage(new Error(firstFailure.error), firstFailure.error)}` : '';
             onNotice(`Dubbing có ${next.failedCues} cue lỗi.${detail}`, 'error');
+          } else if (next.status === 'cancelled') {
+            dubbingTerminalNoticeRef.current = `${next.id}:${next.status}`;
+            setDubbingJob(next);
+            onNotice('Dubbing job đã được hủy.', 'success');
+          } else {
+            dubbingTerminalNoticeRef.current = `${next.id}:${next.status}`;
+            setDubbingJob(next);
+            onNotice(next.warnings.map((warning) => friendlyErrorMessage(new Error(warning), warning)).join(' ') || 'Dubbing job thất bại.', 'error');
           }
-          else if (next.status === 'cancelled') onNotice('Dubbing job đã được hủy.', 'success');
-          else onNotice(next.warnings.join(' ') || 'Dubbing job thất bại.', 'error');
+        } else {
+          setDubbingJob(next);
         }
-      } catch (error) { if (!disposed) onNotice(error instanceof Error ? error.message : 'Không thể đọc trạng thái dubbing job.', 'error'); }
+      } catch (error) { if (!disposed) onNotice(friendlyErrorMessage(error, 'Không thể đọc trạng thái dubbing job.'), 'error'); }
     };
     void poll();
     const timer = window.setInterval(() => void poll(), 1000);
     return () => { disposed = true; window.clearInterval(timer); };
   }, [dubbingJob?.id, dubbingJob?.status, cues, onCuesChange, onNotice]);
+  useEffect(() => {
+    if (!dubbingJob || dubbingJob.status !== 'completed' || dubAudioUrl) return;
+    let disposed = false;
+    void api.getDubbingResult(dubbingJob.id).then((result) => {
+      if (disposed) return;
+      const metadataById = new Map(result.metadata.map((item) => [item.cueId, item]));
+      onCuesChange(cues.map((cue) => metadataById.has(cue.id) ? { ...cue, dubbing: metadataById.get(cue.id) } : cue));
+      setDubAudioUrl(result.audioUrl);
+      setDubAudioMix({ keepOriginal: dubbingJob.config.audioMix.keepOriginal, originalVolume: dubbingJob.config.audioMix.originalVolume, separateVocals: dubbingJob.config.audioMix.separateVocals });
+      setAudioPreviewMode('dubbed');
+    }).catch((error) => {
+      if (!disposed) onNotice(friendlyErrorMessage(error, 'Không thể tải bản preview dubbing.'), 'error');
+    });
+    return () => { disposed = true; };
+  }, [dubbingJob?.id, dubbingJob?.status, dubAudioUrl, cues, onCuesChange, onNotice]);
 
   const dubbingJobAction = async (action: 'pause' | 'resume' | 'cancel' | 'retry-failed') => {
     if (!dubbingJob) return;
@@ -100,37 +181,116 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
       const next = action === 'pause' ? await api.pauseDubbingJob(dubbingJob.id) : action === 'resume' ? await api.resumeDubbingJob(dubbingJob.id) : action === 'cancel' ? await api.cancelDubbingJob(dubbingJob.id) : await api.retryFailedDubbingJob(dubbingJob.id);
       setDubbingJob(next);
       if (action === 'retry-failed') dubbingTerminalNoticeRef.current = '';
-    } catch (error) { onNotice(error instanceof Error ? error.message : 'Không thể điều khiển dubbing job.', 'error'); }
+    } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể điều khiển dubbing job.'), 'error'); }
   };
 
-  const changeCue = (id: string, patch: Partial<SubtitleCue>) => onCuesChange(cues.map((cue) => {
+  const changeCue = useCallback((id: string, patch: Partial<SubtitleCue>) => onCuesChange(cues.map((cue) => {
     if (cue.id !== id) return cue;
     const next = { ...cue, ...patch };
     if (patch.startMs !== undefined) next.startMs = Math.max(0, Math.min(next.endMs - 1, patch.startMs));
     if (patch.endMs !== undefined) next.endMs = Math.max(next.startMs + 1, patch.endMs);
     return next;
-  }));
+  })), [cues, onCuesChange]);
 
-  const selectCue = (id: string) => { setSelectedId(id); const cue = cues.find((item) => item.id === id); if (cue) setCurrentTime(cue.startMs); };
-  const deleteCue = (id: string) => { const next = cues.filter((cue) => cue.id !== id).map((cue, index) => ({ ...cue, index: index + 1 })); onCuesChange(next); if (selectedId === id) setSelectedId(next[0]?.id); };
-  const addCue = () => { const last = cues.at(-1); const next: SubtitleCue = { id: crypto.randomUUID(), index: cues.length + 1, startMs: last?.endMs || 0, endMs: (last?.endMs || 0) + 2500, originalText: '', translatedText: '', voiceGroup: 'G1', enabled: true }; onCuesChange([...cues, next]); setSelectedId(next.id); };
-  const selectVideo = (file?: File) => { if (!file) return; onAssetChange({ name: file.name, file, url: URL.createObjectURL(file), type: file.type }); onNotice(`Đã gắn video ${file.name}.`, 'success'); };
+  const selectCue = useCallback((id: string) => { setSelectedId(id); const cue = cues.find((item) => item.id === id); if (cue) { setCurrentTime(cue.startMs); setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: cue.startMs }); } }, [cues]);
+  const deleteCue = useCallback((id: string) => { const next = cues.filter((cue) => cue.id !== id).map((cue, index) => ({ ...cue, index: index + 1 })); onCuesChange(next); if (selectedId === id) setSelectedId(next[0]?.id); }, [cues, onCuesChange, selectedId]);
+  const addCue = useCallback(() => { const last = cues.at(-1); const next: SubtitleCue = { id: crypto.randomUUID(), index: cues.length + 1, startMs: last?.endMs || 0, endMs: (last?.endMs || 0) + 2500, originalText: '', translatedText: '', voiceGroup: 'G1', enabled: true }; onCuesChange([...cues, next]); setSelectedId(next.id); }, [cues, onCuesChange]);
+  const selectVideo = (file?: File) => {
+    if (!file) return;
+    const previousAsset = assetRef.current;
+    uploadGuardRef.current.cancel();
+    if (previousAsset?.uploadId) void api.deleteUpload(previousAsset.uploadId).catch(() => undefined);
+    if (previousAsset?.url.startsWith('blob:')) URL.revokeObjectURL(previousAsset.url);
+    setDubAudioUrl(undefined);
+    setDubAudioMix(undefined);
+    setAudioPreviewMode('original');
+    const nextAsset: VideoAsset = { name: file.name, file, url: URL.createObjectURL(file), type: file.type };
+    const request = uploadGuardRef.current.begin();
+    assetRef.current = nextAsset;
+    onAssetChange(nextAsset);
+    setUploadingVideo(true);
+    onNotice(`Đang lưu video ${file.name} trên máy…`, 'success');
+    void api.uploadMedia(file, request.controller.signal).then((stored) => {
+      if (!uploadGuardRef.current.isCurrent(request)) {
+        void api.deleteUpload(stored.uploadId).catch(() => undefined);
+        return;
+      }
+      const uploadedAsset = { ...nextAsset, uploadId: stored.uploadId, storedPath: stored.storedPath, path: stored.storedPath };
+      assetRef.current = uploadedAsset;
+      onAssetChange(uploadedAsset);
+      onNotice(`Đã lưu video ${file.name} trên máy.`, 'success');
+    }).catch((error) => {
+      if (!uploadGuardRef.current.isCurrent(request)) return;
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      onNotice(friendlyErrorMessage(error, 'Không thể lưu video trên máy.'), 'error');
+    }).finally(() => {
+      if (uploadGuardRef.current.complete(request)) setUploadingVideo(false);
+    });
+  };
 
-  const translateAll = async () => {
-    const assignment = settings.assignments.translation;
+  const clearTranslationProgressTimer = () => {
+    if (translationProgressTimerRef.current !== undefined) {
+      window.clearInterval(translationProgressTimerRef.current);
+      translationProgressTimerRef.current = undefined;
+    }
+  };
+
+  const easeTranslationProgressTo = (ceiling: number) => {
+    clearTranslationProgressTimer();
+    translationProgressTimerRef.current = window.setInterval(() => {
+      setTranslationProgress((current) => {
+        if (current >= ceiling - 0.2) return current;
+        return Math.min(ceiling, current + Math.max(0.12, (ceiling - current) * 0.045));
+      });
+    }, 120);
+  };
+
+  const translateAll = async (setup: TranslationSetup) => {
+    const assignment = { providerId: setup.providerId, model: setup.model };
     const provider = providers.find((item) => item.id === assignment.providerId);
-    if (!provider || !assignment.model) { onNotice('Chưa có Translation Provider + Model.', 'error'); return; }
+    if (!provider || !setup.model) { onNotice('Chưa có Translation Provider + Model.', 'error'); return; }
+    if (!cues.length) { onNotice('Chưa có cue để dịch.', 'error'); return; }
+    const tested = storage.modelPreferences()[`${provider.id}::translation::${setup.model}`];
+    if (tested?.status === 'failed') { onNotice(`Model ${setup.model} không chạy được Translation.`, 'error'); return; }
+    storage.saveGlossary(setup.glossary);
     const controller = new AbortController();
-    controllerRef.current = controller;
-    setWorking(true);
+    translationControllerRef.current = controller;
+    setTranslationOpen(false);
+    setTranslationWorking(true);
+    setTranslationProgress(2);
+    setTranslationStage('Đang chuẩn bị dữ liệu dịch');
     try {
-      const result = await api.translate(provider, assignment.model, cues, 'Auto Detect', 'Tiếng Việt', 'Tự nhiên', '', [], controller.signal);
-      onCuesChange(cues.map((cue) => ({ ...cue, translatedText: result.items.find((item) => item.id === cue.id)?.translation || cue.translatedText })));
-      onNotice('Đã dịch lại toàn bộ cue.', 'success');
+      const next = [...cues];
+      const batchSize = setup.mode === 'quality' ? 8 : 16;
+      const totalBatches = Math.ceil(cues.length / batchSize);
+      for (let start = 0; start < cues.length; start += batchSize) {
+        const batch = cues.slice(start, start + batchSize);
+        const batchNumber = Math.floor(start / batchSize) + 1;
+        const target = Math.min(94, Math.max(8, ((start + batch.length * 0.88) / cues.length) * 100));
+        setTranslationStage(`Đang gửi batch ${batchNumber}/${totalBatches} · cue ${start + 1}–${start + batch.length}`);
+        easeTranslationProgressTo(target);
+        const result = await api.translate(provider, setup.model, batch, setup.sourceLanguage, setup.targetLanguage, setup.style, setup.customPrompt, setup.glossary.filter((entry) => entry.enabled), controller.signal);
+        clearTranslationProgressTimer();
+        for (const item of result.items) {
+          const cue = next.find((candidate) => candidate.id === item.id);
+          if (cue) cue.translatedText = item.translation;
+        }
+        const completed = Math.min(98, ((start + batch.length) / cues.length) * 100);
+        setTranslationProgress(completed);
+        setTranslationStage(`Đã nhận batch ${batchNumber}/${totalBatches} · đang lưu kết quả`);
+        onCuesChange([...next]);
+      }
+      setTranslationProgress(100);
+      setTranslationStage('Đã hoàn tất dịch toàn bộ subtitle');
+      onNotice(`Đã dịch lại ${next.filter((cue) => cue.translatedText.trim()).length}/${next.length} cue.`, 'success');
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') onNotice('Đã hủy xử lý trong Editor.', 'success');
-      else onNotice(error instanceof Error ? error.message : 'Dịch thất bại.', 'error');
-    } finally { controllerRef.current = undefined; setWorking(false); }
+      if (error instanceof DOMException && error.name === 'AbortError') { setTranslationStage('Đã hủy dịch subtitle'); onNotice('Đã hủy xử lý trong Editor.', 'success'); }
+      else { setTranslationStage('Dịch thất bại'); onNotice(friendlyErrorMessage(error, 'Dịch thất bại.'), 'error'); }
+    } finally {
+      clearTranslationProgressTimer();
+      translationControllerRef.current = undefined;
+      window.setTimeout(() => setTranslationWorking(false), 450);
+    }
   };
 
   const runDubbing = async (configs: Record<VoiceGroup, VoiceConfig>) => {
@@ -157,7 +317,7 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
       onNotice(warningText ? `Đã tạo dub-track.wav. ${warningText}` : 'Đã tạo dub-track.wav và căn audio theo timestamp.', hasHardWarning ? 'error' : 'success');
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') onNotice('Đã hủy tạo dub track.', 'success');
-      else onNotice(error instanceof Error ? error.message : 'Tạo dub track thất bại.', 'error');
+      else onNotice(friendlyErrorMessage(error, 'Tạo dub track thất bại.'), 'error');
     } finally { controllerRef.current = undefined; setWorking(false); }
   };
 
@@ -172,33 +332,43 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     const invalid = entries.find((entry) => !entry.provider || !entry.provider.baseUrl || !entry.model || !entry.voice || !entry.text);
     if (duplicateIds.length) { onNotice(`Dubbing không thể bắt đầu: cue ID bị trùng (${duplicateIds[0]?.id || 'không xác định'}).`, 'error'); return; }
     if (invalid) { onNotice(`Dubbing không thể bắt đầu: cue ${invalid.index ?? invalid.id} thiếu Provider, Model, Voice ID hoặc nội dung đọc.`, 'error'); return; }
-    const rewriteAssignment = settings.assignments.translation;
-    const rewriteProvider = providers.find((provider) => provider.id === rewriteAssignment.providerId);
-    const rewrite = rewriteProvider && rewriteAssignment.model
-      ? { provider: rewriteProvider, model: rewriteAssignment.model }
-      : undefined;
     try {
-      const created = await api.createDubbingJob(entries as Array<{ id: string; index?: number; startMs: number; endMs: number; originalText: string; translatedText: string; text: string; previousText: string; nextText: string; provider: AIProvider; model: string; voice: string; speed: number; volume: number }>, { timingMode: 'natural', batchSize: 30, ttsConcurrency: 3, llmConcurrency: 2, maxRetries: 3, audioMix: options.audioMix, ...(rewrite ? { rewrite } : {}) });
+      setDubAudioUrl(undefined);
+      setDubAudioMix(undefined);
+      setAudioPreviewMode('original');
+      const created = await api.createDubbingJob(entries as Array<{ id: string; index?: number; startMs: number; endMs: number; originalText: string; translatedText: string; text: string; previousText: string; nextText: string; provider: AIProvider; model: string; voice: string; speed: number; volume: number }>, { videoId: asset?.uploadId, timingMode: 'natural', batchSize: 30, ttsConcurrency: 3, llmConcurrency: 2, maxRetries: 3, audioMix: options.audioMix });
       const status = await api.startDubbingJob(created.jobId);
       dubbingTerminalNoticeRef.current = '';
       setDubbingJob(status);
       onNotice(`Đã tạo dubbing job ${created.jobId}. Có thể đóng popup; job vẫn chạy và tự resume sau khi khởi động lại server.`, 'success');
-    } catch (error) { onNotice(error instanceof Error ? error.message : 'Không thể tạo dubbing job.', 'error'); }
+    } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo dubbing job.'), 'error'); }
   };
 
   const styleChange = (patch: Partial<SubtitleStyle>) => onSettingsChange({ ...settings, subtitleStyle: { ...settings.subtitleStyle, ...patch } });
+  const downloadSubtitle = (format: 'translated' | 'original' | 'ass') => {
+    const validation = validateCues(cues);
+    if (!validation.valid) { onNotice(validation.errors[0] || 'Subtitle không hợp lệ.', 'error'); return; }
+    if (format === 'ass') downloadText('autosub.ass', cuesToAss(cues, settings.subtitleStyle), 'text/x-ass');
+    else downloadText(`autosub-${format}.srt`, cuesToSrt(cues, format === 'translated'), 'application/x-subrip');
+    setSubtitleDownloadOpen(false);
+    onNotice(`Đã tải ${format === 'ass' ? 'ASS styled' : format === 'translated' ? 'SRT bản dịch' : 'SRT bản gốc'}.`, 'success');
+  };
   const previewLogoChange = (patch: Partial<LogoOverlay>) => setLogoPreview((current) => current ? { ...current, ...patch } : current);
   const closeLogoEditor = () => { if (logoPreview?.url && logoPreview.url !== logo?.url && logoPreview.url.startsWith('blob:')) URL.revokeObjectURL(logoPreview.url); setLogoPreview(logo); setLogoOpen(false); };
 
   return <div className="page editor-page">
-    <header className="editor-header"><div><div className="eyebrow">EDITOR / MASTER SEQUENCE</div><h1>Lồng tiếng <span>video</span></h1><p>{cues.length ? `${cues.length} cue đang mở · autosave local` : 'Mở một subtitle sequence để bắt đầu dựng.'}</p></div><label className="button ghost file-button"><Upload size={15} /> {asset ? 'Thay video' : 'Thêm video'}<input type="file" accept="video/*" onChange={(event) => selectVideo(event.target.files?.[0])} /></label></header>
-    <div className="editor-toolbar"><button onClick={() => void translateAll()}><Languages size={15} /> Dịch bằng AI</button><button className={blurEditMode ? 'active' : ''} onClick={() => { setBlurEditMode(true); setBlurOpen(true); }}><Scissors size={15} /> Làm mờ</button><button className={logoOpen ? 'active' : ''} onClick={() => { if (logoOpen) closeLogoEditor(); else { setPanel('none'); setLogoPreview(logo ? { ...logo } : undefined); setLogoOpen(true); } }}><ImageIcon size={15} /> Logo</button><button className={panel === 'style' ? 'active' : ''} onClick={() => { if (logoOpen) closeLogoEditor(); setPanel(panel === 'style' ? 'none' : 'style'); }}><Captions size={15} /> Phụ đề</button><button onClick={() => setDubbingOpen(true)}><AudioLines size={15} /> Lồng tiếng</button><button className="toolbar-export" onClick={() => setExportOpen(true)}><Download size={15} /> Xuất file</button></div>
+    <header className="editor-header"><div><div className="eyebrow">EDITOR / MASTER SEQUENCE</div><h1>Lồng tiếng <span>video</span></h1><p>{cues.length ? `${cues.length} cue đang mở · autosave local` : 'Mở một subtitle sequence để bắt đầu dựng.'}</p></div><label className="button ghost file-button"><Upload size={15} /> {uploadingVideo ? 'Đang lưu…' : asset ? 'Thay video' : 'Thêm video'}<input type="file" accept="video/*" onChange={(event) => selectVideo(event.target.files?.[0])} /></label></header>
+    <div className="editor-toolbar"><button onClick={() => setTranslationOpen(true)} disabled={translationWorking}><Languages size={15} /> Dịch bằng AI</button><button className={blurEditMode ? 'active' : ''} onClick={() => { setBlurEditMode(true); setBlurOpen(true); }}><Scissors size={15} /> Làm mờ</button><button className={logoOpen ? 'active' : ''} onClick={() => { if (logoOpen) closeLogoEditor(); else { setPanel('none'); setLogoPreview(logo ? { ...logo } : undefined); setLogoOpen(true); } }}><ImageIcon size={15} /> Logo</button><button className={panel === 'style' ? 'active' : ''} onClick={() => { if (logoOpen) closeLogoEditor(); setPanel(panel === 'style' ? 'none' : 'style'); }}><Captions size={15} /> Phụ đề</button><button onClick={() => setDubbingOpen(true)}><AudioLines size={15} /> Lồng tiếng</button><button className="toolbar-export" onClick={() => setExportOpen(true)}><Download size={15} /> Xuất file</button></div>
+    <div className="subtitle-download-bar"><span><Download size={14} /> Tải phụ đề</span><div className="subtitle-download-control" ref={subtitleDownloadRef}><button type="button" className="button small ghost" onClick={() => { if (!subtitleDownloadOpen) announceDropdownOpen(subtitleDownloadId.current); setSubtitleDownloadOpen((value) => !value); }}><span>Chọn định dạng</span><ChevronDown size={14} className={subtitleDownloadOpen ? 'rotated' : ''} /></button>{subtitleDownloadOpen && <div className="subtitle-download-menu"><button type="button" onClick={() => downloadSubtitle('translated')}><span>SRT bản dịch</span><small>.srt</small></button><button type="button" onClick={() => downloadSubtitle('original')}><span>SRT bản gốc</span><small>.srt</small></button><button type="button" onClick={() => downloadSubtitle('ass')}><span>ASS styled</span><small>.ass</small></button></div>}</div></div>
+    <div className="preview-audio-bar"><div><span>PREVIEW AUDIO</span><small>{audioPreviewMode === 'dubbed' && dubAudioUrl ? 'Đang xem bản lồng tiếng' : 'Đang xem video gốc'}</small></div><div className="preview-audio-switch"><button type="button" className={audioPreviewMode === 'original' ? 'active' : ''} onClick={() => setAudioPreviewMode('original')}>Video gốc</button><button type="button" className={audioPreviewMode === 'dubbed' ? 'active' : ''} disabled={!dubAudioUrl} onClick={() => setAudioPreviewMode('dubbed')}>Dub preview {!dubAudioUrl && <small>chưa có</small>}</button></div></div>
     {blurEditMode && <div className="editor-mode-banner"><Scissors size={14} /> Kéo trực tiếp các vùng blur trên video. Bấm Làm mờ lần nữa để mở bảng điều khiển.</div>}
-    <section className="editor-main"><div className="editor-left"><VideoPlayer asset={asset} cues={cues} style={settings.subtitleStyle} blurRegions={blurRegions} logo={logoOpen ? logoPreview : logo} currentTimeMs={currentTime} onTime={setCurrentTime} onStyleChange={styleChange} onLogoChange={previewLogoChange} onBlurRegionsChange={setBlurRegions} blurEditMode={blurEditMode} /><SubtitleTimeline cues={cues} currentTime={currentTime} selectedId={selectedId} onSelect={selectCue} /><div className="editor-footnote"><span><i className="status-dot" /> Autosave local</span><small>SubtitleCue[] là source of truth · {cues.filter((cue) => cue.translatedText).length}/{cues.length} bản dịch</small></div></div><div className="editor-right"><div className="list-heading"><div><span>SUBTITLE LIST</span><b>{cues.length}</b></div><button className="icon-button" onClick={addCue} aria-label="Thêm cue"><Plus size={16} /></button></div><SubtitleList cues={cues} selectedId={selectedId} onSelect={selectCue} onChange={changeCue} onDelete={deleteCue} /></div>{panel === 'style' && <aside className="floating-panel style-floating-panel"><div className="floating-head"><span><Settings2 size={15} /> SUBTITLE STYLE</span><button className="icon-button" onClick={() => setPanel('none')}><span aria-hidden="true">×</span></button></div><SubtitleStylePanel style={settings.subtitleStyle} onChange={styleChange} onFontUpload={setFontFile} /><div className="style-preview"><span>PREVIEW</span><div style={{ color: settings.subtitleStyle.textColor, fontFamily: settings.subtitleStyle.fontFamily, fontSize: `${Math.max(settings.subtitleStyle.fontSize * 0.45, 12)}px`, fontWeight: settings.subtitleStyle.bold ? 700 : 400, fontStyle: settings.subtitleStyle.italic ? 'italic' : 'normal', textShadow: settings.subtitleStyle.background === 'outline' ? cssOutlineShadow(settings.subtitleStyle.outlineColor, settings.subtitleStyle.outlineWidth ?? 2) : 'none', background: settings.subtitleStyle.background === 'box' ? `${settings.subtitleStyle.backgroundColor ?? settings.subtitleStyle.outlineColor}${Math.round(settings.subtitleStyle.backgroundOpacity * 255).toString(16).padStart(2, '0')}` : 'transparent' }}>{selected?.translatedText || selected?.originalText || 'Bản dịch preview'}</div></div></aside>}</section>
+    <section className="editor-main"><div className="editor-left"><VideoPlayer asset={asset} cues={cues} style={settings.subtitleStyle} blurRegions={blurRegions} logo={logoOpen ? logoPreview : logo} currentTimeMs={currentTime} dubAudioUrl={dubAudioUrl} audioMode={audioPreviewMode} dubAudioMix={dubAudioMix} seekRequest={seekRequest} onTime={setCurrentTime} onStyleChange={styleChange} onLogoChange={previewLogoChange} onBlurRegionsChange={setBlurRegions} blurEditMode={blurEditMode} /><SubtitleTimeline cues={cues} currentTime={currentTime} selectedId={selectedId} onSelect={selectCue} /><div className="editor-footnote"><span><i className="status-dot" /> Autosave local</span><small>SubtitleCue[] là source of truth · {cues.filter((cue) => cue.translatedText).length}/{cues.length} bản dịch</small></div></div><div className="editor-right"><div className="editor-metrics"><div className="editor-metric"><span>TỐC ĐỘ</span><strong>Gốc: <b>{editorMetrics.original.toFixed(1)}</b> c/s · Dịch: <b>{editorMetrics.translated.toFixed(1)}</b> c/s</strong><small>TB tốc độ thoại theo cue</small></div><div className="editor-metric"><span>CPS CHUẨN</span><strong>G1: <b>{editorMetrics.groups[0]?.value.toFixed(1)}</b> · G2: <b>{editorMetrics.groups[1]?.value.toFixed(1)}</b> · G3: <b>{editorMetrics.groups[2]?.value.toFixed(1)}</b></strong><small>Chuẩn: {editorMetrics.standard.group} · {editorMetrics.standard.value.toFixed(1)} c/s</small></div></div><div className="list-heading"><div><span>SUBTITLE LIST</span><b>{cues.length}</b></div><button className="icon-button" onClick={addCue} aria-label="Thêm cue"><Plus size={16} /></button></div><SubtitleList cues={cues} activeCueId={activeCueId} selectedId={selectedId} onSelect={selectCue} onChange={changeCue} onDelete={deleteCue} /></div>{panel === 'style' && <aside className="floating-panel style-floating-panel"><div className="floating-head"><span><Settings2 size={15} /> SUBTITLE STYLE</span><button className="icon-button" onClick={() => setPanel('none')}><span aria-hidden="true">×</span></button></div><SubtitleStylePanel style={settings.subtitleStyle} onChange={styleChange} onFontUpload={setFontFile} /><div className="style-preview"><span>PREVIEW</span><div style={{ color: settings.subtitleStyle.textColor, fontFamily: settings.subtitleStyle.fontFamily, fontSize: `${Math.max(settings.subtitleStyle.fontSize * 0.45, 12)}px`, fontWeight: settings.subtitleStyle.bold ? 700 : 400, fontStyle: settings.subtitleStyle.italic ? 'italic' : 'normal', textShadow: settings.subtitleStyle.background === 'outline' ? cssOutlineShadow(settings.subtitleStyle.outlineColor, settings.subtitleStyle.outlineWidth ?? 2) : 'none', background: settings.subtitleStyle.background === 'box' ? `${settings.subtitleStyle.backgroundColor ?? settings.subtitleStyle.outlineColor}${Math.round(settings.subtitleStyle.backgroundOpacity * 255).toString(16).padStart(2, '0')}` : 'transparent' }}>{selected?.translatedText || selected?.originalText || 'Bản dịch preview'}</div></div></aside>}</section>
     <BlurEditor open={blurOpen} regions={blurRegions} asset={asset} currentTimeMs={currentTime} onClose={() => setBlurOpen(false)} onChange={setBlurRegions} />
+    <TranslationSetupModal open={translationOpen} provider={providers.find((item) => item.id === translationSetup.providerId)} providers={providers} assignments={capabilityAssignments(settings, 'translation')} cues={cues} setup={translationSetup} onChange={(patch) => setTranslationSetup((current) => ({ ...current, ...patch }))} onClose={() => setTranslationOpen(false)} onStart={(setup) => void translateAll(setup)} />
     <LogoModal open={logoOpen} logo={logo} externalPosition={logoPreview} onClose={() => setLogoOpen(false)} onPreviewChange={setLogoPreview} onChange={(next) => { if (logo?.url && logo.url !== next.url && logo.url.startsWith('blob:')) URL.revokeObjectURL(logo.url); setLogo(next); setLogoPreview(next); onNotice('Đã cập nhật logo/watermark.', 'success'); }} />
-    <DubbingModal open={dubbingOpen} providers={providers} assignments={assignments} cues={cues} pronunciation={pronunciation} job={dubbingJob} onJobAction={(action) => void dubbingJobAction(action)} onClose={() => setDubbingOpen(false)} onPronunciationChange={setPronunciation} onNotice={onNotice} onRun={(configs, options) => void runDubbingJob(configs, options)} />
+    <DubbingModal open={dubbingOpen} providers={providers} assignments={assignments} availableAssignments={capabilityAssignments(settings, 'tts')} cues={cues} pronunciation={pronunciation} sourceVideoReady={Boolean(asset?.uploadId)} job={dubbingJob} onJobAction={(action) => void dubbingJobAction(action)} onClose={() => setDubbingOpen(false)} onPronunciationChange={setPronunciation} onNotice={onNotice} onRun={(configs, options) => void runDubbingJob(configs, options)} />
     <ExportModal open={exportOpen} cues={cues} style={settings.subtitleStyle} asset={asset} logo={logo} fontFile={fontFile} blurRegions={blurRegions} dubTrack={dubTrack} dubbingJobId={dubbingJob?.status === 'completed' ? dubbingJob.id : undefined} dubbingAudioMix={dubbingJob?.config.audioMix} onClose={() => setExportOpen(false)} onNotice={onNotice} onExportVideo={() => onNotice('Video export cần video file được chọn trực tiếp trong Editor.', 'error')} />
     <ProgressModal open={working} title="Đang xử lý audio" message="Provider → FFprobe → atempo → dub-track.wav" onCancel={() => { controllerRef.current?.abort(); setWorking(false); }} />
+    <ProgressModal open={translationWorking} title="Đang dịch subtitle" message={translationStage} value={translationProgress} onCancel={() => { translationControllerRef.current?.abort(); clearTranslationProgressTimer(); }} />
   </div>;
 }
