@@ -32,8 +32,6 @@ export function cuesToSrt(cues: SubtitleCue[], translated = false) { return cues
 
 const assTime = (ms: number) => { const safe = Math.max(0, Math.round(ms)); const h = Math.floor(safe / 3600000); const m = Math.floor((safe % 3600000) / 60000); const s = Math.floor((safe % 60000) / 1000); const cs = Math.floor((safe % 1000) / 10); return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`; };
 const assColor = (hex: string) => { const rgb = hex.replace('#', '').length === 6 ? hex.replace('#', '') : 'ffffff'; return `&H00${rgb.slice(4, 6)}${rgb.slice(2, 4)}${rgb.slice(0, 2)}`.toUpperCase(); };
-export function cssOutlineShadow(color: string, width = 2) { const radius = Math.max(0, Math.round(width)); if (!radius) return 'none'; const offsets: Array<[number, number]> = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]; return offsets.map(([x, y]) => `${x * radius}px ${y * radius}px 0 ${color}`).join(', '); }
-
 export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
   const alignment = style.position === 'top' ? 8 : style.position === 'middle' || style.position === 'custom' ? 5 : 2; const borderStyle = style.background === 'box' ? 3 : 1; const backAlpha = Math.round((1 - style.backgroundOpacity) * 255).toString(16).padStart(2, '0'); const boxColor = assColor(style.backgroundColor ?? style.outlineColor).slice(4); const back = style.background === 'box' ? `&H${backAlpha}${boxColor}` : '&HFF000000';
   const positionTag = style.position === 'custom' ? `{\\an5\\pos(${Math.round(((style.customX ?? 50) / 100) * 1920)},${Math.round(((style.customY ?? 82) / 100) * 1080)})}` : '';

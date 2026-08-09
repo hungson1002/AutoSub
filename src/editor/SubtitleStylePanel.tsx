@@ -3,13 +3,22 @@ import type { SubtitleStyle } from '../types';
 import { Upload } from '../components/Icons';
 import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
+import { subtitleFonts } from './subtitleFonts';
 
 type UploadedFont = { family: string; name: string; url: string };
 
-const builtInFonts = ['Arial', 'Segoe UI', 'Tahoma', 'Verdana', 'Georgia', 'Courier New', 'Consolas'];
-const safeFontName = (name: string) => name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]+/g, ' ').trim() || 'Uploaded Font';
+const safeFontName = (name: string) => name
+  .replace(/\.[^.]+$/, '')
+  .replace(/[^a-zA-Z0-9]+/g, ' ')
+  .trim() || 'Uploaded Font';
 
-export function SubtitleStylePanel({ style, onChange, onFontUpload }: { style: SubtitleStyle; onChange: (patch: Partial<SubtitleStyle>) => void; onFontUpload?: (file: File) => void }) {
+type SubtitleStylePanelProps = {
+  style: SubtitleStyle;
+  onChange: (patch: Partial<SubtitleStyle>) => void;
+  onFontUpload?: (file: File) => void;
+};
+
+export function SubtitleStylePanel({ style, onChange, onFontUpload }: SubtitleStylePanelProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploadedFonts, setUploadedFonts] = useState<UploadedFont[]>([]);
   const outlineWidth = style.outlineWidth ?? 2;
@@ -23,7 +32,9 @@ export function SubtitleStylePanel({ style, onChange, onFontUpload }: { style: S
       const face = new FontFace(family, `url(${url})`);
       await face.load();
       document.fonts.add(face);
-      setUploadedFonts((fonts) => fonts.some((font) => font.family === family) ? fonts : [...fonts, { family, name: file.name, url }]);
+      setUploadedFonts((fonts) => fonts.some((font) => font.family === family)
+        ? fonts
+        : [...fonts, { family, name: file.name, url }]);
       onChange({ fontFamily: family });
       onFontUpload?.(file);
     } catch {
@@ -31,11 +42,25 @@ export function SubtitleStylePanel({ style, onChange, onFontUpload }: { style: S
     }
   };
 
+  const fontOptions = [
+    ...subtitleFonts.map((font) => ({ value: font, label: font })),
+    ...uploadedFonts.map((font) => ({
+      value: font.family,
+      label: font.name,
+      description: 'Font đã tải',
+    })),
+    ...style.fontFamily
+      && !subtitleFonts.includes(style.fontFamily as typeof subtitleFonts[number])
+      && !uploadedFonts.some((font) => font.family === style.fontFamily)
+      ? [{ value: style.fontFamily, label: style.fontFamily }]
+      : [],
+  ];
+
   return <div className="style-panel">
     <div className="style-panel-intro"><span>LIVE TYPE CONTROL</span><p>Thay đổi sẽ cập nhật ngay trên frame video.</p></div>
     <label className="toggle-row"><span>Hiện phụ đề trên video</span><input type="checkbox" checked={style.visible} onChange={(event) => onChange({ visible: event.target.checked })} /><i /></label>
     <div className="field"><span>Nội dung</span><SelectField ariaLabel="Nội dung phụ đề" value={style.content} onChange={(value) => onChange({ content: value as SubtitleStyle['content'] })} options={[{ value: 'original', label: 'Bản gốc' }, { value: 'translated', label: 'Bản dịch' }, { value: 'both', label: 'Cả hai', description: 'Bản gốc và bản dịch' }]} /></div>
-    <div className="field"><span>Font chữ</span><div className="font-picker-row"><SelectField ariaLabel="Font chữ phụ đề" value={style.fontFamily} onChange={(value) => onChange({ fontFamily: value })} options={[...builtInFonts.map((font) => ({ value: font, label: font })), ...uploadedFonts.map((font) => ({ value: font.family, label: font.name, description: 'Font đã tải' })), ...style.fontFamily && !builtInFonts.includes(style.fontFamily) && !uploadedFonts.some((font) => font.family === style.fontFamily) ? [{ value: style.fontFamily, label: style.fontFamily }] : []]} /><label className="font-upload-button" title="Tải font TTF, OTF, WOFF hoặc WOFF2"><Upload size={14} /><input ref={fileRef} type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2" onChange={(event) => { void uploadFont(event.target.files?.[0]); event.currentTarget.value = ''; }} />Tải font</label></div></div>
+    <div className="field"><span>Font chữ</span><div className="font-picker-row"><SelectField ariaLabel="Font chữ phụ đề" value={style.fontFamily} onChange={(value) => onChange({ fontFamily: value })} options={fontOptions} /><label className="font-upload-button" title="Tải font TTF, OTF, WOFF hoặc WOFF2"><Upload size={14} /><input ref={fileRef} type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2" onChange={(event) => { void uploadFont(event.target.files?.[0]); event.currentTarget.value = ''; }} />Tải font</label></div></div>
     <div className="field"><span>Cỡ chữ <b className="value-badge">{style.fontSize}px</b></span><RangeInput min={18} max={96} value={style.fontSize} onChange={(event) => onChange({ fontSize: Number(event.target.value) })} /></div>
     <div className="field"><span>Kích thước viền <b className="value-badge">{outlineWidth}px</b></span><RangeInput min={0} max={8} step={1} value={outlineWidth} onChange={(event) => onChange({ outlineWidth: Number(event.target.value) })} /></div>
     <div className="two-fields"><label className="field"><span>Màu chữ</span><input type="color" value={style.textColor} onChange={(event) => onChange({ textColor: event.target.value })} /></label><label className="field"><span>Màu viền</span><input type="color" value={style.outlineColor} onChange={(event) => onChange({ outlineColor: event.target.value })} /></label></div>

@@ -5,7 +5,7 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { buildSeparatedAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, dubbingRewriteWordLimit, effectiveTtsConcurrency, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, planAdaptiveCueTempos, planDubbingTimeline, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter } from './dubbingJobs';
+import { buildSeparatedAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFades, cueDeclickFilter, dubbingRewriteWordLimit, effectiveTtsConcurrency, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, planAdaptiveCueTempos, planDubbingTimeline, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
@@ -43,6 +43,15 @@ test('final separated-audio mix is finite and carries a hard output duration', (
   assert.match(mix.filter, /sidechaincompress=threshold=0\.005:ratio=12/);
   assert.match(mix.filter, /amix=inputs=2:duration=first/);
   assert.doesNotMatch(mix.filter, /,apad,/);
+});
+
+test('cue boundaries retain natural room tone and use click-safe fades', () => {
+  assert.equal((speechTrimFilter.match(/start_silence=0\.04/g) || []).length, 2);
+  const fades = cueBoundaryFades(3_066);
+  assert.equal(fades.fadeInDuration, 0.08);
+  assert.equal(fades.fadeOutDuration, 0.08);
+  assert.ok(Math.abs(fades.fadeOutStart - 2.986) < 0.000_001);
+  assert.equal(cueDeclickFilter, 'adeclick=w=20:o=75:a=4:t=1.5:b=2:m=s,adeclick=w=20:o=75:a=4:t=1.5:b=2:m=s');
 });
 
 test('CapCut jobs are serialized and narration is sped up without padding or trimming', async () => {
@@ -93,7 +102,7 @@ test('timeline planner never pulls a cue earlier than its source timestamp', () 
   assert.ok(plan.every((cue) => cue.timelineStartMs >= cue.startMs));
 });
 
-test('adaptive fitting shares a long cue across two following cue windows', () => {
+test('adaptive fitting shares a long cue across a bounded local cue group', () => {
   const plan = planAdaptiveCueTempos([
     { cueId: '13', startMs: 35_280, endMs: 36_800, targetDurationMs: 1_520, audioDurationMs: 1_775 },
     { cueId: '14', startMs: 36_800, endMs: 39_160, targetDurationMs: 2_360, audioDurationMs: 3_271 },
@@ -103,11 +112,25 @@ test('adaptive fitting shares a long cue across two following cue windows', () =
     { cueId: '18', startMs: 45_080, endMs: 48_080, targetDurationMs: 3_000, audioDurationMs: 2_749 },
   ]);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
-  assert.ok((byId.get('14') || 0) > 1.06);
-  assert.ok((byId.get('14') || 2) < 1.12);
+  assert.ok((byId.get('14') || 0) > 1.02);
+  assert.ok((byId.get('14') || 2) < 1.06);
+  assert.equal(byId.get('13'), byId.get('14'));
   assert.equal(byId.get('14'), byId.get('15'));
   assert.equal(byId.get('14'), byId.get('16'));
+  assert.equal(byId.get('14'), byId.get('17'));
+  assert.equal(byId.get('14'), byId.get('18'));
   assert.ok(plan.every((item) => item.tempo <= 1.18));
+});
+
+test('adaptive fitting does not spread tempo across a real pause', () => {
+  const plan = planAdaptiveCueTempos([
+    { cueId: 'before', startMs: 0, endMs: 1_000, targetDurationMs: 1_000, audioDurationMs: 1_000 },
+    { cueId: 'long', startMs: 1_000, endMs: 2_000, targetDurationMs: 1_000, audioDurationMs: 1_500 },
+    { cueId: 'after-gap', startMs: 4_000, endMs: 5_000, targetDurationMs: 1_000, audioDurationMs: 1_000 },
+  ]);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+  assert.equal(byId.get('before'), byId.get('long'));
+  assert.equal(byId.get('after-gap'), 1);
 });
 
 test('finds the latest persisted dubbing job for an existing uploaded video', async () => {

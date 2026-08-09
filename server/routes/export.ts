@@ -119,10 +119,13 @@ export async function exportRoutes(app: FastifyInstance) {
         const heightPercent = clamp(Number(region.heightPercent), 1, 100 - yPercent);
         const start = Math.max(0, Number(region.startMs) || 0) / 1000;
         const end = Math.max(start, Number(region.endMs) || 0) / 1000;
-        const radius = Math.max(3, Math.min(40, Math.round(Number(region.blurStrength) || 12)));
+        const radius = Math.max(3, Math.min(60, Math.round(Number(region.blurStrength) || 24)));
         const softEdge = Math.max(2, Math.min(24, Math.round(radius * 0.75)));
-        const borderRadius = clamp(Number(region.borderRadius ?? 0), 0, 50);
-        const cornerRadius = `${(borderRadius / 100).toFixed(4)}*min(W,H)`;
+        const borderRadius = clamp(Number(region.borderRadius ?? 0), 0, 40);
+        // Treat the control as a real corner radius. CSS percentage radii on a
+        // wide subtitle strip become an exaggerated capsule and do not match
+        // the exported frame.
+        const cornerRadius = `min(${Math.round(borderRadius)},min(W,H)/2)`;
         const roundedMask = borderRadius > 0 ? `if(gt(between(X,${cornerRadius},W-${cornerRadius})+between(Y,${cornerRadius},H-${cornerRadius})+lte(hypot(X-${cornerRadius},Y-${cornerRadius}),${cornerRadius})+lte(hypot(X-(W-${cornerRadius}),Y-${cornerRadius}),${cornerRadius})+lte(hypot(X-${cornerRadius},Y-(H-${cornerRadius})),${cornerRadius})+lte(hypot(X-(W-${cornerRadius}),Y-(H-${cornerRadius})),${cornerRadius}),0),1,0)` : '1';
         const alpha = `255*clip(min(min(X,W-X),min(Y,H-Y))/${softEdge},0,1)*${roundedMask}`;
         const base = `base${index}`;
@@ -136,11 +139,16 @@ export async function exportRoutes(app: FastifyInstance) {
         const overlayX = `trunc(main_w*${xPercent / 100}/2)*2`;
         const overlayY = `trunc(main_h*${yPercent / 100}/2)*2`;
         if (region.mode === 'neighbor') {
-          const neighborYPercent = yPercent >= heightPercent ? yPercent - heightPercent : Math.min(100 - heightPercent, yPercent + heightPercent);
-          const neighborY = `trunc(ih*${neighborYPercent / 100}/2)*2`;
-          filters.push(`[${current}]split=2[${base}][${crop}];[${crop}]crop=${cropW}:${cropH}:${cropX}:${neighborY},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alpha}'[${blur}];[${base}][${blur}]overlay=x=${overlayX}:y=${overlayY}:enable='between(t,${start},${end})'[${out}]`);
+          // Legacy "neighbor" regions used to copy a strip from above/below,
+          // which looked like a mirror. Keep the saved mode compatible but
+          // erase text from the region itself with a stronger local blend.
+          const horizontalBlur = Math.min(140, Math.max(32, radius * 5));
+          const verticalBlur = Math.round(Math.min(70, Math.max(16, radius * 2.5)));
+          filters.push(`[${current}]split=2[${base}][${crop}];[${crop}]crop=${cropW}:${cropH}:${cropX}:${cropY},median=radius=${Math.min(10, Math.max(5, Math.round(radius / 2)))},avgblur=sizeX=${horizontalBlur}:sizeY=${verticalBlur},gblur=sigma=${Math.min(60, radius * 1.25)}:steps=3,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alpha}'[${blur}];[${base}][${blur}]overlay=x=${overlayX}:y=${overlayY}:enable='between(t,${start},${end})'[${out}]`);
         } else {
-          filters.push(`[${current}]split=2[${base}][${crop}];[${crop}]crop=${cropW}:${cropH}:${cropX}:${cropY},gblur=sigma=${radius}:steps=2,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alpha}'[${blur}];[${base}][${blur}]overlay=x=${overlayX}:y=${overlayY}:enable='between(t,${start},${end})'[${out}]`);
+          const horizontalBlur = Math.min(120, Math.max(24, radius * 4));
+          const verticalBlur = Math.min(60, Math.max(12, radius * 2));
+          filters.push(`[${current}]split=2[${base}][${crop}];[${crop}]crop=${cropW}:${cropH}:${cropX}:${cropY},median=radius=${Math.min(10, Math.max(4, Math.round(radius / 2)))},avgblur=sizeX=${horizontalBlur}:sizeY=${verticalBlur},gblur=sigma=${radius}:steps=3,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alpha}'[${blur}];[${base}][${blur}]overlay=x=${overlayX}:y=${overlayY}:enable='between(t,${start},${end})'[${out}]`);
         }
         current = out;
       });

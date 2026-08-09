@@ -3,7 +3,7 @@ import type { CSSProperties, PointerEvent } from 'react';
 import type { BlurRegion, LogoOverlay, SubtitleCue, SubtitleStyle, VideoAsset } from '../types';
 import { defaultStyle } from '../types';
 import { Maximize, Pause, Play, Volume2 } from '../components/Icons';
-import { cssOutlineShadow, formatClock } from '../lib/subtitles';
+import { formatClock } from '../lib/subtitles';
 import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
 import { RangeInput } from '../components/RangeInput';
 
@@ -16,6 +16,19 @@ type SubtitlePosition = { x: number; y: number };
 type LogoDrag = { startX: number; startY: number; originX: number; originY: number; widthPercent: number; stageWidth: number; stageHeight: number; pendingX?: number; pendingY?: number; frame?: number };
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const audioRefTime = (audio: HTMLAudioElement) => Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+
+function blurRegionPreviewStyle(region: BlurRegion): CSSProperties {
+  const strength = Math.min(36, Math.max(8, Number(region.blurStrength) || 24));
+  return {
+    left: `${region.xPercent}%`,
+    top: `${region.yPercent}%`,
+    width: `${region.widthPercent}%`,
+    height: `${region.heightPercent}%`,
+    borderRadius: `${Math.max(0, Math.min(40, region.borderRadius ?? 0))}px`,
+    backdropFilter: `blur(${strength}px)`,
+    WebkitBackdropFilter: `blur(${strength}px)`,
+  };
+}
 
 function patchRect(origin: Roi, kind: DragKind, dx: number, dy: number): Roi {
   if (kind === 'move') return { ...origin, x: clamp(origin.x + dx, 0, 100 - origin.w), y: clamp(origin.y + dy, 0, 100 - origin.h) };
@@ -236,7 +249,7 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
   };
   const previewScale = stageWidth / 1920;
   const previewStyle = draftSubtitlePosition && style.position === 'custom' ? { ...style, customX: draftSubtitlePosition.x, customY: draftSubtitlePosition.y } : style;
-  const textShadow = previewStyle.background === 'outline' ? cssOutlineShadow(previewStyle.outlineColor, (previewStyle.outlineWidth ?? 2) * previewScale) : 'none';
+  const outlineWidth = previewStyle.background === 'outline' ? Math.max(0, (previewStyle.outlineWidth ?? 2) * previewScale) : 0;
   const boxColor = previewStyle.backgroundColor ?? previewStyle.outlineColor;
   const subtitleStyle: CSSProperties = {
     fontFamily: previewStyle.fontFamily,
@@ -244,7 +257,9 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
     color: previewStyle.textColor,
     fontWeight: previewStyle.bold ? 700 : 400,
     fontStyle: previewStyle.italic ? 'italic' : 'normal',
-    textShadow,
+    WebkitTextFillColor: previewStyle.textColor,
+    WebkitTextStroke: outlineWidth > 0 ? `${outlineWidth}px ${previewStyle.outlineColor}` : '0 transparent',
+    paintOrder: 'stroke fill',
     background: previewStyle.background === 'box' ? `${boxColor}${Math.round(previewStyle.backgroundOpacity * 255).toString(16).padStart(2, '0')}` : 'transparent',
     ...(previewStyle.position === 'custom' ? { left: `${previewStyle.customX ?? 50}%`, top: `${previewStyle.customY ?? 82}%`, right: 'auto', bottom: 'auto', width: '84%', maxWidth: '84%', boxSizing: 'border-box', transform: 'translate(-50%, -50%)', pointerEvents: 'auto', cursor: subtitleDrag ? 'grabbing' : 'grab', userSelect: 'none', touchAction: 'none' } : {}),
   };
@@ -253,7 +268,7 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
     {asset ? <video ref={videoRef} src={asset.url} onLoadedMetadata={(event) => setDuration(event.currentTarget.duration * 1000)} onTimeUpdate={(event) => { reportTime(event.currentTarget.currentTime * 1000); }} onEnded={() => { dubAudioRef.current?.pause(); setPlaying(false); }} /> : <div className="video-empty"><div className="reel-icon">✦</div><span>Chưa có video preview</span><small>Thêm video ở Trích xuất hoặc Editor</small></div>}
     {asset && logo?.enabled && <>{logo.kind === 'image' && logo.url ? <img className="logo-overlay" src={logo.url} alt={logo.name} draggable={false} onPointerDown={beginLogoDrag} style={{ left: `${logo.xPercent}%`, top: `${logo.yPercent}%`, width: `${logo.widthPercent}%`, opacity: logo.opacity, pointerEvents: 'auto', cursor: logoDrag ? 'grabbing' : 'grab' }} /> : logo.kind === 'text' && <div className="logo-overlay logo-text-overlay" onPointerDown={beginLogoDrag} style={{ left: `${logo.xPercent}%`, top: `${logo.yPercent}%`, width: `${logo.widthPercent}%`, opacity: logo.opacity, color: logo.textColor, fontFamily: logo.fontFamily, fontSize: `${logo.fontSize}px`, textShadow: `1px 1px 0 ${logo.outlineColor}, -1px -1px 0 ${logo.outlineColor}`, pointerEvents: 'auto', cursor: logoDrag ? 'grabbing' : 'grab' }}>{logo.text}</div>}</>}
     {asset && activeCue && style.visible && <div className={`subtitle-overlay ${style.position}`} onPointerDown={beginSubtitleDrag} style={subtitleStyle}>{style.content === 'original' ? activeCue.originalText : style.content === 'both' ? <><span>{activeCue.originalText}</span><br /><span>{activeCue.translatedText}</span></> : activeCue.translatedText || activeCue.originalText}</div>}
-    {blurRegions.map((region, index) => { const previewRegion = draftBlurRegion?.id === region.id ? draftBlurRegion : region; const selectedBlur = activeBlurId === region.id; return <div key={region.id} className={`blur-overlay ${blurEditMode ? selectedBlur ? 'blur-overlay-editable selected' : 'blur-overlay-selectable' : ''}`} style={{ left: `${previewRegion.xPercent}%`, top: `${previewRegion.yPercent}%`, width: `${previewRegion.widthPercent}%`, height: `${previewRegion.heightPercent}%`, borderRadius: `${Math.max(0, Math.min(50, previewRegion.borderRadius ?? 0))}%`, backdropFilter: previewRegion.mode === 'blur' ? `blur(${Math.max(3, previewRegion.blurStrength)}px)` : 'none', WebkitBackdropFilter: previewRegion.mode === 'blur' ? `blur(${Math.max(3, previewRegion.blurStrength)}px)` : 'none' }} onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'move')}><span>{selectedBlur ? `BLUR ${index + 1}` : ''}</span>{selectedBlur && <><i className="roi-handle nw" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'nw')} /><i className="roi-handle ne" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'ne')} /><i className="roi-handle sw" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'sw')} /><i className="roi-handle se" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'se')} /></>}</div>; })}
+    {blurRegions.map((region, index) => { const previewRegion = draftBlurRegion?.id === region.id ? draftBlurRegion : region; const selectedBlur = activeBlurId === region.id; return <div key={region.id} className={`blur-overlay ${blurEditMode ? selectedBlur ? 'blur-overlay-editable selected' : 'blur-overlay-selectable' : ''}`} style={blurRegionPreviewStyle(previewRegion)} onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'move')}><span>{selectedBlur ? `BLUR ${index + 1}` : ''}</span>{selectedBlur && <><i className="roi-handle nw" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'nw')} /><i className="roi-handle ne" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'ne')} /><i className="roi-handle sw" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'sw')} /><i className="roi-handle se" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'se')} /></>}</div>; })}
     {roi && <div className="roi-box" style={{ left: `${roi.x}%`, top: `${roi.y}%`, width: `${roi.w}%`, height: `${roi.h}%` }} onPointerDown={(event) => beginRoiDrag(event, 'move')}><span>OCR REGION</span><i className="roi-handle nw" onPointerDown={(event) => beginRoiDrag(event, 'nw')} /><i className="roi-handle ne" onPointerDown={(event) => beginRoiDrag(event, 'ne')} /><i className="roi-handle sw" onPointerDown={(event) => beginRoiDrag(event, 'sw')} /><i className="roi-handle se" onPointerDown={(event) => beginRoiDrag(event, 'se')} /></div>}
   </div><div className="video-controls"><button className="play-button" onClick={toggle} disabled={!asset}>{playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}</button><span className="timecode">{formatClock(time)}</span><RangeInput className="seekbar" min={0} max={duration || 1} value={time} onChange={(event) => seek(Number(event.target.value))} /><span className="timecode muted">{formatClock(duration)}</span><div className="volume-control" ref={volumeControlRef}><button className="volume-button" onClick={() => { if (!volumeOpen) announceDropdownOpen(volumeDropdownId.current); setVolumeOpen((value) => !value); }} aria-label="Điều chỉnh âm lượng"><Volume2 size={15} /></button>{volumeOpen && <div className="volume-popover"><div className="volume-popover-head"><span>Âm lượng</span><b>{Math.round(volume * 100)}%</b></div><RangeInput className="volume-popover-range" min={0} max={1} step={0.01} value={volume} onChange={(event) => setVolume(Number(event.target.value))} /></div>}</div><button className="icon-button" onClick={() => void videoRef.current?.requestFullscreen?.()} aria-label="Toàn màn hình"><Maximize size={15} /></button></div></div>;
 }
