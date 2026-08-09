@@ -1,4 +1,4 @@
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -16,7 +16,14 @@ export function run(command: string, args: string[], signal?: AbortSignal, onStd
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener('abort', abort, { once: true });
     child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr?.on('data', (chunk) => { const text = chunk.toString(); stderr += text; onStderr?.(text); });
+    child.stderr?.on('data', (chunk) => {
+      const text = chunk.toString();
+      // FFmpeg progress can be effectively unbounded. Keep only the tail for
+      // diagnostics so a runaway process cannot also exhaust Node memory or
+      // persist a multi-megabyte error message in a job record.
+      stderr = (stderr + text).slice(-128 * 1024);
+      onStderr?.(text);
+    });
     child.on('error', (error) => fail(error));
     child.on('close', (code) => {
       if (settled) return;
@@ -29,6 +36,64 @@ export function run(command: string, args: string[], signal?: AbortSignal, onStd
 }
 export async function available(command: string) { try { await run(command, ['-version']); return true; } catch { return false; } }
 export async function cleanWorkdir() { await rm(workdir, { recursive: true, force: true }); await ensureWorkdir(); }
+
+export interface TemporaryCleanupResult { removedFiles: number; removedDirectories: number; freedBytes: number; skippedActiveJobs: number; skippedRecentFiles: number }
+
+const terminalJobStatuses = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
+
+export async function cleanupTemporaryFiles(root = workdir, minimumAgeMs = 10 * 60_000): Promise<TemporaryCleanupResult> {
+  const result: TemporaryCleanupResult = { removedFiles: 0, removedDirectories: 0, freedBytes: 0, skippedActiveJobs: 0, skippedRecentFiles: 0 };
+  const cutoff = Date.now() - Math.max(0, minimumAgeMs);
+
+  const removePath = async (target: string) => {
+    const info = await stat(target).catch(() => undefined);
+    if (!info) return;
+    if (info.isDirectory()) {
+      const files = await readdir(target, { withFileTypes: true }).catch(() => []);
+      for (const item of files) await removePath(path.join(target, item.name));
+      await rm(target, { recursive: true, force: true }).then(() => { result.removedDirectories += 1; }).catch(() => undefined);
+      return;
+    }
+    await rm(target, { force: true }).then(() => { result.removedFiles += 1; result.freedBytes += info.size; }).catch(() => undefined);
+  };
+
+  const removeStaleContents = async (directory: string) => {
+    const items = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const item of items) {
+      const target = path.join(directory, item.name);
+      const info = await stat(target).catch(() => undefined);
+      if (!info) continue;
+      if (info.mtimeMs > cutoff) { result.skippedRecentFiles += 1; continue; }
+      await removePath(target);
+    }
+  };
+
+  // These folders contain regenerable extraction/export caches. Recent paths
+  // are retained so clicking cleanup cannot disrupt a request still running.
+  for (const name of ['audio', 'frames', 'subtitles', 'tts', 'exports', 'timestamp-vad-cache', 'text-audio-alignment-cache', 'diagnostics', 'demucs-smoke', 'export-smoke', 'upload-flow-smoke', 'video-compare']) {
+    await removeStaleContents(path.join(root, name));
+  }
+
+  // Keep every uploaded source and every final dub result. For terminal jobs,
+  // only remove data that can be regenerated without affecting preview.
+  const jobsDirectory = path.join(root, 'jobs');
+  const jobs = await readdir(jobsDirectory, { withFileTypes: true }).catch(() => []);
+  for (const entry of jobs) {
+    if (!entry.isDirectory()) continue;
+    const directory = path.join(jobsDirectory, entry.name);
+    const stored = await readFile(path.join(directory, 'job.json'), 'utf8').then((value) => JSON.parse(value) as { status?: string }).catch(() => undefined);
+    if (!stored || !terminalJobStatuses.has(String(stored.status))) { result.skippedActiveJobs += 1; continue; }
+    for (const disposable of ['cache', 'timeline', 'source-stems']) await removePath(path.join(directory, disposable));
+    const leftovers = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const leftover of leftovers) {
+      if (!leftover.isFile() || !/\.tmp(?:\.|$)/i.test(leftover.name)) continue;
+      await removePath(path.join(directory, leftover.name));
+    }
+  }
+
+  await ensureWorkdir();
+  return result;
+}
 export async function probeDimensions(filePath: string) { const result = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', filePath]); const [width, height] = result.stdout.trim().split('x').map(Number); return { width: width || 1920, height: height || 1080 }; }
 export async function extractAudio(input: string, output: string) { await run('ffmpeg', ['-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', output]); }
 export async function extractRoiFrames(input: string, outputPattern: string, fps: number, roi: { x: number; y: number; w: number; h: number }) { const filter = `fps=${fps},crop=iw*${roi.w / 100}:ih*${roi.h / 100}:iw*${roi.x / 100}:ih*${roi.y / 100}`; await run('ffmpeg', ['-y', '-i', input, '-vf', filter, '-q:v', '4', outputPattern]); }

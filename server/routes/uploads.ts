@@ -1,3 +1,4 @@
+import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { cleanupUploadSession, discardUploadStream, resolveUpload, storeUpload, UploadReferenceError, UploadTooLargeError } from '../services/uploads';
 
@@ -34,6 +35,33 @@ export async function uploadRoutes(app: FastifyInstance) {
       return reply.code(204).send();
     } catch (error) {
       return reply.code(error instanceof UploadReferenceError ? error.statusCode : 404).send({ error: 'Upload reference không tồn tại.' });
+    }
+  });
+
+  app.get('/api/uploads/:id/media', async (request, reply) => {
+    try {
+      const id = String((request.params as { id?: string }).id || '');
+      const upload = await resolveUpload(id);
+      const rangeHeader = request.headers.range;
+      let start = 0;
+      let end = upload.size - 1;
+      if (rangeHeader) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+        if (!match) return reply.code(416).header('Content-Range', `bytes */${upload.size}`).send();
+        const requestedStart = match[1] ? Number(match[1]) : undefined;
+        const requestedEnd = match[2] ? Number(match[2]) : undefined;
+        start = requestedStart ?? Math.max(0, upload.size - (requestedEnd || 0));
+        end = Math.min(upload.size - 1, requestedEnd ?? upload.size - 1);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > end || start >= upload.size) return reply.code(416).header('Content-Range', `bytes */${upload.size}`).send();
+        reply.code(206).header('Content-Range', `bytes ${start}-${end}/${upload.size}`);
+      }
+      reply.header('Content-Type', upload.contentType || 'application/octet-stream');
+      reply.header('Content-Length', String(end - start + 1));
+      reply.header('Accept-Ranges', 'bytes');
+      reply.header('Content-Disposition', `inline; filename="${upload.filename.replace(/["\r\n]/g, '_')}"`);
+      return reply.send(createReadStream(upload.absolutePath, { start, end }));
+    } catch (error) {
+      return reply.code(error instanceof UploadReferenceError ? error.statusCode : 404).send({ error: 'Video nguồn không còn tồn tại trên máy.' });
     }
   });
 }

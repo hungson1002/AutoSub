@@ -41,6 +41,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const isGroq = providerType === 'groq';
   const isElevenLabs = providerType === 'elevenlabs';
   const isHiiuTts = providerType === 'hiiu-tts';
+  const isCapCutTts = providerType === 'capcut-tts';
   const voiceItems = (isHiiuTts ? (currentProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id })) : currentProvider?.voices || []) as VoiceItem[];
   const filteredVoices = voiceItems.filter((voice) => `${voice.name || ''} ${voice.id} ${voice.language || ''}`.toLowerCase().includes(voiceQuery.trim().toLowerCase()));
   const selectedVoice = voiceItems.find((voice) => voice.id === current.voice);
@@ -117,8 +118,8 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
         <div className="voice-heading"><div className="voice-avatar">{active}</div><div><h3>Voice group {active}</h3><p>Ưu tiên video · giữ nguyên thời lượng gốc</p></div></div>
         <CapabilityAssignmentPicker capability="tts" assignments={assignmentOptions} providers={providers} value={current.assignment} onChange={(assignment) => { const nextProvider = providers.find((item) => item.id === assignment.providerId); patchCurrent({ assignment, voice: nextProvider && resolvedProviderType(nextProvider) === 'hiiu-tts' ? assignment.model : '' }); }} label="TTS Provider + Model" />
         <AssignmentSummary label="TTS Provider đang dùng" assignment={current.assignment} provider={currentProvider} capability="tts" />
-        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
-          {(isElevenLabs || isHiiuTts) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
+        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
+          {(isElevenLabs || isHiiuTts || isCapCutTts) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
             <div className="voice-picker-control">
               <button type="button" className={`voice-picker-trigger ${voiceOpen ? 'active' : ''}`} onClick={() => { if (!voiceOpen) announceDropdownOpen(voiceDropdownId.current); setVoiceOpen((value) => !value); }}>
                 <span className="voice-picker-star">★</span><span className="voice-picker-selected"><strong>{selectedVoice?.name || current.voice || 'Chọn giọng đọc'}</strong><small>{selectedVoice?.id || 'Mở danh sách voice'}</small></span><ChevronDown size={15} className={voiceOpen ? 'rotated' : ''} />
@@ -134,7 +135,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
                 {voice.id === current.voice && <Check size={15} className="voice-picker-check" />}
               </div>) : <div className="voice-picker-empty">Không tìm thấy voice phù hợp.</div>}</div>
             </div>}
-          </div> : isHiiuTts ? <div className="provider-readonly-value"><span>Chưa có danh sách giọng. Hãy bấm “Lấy models” ở Cài đặt để tải các giọng HiiuTTS.</span></div> : <input value={current.voice} onChange={(event) => patchCurrent({ voice: event.target.value })} placeholder={isGroq ? 'Ví dụ: troy, hannah, austin' : 'Nhập Voice ID của provider'} />}
+          </div> : isHiiuTts || isCapCutTts ? <div className="provider-readonly-value"><span>Chưa có danh sách giọng. Hãy bấm “Lấy models” ở Cài đặt để tải voice {isCapCutTts ? 'CapCut TTS' : 'HiiuTTS'}.</span></div> : <input value={current.voice} onChange={(event) => patchCurrent({ voice: event.target.value })} placeholder={isGroq ? 'Ví dụ: troy, hannah, austin' : 'Nhập Voice ID của provider'} />}
           {isGroq && <small className="field-help">Groq Orpheus hiện dành cho giọng English/Arabic; test voice dùng câu tiếng Anh.</small>}
           {isElevenLabs && !voiceItems.length && <small className="field-help">Chưa có voice cache. Hãy lấy voices trong Cài đặt hoặc nhập Voice ID thủ công.</small>}
         </div>

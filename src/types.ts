@@ -1,7 +1,7 @@
 export type VoiceGroup = 'G1' | 'G2' | 'G3';
 export type Capability = 'translation' | 'vision' | 'stt' | 'tts';
 export type ProviderCapability = 'chat' | 'vision' | 'stt' | 'tts';
-export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'hiiu-tts' | 'vbee' | 'custom';
+export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'hiiu-tts' | 'capcut-tts' | 'vbee' | 'custom';
 export type ProviderAuthType = 'bearer' | 'xi-api-key' | 'x-api-key' | 'api-key' | 'query-param' | 'none' | 'custom-header';
 export type ProviderCapabilities = Partial<Record<ProviderCapability, boolean>>;
 
@@ -14,7 +14,7 @@ export interface ProviderEndpoints {
   tts?: string;
 }
 
-export interface AIVoice { id: string; name?: string; language?: string; }
+export interface AIVoice { id: string; name?: string; language?: string; resourceId?: string; }
 
 export interface SubtitleCue {
   id: string;
@@ -40,7 +40,11 @@ export interface DubbingMetadata {
   finalAudioDurationMs: number;
   rewriteAttempts: number;
   speedApplied: number;
+  adaptiveFitVersion?: number;
   extensionMs: number;
+  timelineStartMs?: number;
+  timelineEndMs?: number;
+  timelineShiftMs?: number;
   warning?: string;
 }
 

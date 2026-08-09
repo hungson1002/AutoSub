@@ -5,10 +5,11 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { buildTimelineMixFilter, createDubbingJob, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, recoverDubbingJob, retryDubbingOperation, startDubbingJob } from './dubbingJobs';
+import { buildSeparatedAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, dubbingRewriteWordLimit, effectiveTtsConcurrency, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, planAdaptiveCueTempos, planDubbingTimeline, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
+const capcutProvider: AIProvider = { id: 'capcut-tts-local', name: 'CapCut TTS', baseUrl: 'local://capcut-tts', enabled: true, models: [], providerType: 'capcut-tts', authType: 'none', capabilities: { tts: true } };
 
 function cues(count: number) {
   return Array.from({ length: count }, (_, index) => ({ id: `synthetic-${index + 1}`, index: index + 1, startMs: index * 2500, endMs: index * 2500 + 1800, originalText: `Original cue ${index + 1}`, translatedText: `Translated cue ${index + 1}`, text: `Translated cue ${index + 1}`, previousText: index ? `Translated cue ${index}` : '', nextText: `Translated cue ${index + 2}`, provider: fakeProvider, model: 'synthetic-model', voice: 'synthetic-voice', speed: 1, volume: 1 }));
@@ -28,7 +29,98 @@ async function waitForTerminal(id: string) {
 test('timeline mix preserves cue gain instead of normalizing it by batch size', () => {
   const filter = buildTimelineMixFilter(29, 79_180);
   assert.match(filter, /amix=inputs=29:duration=longest:dropout_transition=0:normalize=0/);
-  assert.match(filter, /alimiter=limit=0\.95/);
+  assert.match(filter, /alimiter=limit=0\.891:level=false/);
+  assert.match(filter, /apad=whole_dur=79\.180,atrim=end=79\.180/);
+  assert.doesNotMatch(filter, /,apad,/);
+});
+
+test('final separated-audio mix is finite and carries a hard output duration', () => {
+  const mix = buildSeparatedAudioMixFilter(84_600, 0.25);
+  assert.equal(mix.duration, '84.600');
+  assert.match(mix.filter, /apad=whole_dur=84\.600,atrim=end=84\.600/);
+  assert.match(mix.filter, /volume=0\.250/);
+  assert.match(mix.filter, /asplit=2\[dub\]\[sidechain\]/);
+  assert.match(mix.filter, /sidechaincompress=threshold=0\.005:ratio=12/);
+  assert.match(mix.filter, /amix=inputs=2:duration=first/);
+  assert.doesNotMatch(mix.filter, /,apad,/);
+});
+
+test('CapCut jobs are serialized and narration is sped up without padding or trimming', async () => {
+  const capcutCue = { ...cues(1)[0], provider: capcutProvider };
+  assert.equal(effectiveTtsConcurrency([capcutCue], 3), 1);
+  assert.equal(effectiveTtsConcurrency(cues(1), 3), 3);
+  assert.match(tempoFilter(1.25), /rubberband=tempo=1\.250/);
+  assert.doesNotMatch(tempoFilter(1.25), /apad|atrim/);
+  assert.doesNotMatch(tempoFilter(1.25), /alimiter/);
+  assert.equal(tempoFilter(1), 'anull');
+  assert.equal(fittingTempo(0.65), 1);
+  assert.equal(fittingTempo(0.90), 1);
+  assert.equal(fittingTempo(1.08), 1.08);
+  assert.equal(fittingTempo(3), 1.18);
+  assert.match(speechTrimFilter, /^silenceremove=.*areverse.*silenceremove=.*areverse$/);
+  assert.equal(canFitSpeechWithoutCut(2_626, 2_500), true);
+  assert.equal(canFitSpeechWithoutCut(6_089, 1_880), false);
+
+  const job = await createDubbingJob({ cues: [capcutCue], ttsConcurrency: 3 });
+  try { assert.equal(job.config.ttsConcurrency, 1); } finally { await cleanup(job.id); }
+});
+
+test('timeline planner preserves natural gaps and shifts later cues after an overrun', () => {
+  const plan = planDubbingTimeline([
+    { cueId: 'a', startMs: 0, endMs: 2_000, audioDurationMs: 2_000 },
+    { cueId: 'b', startMs: 2_000, endMs: 3_000, audioDurationMs: 2_500 },
+    { cueId: 'c', startMs: 3_000, endMs: 4_000, audioDurationMs: 1_000 },
+    { cueId: 'd', startMs: 9_000, endMs: 10_000, audioDurationMs: 1_000 },
+  ]);
+
+  assert.deepEqual(plan.map(({ cueId, timelineStartMs, timelineEndMs, timelineShiftMs }) => ({ cueId, timelineStartMs, timelineEndMs, timelineShiftMs })), [
+    { cueId: 'a', timelineStartMs: 0, timelineEndMs: 2_000, timelineShiftMs: 0 },
+    { cueId: 'b', timelineStartMs: 2_000, timelineEndMs: 4_500, timelineShiftMs: 0 },
+    { cueId: 'c', timelineStartMs: 4_540, timelineEndMs: 5_540, timelineShiftMs: 1_540 },
+    { cueId: 'd', timelineStartMs: 9_000, timelineEndMs: 10_000, timelineShiftMs: 0 },
+  ]);
+});
+
+test('timeline planner never pulls a cue earlier than its source timestamp', () => {
+  const plan = planDubbingTimeline([
+    { cueId: 'a', startMs: 0, endMs: 2_000, audioDurationMs: 1_100 },
+    { cueId: 'b', startMs: 2_000, endMs: 4_000, audioDurationMs: 1_300 },
+    { cueId: 'c', startMs: 6_000, endMs: 7_000, audioDurationMs: 700 },
+  ]);
+  assert.equal(plan[1].timelineStartMs, 2_000);
+  assert.equal(plan[1].timelineShiftMs, 0);
+  assert.equal(plan[2].timelineStartMs, 6_000);
+  assert.ok(plan.every((cue) => cue.timelineStartMs >= cue.startMs));
+});
+
+test('adaptive fitting shares a long cue across two following cue windows', () => {
+  const plan = planAdaptiveCueTempos([
+    { cueId: '13', startMs: 35_280, endMs: 36_800, targetDurationMs: 1_520, audioDurationMs: 1_775 },
+    { cueId: '14', startMs: 36_800, endMs: 39_160, targetDurationMs: 2_360, audioDurationMs: 3_271 },
+    { cueId: '15', startMs: 39_160, endMs: 42_600, targetDurationMs: 3_440, audioDurationMs: 2_660 },
+    { cueId: '16', startMs: 42_600, endMs: 43_960, targetDurationMs: 1_360, audioDurationMs: 1_730 },
+    { cueId: '17', startMs: 43_960, endMs: 45_080, targetDurationMs: 1_120, audioDurationMs: 949 },
+    { cueId: '18', startMs: 45_080, endMs: 48_080, targetDurationMs: 3_000, audioDurationMs: 2_749 },
+  ]);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+  assert.ok((byId.get('14') || 0) > 1.06);
+  assert.ok((byId.get('14') || 2) < 1.12);
+  assert.equal(byId.get('14'), byId.get('15'));
+  assert.equal(byId.get('14'), byId.get('16'));
+  assert.ok(plan.every((item) => item.tempo <= 1.18));
+});
+
+test('finds the latest persisted dubbing job for an existing uploaded video', async () => {
+  const videoId = `restore-${crypto.randomUUID()}`;
+  const first = await createDubbingJob({ videoId, cues: cues(1) });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const second = await createDubbingJob({ videoId, cues: cues(1) });
+  try {
+    assert.equal((await findLatestDubbingJobByVideoId(videoId))?.id, second.id);
+  } finally {
+    await cleanup(first.id);
+    await cleanup(second.id);
+  }
 });
 
 test('persists synthetic jobs with 100, 1000 and 3000 cues', { timeout: 120_000 }, async () => {
@@ -93,6 +185,17 @@ test('an unchanged or longer AI rewrite falls back instead of failing forever', 
   assert.equal(isUsefulDubbingRewrite('Một câu khá dài', 'Một câu khá dài'), false);
   assert.equal(isUsefulDubbingRewrite('Một câu khá dài', 'Một câu còn dài hơn nữa'), false);
   assert.equal(isUsefulDubbingRewrite('Một câu khá dài', 'Câu ngắn'), true);
+  assert.equal(isUsefulDubbingRewrite('Một câu khá dài cần rút gọn', 'Một câu vẫn ngắn hơn'), true);
+});
+
+test('rewrite word limits tighten from measured CapCut audio instead of a fixed speaking rate', () => {
+  const current = 'Đột nhiên trở thành siêu anh hùng thì sẽ là trải nghiệm như thế nào';
+  const firstLimit = dubbingRewriteWordLimit(current, 2_880, 6_900, 1);
+  const nextText = 'Trở thành siêu anh hùng sẽ thế nào';
+  const secondLimit = dubbingRewriteWordLimit(nextText, 2_880, 4_630, 2);
+  assert.ok(firstLimit < current.split(/\s+/).length);
+  assert.ok(secondLimit < nextText.split(/\s+/).length);
+  assert.ok(secondLimit <= 5);
 });
 
 test('rejects a shorter rewrite that repeats an adjacent cue', () => {

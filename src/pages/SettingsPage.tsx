@@ -35,6 +35,7 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
   const [loadingModels, setLoadingModels] = useState(false);
   const [configMode, setConfigMode] = useState<ProviderConfigMode>('simple');
   const [showCapabilityProviders, setShowCapabilityProviders] = useState(false);
+  const [cleaningTemporaryFiles, setCleaningTemporaryFiles] = useState(false);
   const [batches, setBatches] = useState<Record<string, BatchState>>({});
   const batchControllers = useRef<Record<string, AbortController>>({});
 
@@ -70,7 +71,7 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
     try {
       const result = await api.listModels(normalized);
       let voices = normalized.voices;
-      if (resolvedProviderType(normalized) === 'elevenlabs') {
+      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts') {
         try { voices = (await api.listVoices(normalized)).voices; } catch (error) { onNotice(providerErrorMessage(error, 'Không thể lấy voices.'), 'error'); }
       }
       const models = result.warning && !result.models.length ? normalized.models : result.models;
@@ -87,7 +88,7 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
       const normalized = { ...provider, baseUrl: normalizeProviderBaseUrl(provider.baseUrl) };
       const result = await api.listModels(normalized);
       let voices = normalized.voices;
-      if (resolvedProviderType(normalized) === 'elevenlabs') { try { voices = (await api.listVoices(normalized)).voices; } catch { /* model refresh vẫn dùng được nếu voice endpoint tạm lỗi */ } }
+      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts') { try { voices = (await api.listVoices(normalized)).voices; } catch { /* model refresh vẫn dùng được nếu voice endpoint tạm lỗi */ } }
       const models = result.warning && !result.models.length ? normalized.models : result.models;
       updateProvider({ ...normalized, models, voices });
       onNotice(result.warning || `Đã refresh ${models.length} model.`, 'success');
@@ -152,6 +153,22 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
     }
   };
 
+  const cleanupTemporaryStorage = async () => {
+    if (!window.confirm('Dọn cache và file xử lý trung gian? Video đã tải lên và kết quả lồng tiếng đang lưu sẽ được giữ lại.')) return;
+    setCleaningTemporaryFiles(true);
+    try {
+      const cleaned = await api.cleanupTemporaryFiles();
+      const megabytes = cleaned.freedBytes / 1024 / 1024;
+      const size = megabytes >= 1024 ? `${(megabytes / 1024).toFixed(2)} GB` : `${megabytes.toFixed(1)} MB`;
+      const skipped = cleaned.skippedActiveJobs || cleaned.skippedRecentFiles ? ` Đã bỏ qua ${cleaned.skippedActiveJobs} job đang hoạt động và ${cleaned.skippedRecentFiles} mục mới tạo.` : '';
+      onNotice(`Đã dọn ${cleaned.removedFiles} file, giải phóng ${size}.${skipped}`, 'success');
+    } catch (error) {
+      onNotice(providerErrorMessage(error, 'Không thể dọn bộ nhớ tạm.'), 'error');
+    } finally {
+      setCleaningTemporaryFiles(false);
+    }
+  };
+
   return <div className="page settings-page">
     <Modal open={!!providerDraft} title={providerDraft?.id && providers.some((item) => item.id === providerDraft.id) ? 'Sửa provider' : 'Thêm provider'} eyebrow="AI PROVIDER" className="provider-config-modal" onClose={() => setProviderDraft(undefined)}>
       {providerDraft && <ProviderConfigForm
@@ -176,6 +193,6 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
     <section className="settings-section"><div className="settings-heading"><div><h2>Default Models</h2><p>Chọn riêng provider mặc định cho từng capability. Mỗi nút test chỉ gọi đúng capability đang cấu hình.</p></div></div><div className="assignment-grid">{capabilityLabels.map(([key, label, description]) => { const selectedProvider = providers.find((item) => item.id === settings.assignments[key].providerId); const running = batches[`${selectedProvider?.id || ''}::${key}`]; const batchKey = `${selectedProvider?.id || ''}::${key}`; return <div className="assignment-card" key={key}><div className="assignment-card-heading"><div><span>{label}</span><small>{description}</small></div></div><ProviderSelector providers={providers} value={settings.assignments[key]} onChange={(value) => onSettingsChange(updateCapabilityAssignments(settings, key, [value, ...capabilityAssignments(settings, key).filter((item) => item.providerId !== value.providerId || item.model !== value.model)]))} label="Provider" capability={key} onNotice={onNotice} /><div className={`assignment-test-zone ${running ? 'running' : ''}`}><div className="assignment-test-action"><span className="assignment-test-caption"><CirclePlay size={13} /> Kiểm tra tất cả model</span>{selectedProvider ? <button className="button small ghost" disabled={!!running} onClick={() => void testAll(selectedProvider, key)}>{running ? <LoaderCircle className="spin" size={12} /> : <CirclePlay size={12} />} {running ? 'Đang chạy…' : 'Test tất cả'}</button> : <span className="assignment-test-muted">Chọn provider trước</span>}</div>{running ? <BatchProgress batch={running} batchKey={batchKey} onCancel={() => batchControllers.current[batchKey]?.abort()} /> : <small className="assignment-test-hint">Test thật capability này trên toàn bộ model đã tải.</small>}</div></div>; })}</div></section>
     <div className={`settings-assignment-toggle ${showCapabilityProviders ? 'open' : ''}`}><button className="button ghost" onClick={() => setShowCapabilityProviders((current) => !current)}><span><strong>Capability Providers</strong><small>Danh sách provider bổ sung cho từng chức năng</small></span><ChevronDown size={16} /></button></div>
     {showCapabilityProviders && <CapabilityProvidersPanel providers={providers} settings={settings} onSettingsChange={onSettingsChange} onNotice={onNotice} />}
-    <section className="settings-section system-section"><div className="settings-heading"><div><h2>System</h2><p>Ứng dụng dùng child_process.spawn với argument array để chạy media.</p></div></div><div className="system-grid"><div className="system-row"><span>FFmpeg</span><strong className={system?.ffmpeg ? 'system-ok' : 'system-bad'}><i /> {system ? system.ffmpeg ? 'Sẵn sàng' : 'Chưa cài / chưa có trong PATH' : 'Đang kiểm tra…'}</strong></div><div className="system-row"><span>FFprobe</span><strong className={system?.ffprobe ? 'system-ok' : 'system-bad'}><i /> {system ? system.ffprobe ? 'Sẵn sàng' : 'Chưa cài / chưa có trong PATH' : 'Đang kiểm tra…'}</strong></div><div className="system-row"><span>Workdir</span><code>{system?.workdir || settings.workdir}</code></div><button className="button ghost" onClick={() => onNotice('File tạm chỉ được dọn khi bạn xác nhận rõ thư mục workdir.', 'success')}><Trash2 size={15} /> Dọn file tạm</button></div></section>
+    <section className="settings-section system-section"><div className="settings-heading"><div><h2>System</h2><p>Ứng dụng dùng child_process.spawn với argument array để chạy media.</p></div></div><div className="system-grid"><div className="system-row"><span>FFmpeg</span><strong className={system?.ffmpeg ? 'system-ok' : 'system-bad'}><i /> {system ? system.ffmpeg ? 'Sẵn sàng' : 'Chưa cài / chưa có trong PATH' : 'Đang kiểm tra…'}</strong></div><div className="system-row"><span>FFprobe</span><strong className={system?.ffprobe ? 'system-ok' : 'system-bad'}><i /> {system ? system.ffprobe ? 'Sẵn sàng' : 'Chưa cài / chưa có trong PATH' : 'Đang kiểm tra…'}</strong></div><div className="system-row"><span>Workdir</span><code>{system?.workdir || settings.workdir}</code></div><button className="button ghost" disabled={cleaningTemporaryFiles} onClick={() => void cleanupTemporaryStorage()}>{cleaningTemporaryFiles ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />} {cleaningTemporaryFiles ? 'Đang dọn…' : 'Dọn file tạm'}</button></div></section>
   </div>;
 }

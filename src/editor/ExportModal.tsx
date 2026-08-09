@@ -1,12 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type { BlurRegion, LogoOverlay, SubtitleCue, SubtitleStyle, VideoAsset } from '../types';
 import { Modal } from '../components/Modal';
 import { Check, Download } from '../components/Icons';
 import { cuesToAss, cuesToSrt, downloadText, validateCues } from '../lib/subtitles';
 import { api, friendlyErrorMessage } from '../lib/api';
 import { ProgressModal } from '../components/ProgressModal';
-import { SelectField } from '../components/SelectField';
-import { RangeInput } from '../components/RangeInput';
 
 function saveBlob(name: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
@@ -29,7 +27,6 @@ export function ExportModal({
   dubbingJobId,
   dubbingAudioMix,
   onClose,
-  onExportVideo,
   onNotice,
 }: {
   open: boolean;
@@ -41,25 +38,17 @@ export function ExportModal({
   blurRegions?: BlurRegion[];
   dubTrack?: Blob;
   dubbingJobId?: string;
-  dubbingAudioMix?: { keepOriginal: boolean; originalVolume: number };
+  dubbingAudioMix?: { keepOriginal: boolean; originalVolume: number; separateVocals?: boolean };
   onClose: () => void;
-  onExportVideo?: () => void;
   onNotice?: (message: string, kind?: 'success' | 'error') => void;
 }) {
   const [format, setFormat] = useState<'translated' | 'original' | 'ass' | 'video'>('translated');
-  const [burn, setBurn] = useState(false);
-  const [blur, setBlur] = useState(blurRegions.length > 0);
-  const [dub, setDub] = useState(false);
-  const [keepAudio, setKeepAudio] = useState(true);
-  const [originalVolume, setOriginalVolume] = useState(dubbingAudioMix?.originalVolume ?? 0.25);
-  const [resolution, setResolution] = useState<'original' | '1440' | '1080' | '720'>('original');
-  const [crf, setCrf] = useState(20);
   const [working, setWorking] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStage, setRenderStage] = useState('Đang chuẩn bị render');
+  const hasDub = Boolean(dubTrack || dubbingJobId);
+  const dubbingJobAlreadyMixed = Boolean(dubbingJobId && dubbingAudioMix?.keepOriginal && dubbingAudioMix?.separateVocals);
   const controllerRef = useRef<AbortController | undefined>(undefined);
-  useEffect(() => { if (blurRegions.length > 0) setBlur(true); }, [blurRegions.length]);
-  useEffect(() => { if (dubbingAudioMix) { setKeepAudio(dubbingAudioMix.keepOriginal); setOriginalVolume(dubbingAudioMix.originalVolume); } }, [dubbingAudioMix]);
 
   const validateBeforeAction = () => {
     const validation = validateCues(cues);
@@ -76,16 +65,8 @@ export function ExportModal({
 
   const exportVideo = async () => {
     if (!validateBeforeAction()) return;
-    if (!asset?.file || !asset.uploadId) {
+    if (!asset?.uploadId && !asset?.file) {
       onNotice?.('Video chưa được lưu trên máy. Hãy chọn lại video và chờ upload hoàn tất.', 'error');
-      return;
-    }
-    if (blur && !blurRegions.length) {
-      onNotice?.('Bạn đã bật blur nhưng chưa tạo Blur Region.', 'error');
-      return;
-    }
-    if (dub && !dubTrack && !dubbingJobId) {
-      onNotice?.('Bạn đã bật dubbing nhưng chưa tạo dub track.', 'error');
       return;
     }
 
@@ -106,7 +87,21 @@ export function ExportModal({
         asset.file,
         cues,
         style,
-        { exportId, uploadId: asset.uploadId, resolution: resolution as 'original' | '1080' | '720', crf, keepAudio, originalVolume, burnSubtitles: burn, separateVocals: false, blurRegions: blur ? blurRegions : [], logo, dubTrack: dub ? dubTrack : undefined, dubbingJobId: dub ? dubbingJobId : undefined, fontFile },
+        {
+          exportId,
+          uploadId: asset.uploadId,
+          resolution: 'original',
+          crf: 20,
+          keepAudio: dubbingJobAlreadyMixed ? false : hasDub ? (dubbingAudioMix?.keepOriginal ?? true) : true,
+          originalVolume: dubbingAudioMix?.originalVolume ?? 0.25,
+          burnSubtitles: true,
+          separateVocals: false,
+          blurRegions,
+          logo,
+          dubTrack: hasDub ? dubTrack : undefined,
+          dubbingJobId: hasDub ? dubbingJobId : undefined,
+          fontFile,
+        },
         controller.signal,
       );
       saveBlob('autosub-final.mp4', blob);
@@ -129,18 +124,8 @@ export function ExportModal({
         <button className={format === 'translated' ? 'selected' : ''} onClick={() => setFormat('translated')}><span><Check size={14} /> SRT bản dịch</span><small>.srt</small></button>
         <button className={format === 'original' ? 'selected' : ''} onClick={() => setFormat('original')}><span><Check size={14} /> SRT bản gốc</span><small>.srt</small></button>
         <button className={format === 'ass' ? 'selected' : ''} onClick={() => setFormat('ass')}><span><Check size={14} /> ASS styled</span><small>.ass</small></button>
-        {asset && <button className={format === 'video' ? 'selected' : ''} onClick={() => { setFormat('video'); setBurn(true); setDub(Boolean(dubTrack || dubbingJobId)); }}><span><Check size={14} /> Video hoàn chỉnh</span><small>.mp4</small></button>}
+        {asset && <button className={format === 'video' ? 'selected' : ''} onClick={() => setFormat('video')}><span><Check size={14} /> Video mới nhất</span><small>.mp4</small></button>}
       </div>
-      {asset && <div className="export-options">
-        <div className="section-title"><span>VIDEO OPTIONS</span><small>Re-encode một lần ở bước cuối</small></div>
-        <label className="check-row"><input type="checkbox" checked={blur} onChange={(event) => setBlur(event.target.checked)} /> Làm mờ subtitle cũ</label>
-        <label className="check-row"><input type="checkbox" checked={burn} onChange={(event) => setBurn(event.target.checked)} /> Burn subtitle mới</label>
-        <label className="check-row"><input type="checkbox" checked={dub} onChange={(event) => setDub(event.target.checked)} /> Lồng tiếng</label>
-        <label className="check-row"><input type="checkbox" checked={keepAudio} onChange={(event) => setKeepAudio(event.target.checked)} /> Giữ audio gốc</label>
-        {dub && keepAudio && <label className="field"><span>Âm lượng audio gốc <b className="value-badge">{Math.round(originalVolume * 100)}%</b></span><RangeInput min={0} max={1} step={0.05} value={originalVolume} onChange={(event) => setOriginalVolume(Number(event.target.value))} /></label>}
-        <div className="field"><span>Resolution</span><SelectField ariaLabel="Độ phân giải video" value={resolution} onChange={(value) => setResolution(value as typeof resolution)} options={[{ value: 'original', label: 'Giữ nguyên', description: 'Không đổi kích thước video' }, { value: '1440', label: '2K / 1440p', description: 'QHD · 2560 × 1440' }, { value: '1080', label: '1080p', description: 'Full HD · 1920 × 1080' }, { value: '720', label: '720p', description: 'HD · 1280 × 720' }]} /></div>
-        <label className="field"><span>Quality · CRF <b className="value-badge">{crf}</b></span><RangeInput min={16} max={35} value={crf} onChange={(event) => setCrf(Number(event.target.value))} /></label>
-      </div>}
       <div className="modal-actions"><button className="button ghost" onClick={onClose}>Hủy</button><button className="button primary" disabled={working} onClick={() => { if (format === 'video') void exportVideo(); else download(); }}><Download size={15} /> {working ? 'Đang render…' : format === 'video' ? 'Bắt đầu xuất' : 'Tải xuống'}</button></div>
     </Modal>
     <ProgressModal open={working} title="Đang render video" message={renderStage} value={renderProgress} onCancel={() => { controllerRef.current?.abort(); setWorking(false); }} />

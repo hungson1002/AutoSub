@@ -1,0 +1,4 @@
+# CapCut TTS provider bridge for AutoSub.
+# The repository is an unofficial wrapper around CapCut's internal TTS API.
+git+https://github.com/K07VN/capcut-tts-api.git
+requests>=2.31

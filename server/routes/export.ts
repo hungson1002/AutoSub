@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { run, ensureWorkdir, workdir } from '../services/ffmpeg';
 import { getDubbingResult } from '../services/dubbingJobs';
+import { buildExportAudioFilter } from '../services/exportAudio';
 import { cleanupUploadSession, createUploadSession, discardUploadStream, persistUploadStream, resolveUpload, safeUploadName, UploadTooLargeError } from '../services/uploads';
 
 type Fields = Record<string, string>;
@@ -84,8 +85,13 @@ export async function exportRoutes(app: FastifyInstance) {
     const exportId = fields.exportId;
     setExportProgress(exportId, { percent: 6, stage: 'Đang chuẩn bị media', status: 'running' });
     let jobDubPath: string | undefined;
+    let jobDubIncludesBackground = false;
     if (options.dubbingJobId) {
-      try { jobDubPath = (await getDubbingResult(options.dubbingJobId)).audioFile; }
+      try {
+        const result = await getDubbingResult(options.dubbingJobId);
+        jobDubPath = result.audioFile;
+        jobDubIncludesBackground = Boolean(result.job.config.audioMix.keepOriginal && result.job.config.audioMix.separateVocals);
+      }
       catch (error) { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: error instanceof Error ? error.message : 'Dub job chưa hoàn tất.' }); }
     }
 
@@ -148,7 +154,7 @@ export async function exportRoutes(app: FastifyInstance) {
       if (hasDub) { dubInputIndex = nextInputIndex; nextInputIndex += 1; args.push('-i', jobDubPath || dubFile as string); }
 
       let backgroundAudioPath: string | undefined;
-      if (options.separateVocals) {
+      if (options.separateVocals && !jobDubIncludesBackground) {
         setExportProgress(exportId, { percent: 14, stage: 'Đang tách lời gốc khỏi nhạc nền bằng Demucs', status: 'running' });
         await mkdir(separationDir, { recursive: true });
         await run('py', ['-3.12', '-m', 'demucs', '--two-stems', 'vocals', '-n', 'htdemucs', '--out', separationDir, input], requestAbort.signal);
@@ -173,13 +179,14 @@ export async function exportRoutes(app: FastifyInstance) {
       if (options.burnSubtitles === false) filters.push(`[${current}]null[videoout]`);
       else filters.push(`[${current}]subtitles='${ffmpegPath(assFile)}'${fontDir ? `:fontsdir='${fontDir}'` : ''}[videoout]`);
 
-      const audio = hasDub
-        ? backgroundInputIndex !== undefined
-          ? `[${backgroundInputIndex}:a]volume=${clamp(Number(options.originalVolume ?? 0.35), 0, 1).toFixed(3)}[background];[${dubInputIndex}:a]loudnorm=I=-16:LRA=11:TP=-1.5[dub];[background][dub]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[audioout]`
-          : options.keepAudio
-            ? `[0:a]volume=${clamp(Number(options.originalVolume ?? 0.25), 0, 1).toFixed(3)}[original];[${dubInputIndex}:a]loudnorm=I=-16:LRA=11:TP=-1.5[dub];[original][dub]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[audioout]`
-            : `[${dubInputIndex}:a]loudnorm=I=-16:LRA=11:TP=-1.5[audioout]`
-        : backgroundInputIndex !== undefined ? `[${backgroundInputIndex}:a]anull[audioout]` : options.keepAudio ? '[0:a]anull[audioout]' : '';
+      const audio = buildExportAudioFilter({
+        hasDub,
+        dubInputIndex,
+        backgroundInputIndex,
+        keepAudio: options.keepAudio,
+        originalVolume: options.originalVolume,
+        jobDubIncludesBackground,
+      });
       if (audio) filters.push(audio);
 
       args.push('-filter_complex', filters.join(';'), '-map', '[videoout]');

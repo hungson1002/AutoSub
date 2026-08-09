@@ -16,7 +16,7 @@ export function resolveProviderType(provider: Pick<AIProvider, 'providerType' | 
 export function buildAuthHeaders(provider: AIProvider): Record<string, string> {
   const apiKey = provider.apiKey?.trim();
   const providerType = resolveProviderType(provider);
-  const presetType: ProviderAuthType = providerType === 'elevenlabs' ? 'custom-header' : providerType === 'hiiu-tts' ? 'none' : 'bearer';
+  const presetType: ProviderAuthType = providerType === 'elevenlabs' ? 'custom-header' : providerType === 'hiiu-tts' || providerType === 'capcut-tts' ? 'none' : 'bearer';
   const useOverride = provider.providerType === 'custom' || provider.overrideAuthentication === true;
   const type: ProviderAuthType = useOverride ? provider.authType || presetType : presetType;
   if (!apiKey || type === 'none' || type === 'query-param') return {};
@@ -62,6 +62,8 @@ export function endpoint(provider: AIProvider, key: keyof NonNullable<AIProvider
     ? { models: '/models', voices: '/voices', stt: '/speech-to-text', tts: '/text-to-speech/{voice_id}' }
     : type === 'hiiu-tts'
       ? { models: '/tts/models', tts: '/audio/speech' }
+      : type === 'capcut-tts'
+        ? { models: '/models', voices: '/voices', tts: '/audio/speech' }
       : { models: '/models', chat: '/chat/completions', stt: '/audio/transcriptions', tts: '/audio/speech' };
   const configured = canOverride ? provider.endpoints?.[key] : undefined;
   const target = configured || preset[key] || fallback;

@@ -6,6 +6,7 @@ export const providerTypeOptions: Array<[ProviderType, string]> = [
   ['groq', 'Groq'],
   ['elevenlabs', 'ElevenLabs'],
   ['hiiu-tts', 'HiiuTTS'],
+  ['capcut-tts', 'CapCut TTS (local bridge)'],
   ['vbee', 'Vbee'],
   ['custom', 'Custom'],
 ];
@@ -30,7 +31,7 @@ export function resolvedProviderType(provider: Pick<AIProvider, 'providerType' |
 }
 
 export function isPresetProvider(providerType: ProviderType) {
-  return providerType === 'groq' || providerType === 'elevenlabs' || providerType === 'hiiu-tts';
+  return providerType === 'groq' || providerType === 'elevenlabs' || providerType === 'hiiu-tts' || providerType === 'capcut-tts';
 }
 
 export function hasKnownPreset(provider: Pick<AIProvider, 'providerType' | 'baseUrl'>) {
@@ -41,22 +42,25 @@ export function presetCapabilities(providerType: ProviderType): ProviderCapabili
   if (providerType === 'groq') return { chat: true, stt: true, tts: true };
   if (providerType === 'elevenlabs') return { stt: true, tts: true };
   if (providerType === 'hiiu-tts') return { tts: true };
+  if (providerType === 'capcut-tts') return { tts: true };
   return {};
 }
 
 export function presetAuthType(providerType: ProviderType): ProviderAuthType {
-  return providerType === 'elevenlabs' ? 'custom-header' : providerType === 'hiiu-tts' ? 'none' : 'bearer';
+  return providerType === 'elevenlabs' ? 'custom-header' : providerType === 'hiiu-tts' || providerType === 'capcut-tts' ? 'none' : 'bearer';
 }
 
 export function presetAuth(providerType: ProviderType) {
   if (providerType === 'elevenlabs') return { authType: 'custom-header' as const, authHeaderName: 'xi-api-key', authPrefix: '' };
   if (providerType === 'hiiu-tts') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
+  if (providerType === 'capcut-tts') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
   return { authType: 'bearer' as const, authHeaderName: undefined, authPrefix: 'Bearer' };
 }
 
 export function presetEndpoints(providerType: ProviderType): ProviderEndpoints {
   if (providerType === 'elevenlabs') return { models: '/models', voices: '/voices', stt: '/speech-to-text', tts: '/text-to-speech/{voice_id}' };
   if (providerType === 'hiiu-tts') return { models: '/tts/models', tts: '/audio/speech' };
+  if (providerType === 'capcut-tts') return { models: '/models', voices: '/voices', tts: '/audio/speech' };
   if (providerType === 'groq' || providerType === 'openai-compatible' || providerType === 'vbee') return { models: '/models', chat: '/chat/completions', stt: '/audio/transcriptions', tts: '/audio/speech' };
   return {};
 }
@@ -65,7 +69,28 @@ export function presetBaseUrl(providerType: ProviderType, current = '') {
   if (providerType === 'groq') return 'https://api.groq.com/openai/v1';
   if (providerType === 'elevenlabs') return 'https://api.elevenlabs.io/v1';
   if (providerType === 'hiiu-tts') return 'https://hiiu-tts.netlify.app/v1';
+  if (providerType === 'capcut-tts') return 'local://capcut-tts';
   return current;
+}
+
+/** Built-in local provider entry. It becomes usable after the bridge dependency is installed. */
+export function createCapCutTtsProvider(): AIProvider {
+  return normalizeProvider({
+    id: 'capcut-tts-local',
+    name: 'CapCut TTS',
+    baseUrl: 'local://capcut-tts',
+    enabled: true,
+    models: [{ id: 'capcut-tts', name: 'CapCut TTS', capabilities: { tts: true } }],
+    providerType: 'capcut-tts',
+    authType: 'none',
+    capabilities: { tts: true },
+    voices: [
+      { id: 'BV421_vivn_streaming', name: 'Nhỏ Ngọt Ngào', language: 'vi-VN', resourceId: '7252594014782755330' },
+      { id: 'vi_female_huong', name: 'Giọng Nữ Phổ Thông', language: 'vi-VN', resourceId: '7264854897953083905' },
+      { id: 'BV074_streaming', name: 'Cô Gái Hoạt Ngôn', language: 'vi-VN', resourceId: '7102355709945188865' },
+      { id: 'BV562_streaming', name: 'Mai', language: 'vi-VN', resourceId: '7483736254694035984' },
+    ],
+  });
 }
 
 export function inferModelCapabilities(id: string): ProviderCapabilities {

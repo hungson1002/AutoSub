@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import { available, ensureWorkdir, run, workdir } from './services/ffmpeg';
+import { available, cleanupTemporaryFiles, ensureWorkdir, run, workdir } from './services/ffmpeg';
 import { cleanupIncompleteUploads, MAX_UPLOAD_BYTES } from './services/uploads';
 import { providerRoutes } from './routes/providers';
 import { translationRoutes } from './routes/translate';
@@ -24,6 +24,7 @@ app.get('/api/system', async () => {
   try { await run('py', ['-3.12', '-m', 'demucs', '--help']); demucs = true; } catch { demucs = false; }
   return { ffmpeg: await available('ffmpeg'), ffprobe: await available('ffprobe'), demucs, workdir };
 });
+app.post('/api/system/cleanup', async () => cleanupTemporaryFiles());
 const mediaDebug = process.env.AUTOSUB_DEBUG_UPLOADS === '1';
 app.addHook('onRequest', async (request) => {
   if (!mediaDebug || !/^\/api\/(uploads|extract\/stt|extract\/ocr|export\/video)/.test(request.url)) return;

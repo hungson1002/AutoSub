@@ -73,8 +73,29 @@ export interface DubbingMetadata {
   finalAudioDurationMs: number;
   rewriteAttempts: number;
   speedApplied: number;
+  adaptiveFitVersion?: number;
   extensionMs: number;
+  timelineStartMs?: number;
+  timelineEndMs?: number;
+  timelineShiftMs?: number;
   warning?: string;
+}
+
+export interface DubbingTimelineItem {
+  cueId: string;
+  startMs: number;
+  endMs: number;
+  audioDurationMs: number;
+}
+
+export interface PlannedDubbingTimelineItem extends DubbingTimelineItem {
+  timelineStartMs: number;
+  timelineEndMs: number;
+  timelineShiftMs: number;
+}
+
+export interface AdaptiveTempoItem extends DubbingTimelineItem {
+  targetDurationMs: number;
 }
 
 interface StoredCue {
@@ -111,8 +132,16 @@ const DEFAULTS = {
   safetyGapMs: 80,
   idealSpeedMin: 0.95,
   idealSpeedMax: 1.10,
-  acceptableSpeedMax: 1.15,
-  hardSpeedMax: 1.20,
+  acceptableSpeedMax: 1.20,
+  // Respect the voice speed selected by the user. Apply an additional tempo
+  // only when the generated speech is actually longer than its cue window.
+  narrationTempo: 1,
+  rewriteTriggerSpeed: 1.70,
+  hardSpeedMax: 1.18,
+  gentleSpeedMax: 1.12,
+  adaptiveGroupSize: 3,
+  joinGapMaxMs: 450,
+  joinedCueGapMs: 40,
   minSpeed: 0.90,
   maxRewriteAttempts: 2,
   batchSize: 30,
@@ -120,6 +149,11 @@ const DEFAULTS = {
   llmConcurrency: 2,
   maxRetries: 3,
 } as const;
+
+// Do not reuse audio generated before CapCut request serialization and stable
+// resource IDs were introduced. Old cache entries can contain a mismatched
+// provider response even though their file format is valid.
+const TTS_CACHE_VERSION = 'tts-v5-utf8-bridge';
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
@@ -139,8 +173,73 @@ export const buildTimelineMixFilter = (inputCount: number, durationMs: number) =
   const count = Math.max(1, Math.floor(inputCount));
   const mixed = Array.from({ length: count }, (_value, index) => `[a${index}]`).join('');
   const duration = Math.max(durationMs, 100);
-  return `${mixed}amix=inputs=${count}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95,apad,atrim=duration=${(duration / 1000).toFixed(3)},asetpts=N/SR/TB[out]`;
+  const seconds = (duration / 1000).toFixed(3);
+  return `${mixed}amix=inputs=${count}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.891:level=false,apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB[out]`;
 };
+
+export const buildSeparatedAudioMixFilter = (durationMs: number, originalVolume: number) => {
+  const seconds = (Math.max(100, durationMs) / 1000).toFixed(3);
+  const volume = clamp(Number(originalVolume), 0, 1).toFixed(3);
+  return {
+    duration: seconds,
+    // Demucs can leave faint vocal residue in no_vocals.wav. Duck that stem
+    // only while the dub voice is active so it cannot sound like a second,
+    // reverberant speaker, while retaining the background between cues.
+    filter: `[0:a]apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB,asplit=2[dub][sidechain];[1:a]volume=${volume},apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB[background];[background][sidechain]sidechaincompress=threshold=0.005:ratio=12:attack=5:release=180:makeup=1[ducked];[dub][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891:level=false[audioout]`,
+  };
+};
+
+export function planDubbingTimeline(items: DubbingTimelineItem[], _joinGapMaxMs = DEFAULTS.joinGapMaxMs, joinedCueGapMs = DEFAULTS.joinedCueGapMs): PlannedDubbingTimelineItem[] {
+  let previousEndMs = 0;
+  let previousOriginalEndMs: number | undefined;
+  return [...items]
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs)
+    .map((item) => {
+      const originalStartMs = Math.round(item.startMs);
+      const timelineStartMs = previousOriginalEndMs === undefined
+        ? originalStartMs
+        // Never pull a cue into an earlier silent gap. That made speech arrive
+        // before its SRT timestamp. Ripple only when prior speech overruns this
+        // cue, with a small separation to prevent two voices overlapping.
+        : previousEndMs > originalStartMs
+          ? previousEndMs + joinedCueGapMs
+          : originalStartMs;
+      const timelineEndMs = timelineStartMs + Math.max(1, Math.round(item.audioDurationMs));
+      previousEndMs = timelineEndMs;
+      previousOriginalEndMs = Math.round(item.endMs);
+      return {
+        ...item,
+        timelineStartMs,
+        timelineEndMs,
+        timelineShiftMs: timelineStartMs - Math.round(item.startMs),
+      };
+    });
+}
+
+export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed = DEFAULTS.hardSpeedMax) {
+  const ordered = [...items].sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  const tempos = new Map(ordered.map((item) => [item.cueId, 1]));
+  for (let index = 0; index < ordered.length; index += 1) {
+    const item = ordered[index];
+    const ownRequiredSpeed = item.audioDurationMs / Math.max(item.targetDurationMs, 1);
+    if (ownRequiredSpeed <= DEFAULTS.gentleSpeedMax) {
+      tempos.set(item.cueId, Math.max(tempos.get(item.cueId) || 1, fittingTempo(ownRequiredSpeed, maxSpeed)));
+      continue;
+    }
+
+    // Share a difficult line with its next two cue windows. The local group
+    // gets one gentle cadence; any remaining overrun ripples forward until a
+    // real source gap absorbs it. No line is pulled before its SRT timestamp.
+    const group = ordered.slice(index, index + DEFAULTS.adaptiveGroupSize);
+    const spanMs = Math.max(1, group[group.length - 1].endMs - group[0].startMs);
+    const pauseBudgetMs = Math.max(0, group.length - 1) * DEFAULTS.joinedCueGapMs;
+    const speechBudgetMs = Math.max(1, spanMs - pauseBudgetMs);
+    const groupRequiredSpeed = group.reduce((sum, cue) => sum + cue.audioDurationMs, 0) / speechBudgetMs;
+    const sharedTempo = fittingTempo(groupRequiredSpeed, maxSpeed);
+    for (const cue of group) tempos.set(cue.cueId, Math.max(tempos.get(cue.cueId) || 1, sharedTempo));
+  }
+  return ordered.map((item) => ({ cueId: item.cueId, tempo: tempos.get(item.cueId) || 1 }));
+}
 
 async function writeJsonAtomic(file: string, value: unknown) {
   await mkdir(path.dirname(file), { recursive: true });
@@ -226,24 +325,50 @@ export function isUsefulDubbingRewrite(currentText: string, rewrittenText: strin
     && !forbiddenTexts.some((text) => repeatsAdjacentPhrase(rewritten, text));
 }
 
-async function rewriteTranslation(cue: StoredCue, provider: AIProvider, model: string, currentText: string, targetDurationMs: number, signal: AbortSignal) {
-  const seconds = (targetDurationMs / 1000).toFixed(2);
-  const system = 'You are a Vietnamese dubbing dialogue editor. Return exactly one natural Vietnamese sentence, without markdown or explanation. Never copy or borrow content from another subtitle cue.';
-  const prompt = `Rewrite ONLY the current dialogue to sound natural in about ${seconds} seconds. Preserve every important fact, action, subject, and clause from the current translation. Do not merge it with another cue, do not continue it with the next cue, and do not replace it with the previous or next cue. If it cannot be shortened without losing meaning, return the current translation unchanged.\n\nOriginal source cue: ${cue.input.originalText}\nCurrent translation to preserve: ${currentText}\nAdjacent cues are boundaries only; do not use their wording: previous=${cue.input.previousText ? '[present]' : '[none]'}, next=${cue.input.nextText ? '[present]' : '[none]'}\nTarget duration: ${seconds} seconds.`;
-  const result = normalizeRewrite(await chat(provider, model, [{ role: 'system', content: system }, { role: 'user', content: prompt }], signal));
-  if (!result || result.length < 2) throw new Error('AI không trả về câu rút gọn hợp lệ.');
-  return result;
+export function dubbingRewriteWordLimit(currentText: string, targetDurationMs: number, measuredDurationMs: number, requestNumber: number) {
+  const currentWords = comparableWords(currentText).length;
+  if (currentWords <= 2) return Math.max(1, currentWords - 1);
+  const fitRatio = clamp(
+    (Math.max(targetDurationMs, 1) * DEFAULTS.acceptableSpeedMax) / Math.max(measuredDurationMs, 1),
+    0.15,
+    0.92,
+  );
+  const measuredLimit = Math.floor(currentWords * fitRatio * 0.92);
+  const cadenceLimit = Math.floor((targetDurationMs / 1000) * 2.7) - Math.max(0, requestNumber - 1);
+  return clamp(Math.min(currentWords - 1, measuredLimit, cadenceLimit), 2, currentWords - 1);
 }
 
-function tempoFilter(tempo: number, targetDurationMs?: number) {
+async function rewriteTranslation(cue: StoredCue, provider: AIProvider, model: string, currentText: string, targetDurationMs: number, measuredDurationMs: number, requestNumber: number, rejectedRewrites: string[], signal: AbortSignal) {
+  const seconds = (targetDurationMs / 1000).toFixed(2);
+  const maxWords = dubbingRewriteWordLimit(currentText, targetDurationMs, measuredDurationMs, requestNumber);
+  const system = 'You are a Vietnamese dubbing dialogue editor. Return exactly one natural Vietnamese sentence, without markdown or explanation. Never copy or borrow content from another subtitle cue. The result will replace the visible subtitle, so it must preserve the cue meaning while obeying the word limit.';
+  const rejected = rejectedRewrites.length ? `\nDo not repeat these rejected answers: ${rejectedRewrites.map((value) => JSON.stringify(value)).join(', ')}.` : '';
+  const prompt = `Adapt ONLY the current dialogue for clear Vietnamese speech in ${seconds} seconds. The current TTS audio measures ${(measuredDurationMs / 1000).toFixed(2)} seconds and does not fit. This is shortening request ${requestNumber}. Use at most ${maxWords} words; this word limit is mandatory. Keep the main meaning, subject, action, names and important numbers; remove repetition and filler first. Do not merge it with another cue, do not continue it with the next cue, and do not use wording from adjacent cues.${rejected}\n\nOriginal source cue: ${cue.input.originalText}\nCurrent Vietnamese subtitle: ${currentText}\nAdjacent cues are boundaries only: previous=${cue.input.previousText ? '[present]' : '[none]'}, next=${cue.input.nextText ? '[present]' : '[none]'}\nReturn one Vietnamese sentence of no more than ${maxWords} words.`;
+  const result = normalizeRewrite(await chat(provider, model, [{ role: 'system', content: system }, { role: 'user', content: prompt }], signal));
+  if (!result || result.length < 2) throw new Error('AI không trả về câu rút gọn hợp lệ.');
+  return { text: result, maxWords };
+}
+
+export function tempoFilter(tempo: number) {
   const filters: string[] = [];
-  if (Math.abs(tempo - 1) > 0.005) filters.push(`atempo=${tempo.toFixed(3)}`);
-  if (targetDurationMs !== undefined) {
-    const targetSeconds = (targetDurationMs / 1000).toFixed(3);
-    filters.push(`apad=pad_dur=${targetSeconds}`, `atrim=duration=${targetSeconds}`);
-  }
+  if (Math.abs(tempo - 1) > 0.005) filters.push(`rubberband=tempo=${tempo.toFixed(3)}:pitch=1.000:transients=mixed:detector=compound:phase=laminar:window=standard:smoothing=on:formant=preserved`);
+  // Limiting belongs to the completed timeline, not every individual cue.
+  // Applying it here and again after mixing caused avoidable pumping/distortion.
   return filters.join(',') || 'anull';
 }
+
+export function canFitSpeechWithoutCut(ttsDurationMs: number, targetDurationMs: number, maxSpeed = DEFAULTS.hardSpeedMax) {
+  return ttsDurationMs <= Math.max(targetDurationMs, 1) * maxSpeed + 20;
+}
+
+export function fittingTempo(requiredSpeed: number, maxSpeed = DEFAULTS.hardSpeedMax) {
+  return clamp(Math.max(requiredSpeed, DEFAULTS.narrationTempo), 1, maxSpeed);
+}
+
+// CapCut returns a small amount of encoder silence around each phrase. It is
+// safe to remove only the leading/trailing silence; internal pauses are part
+// of the actor's delivery and must remain intact.
+export const speechTrimFilter = 'silenceremove=start_periods=1:start_duration=0.03:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.03:start_threshold=-45dB,areverse';
 
 export function isTransientDubbingError(error: unknown) {
   if (error instanceof ProviderError) {
@@ -305,12 +430,22 @@ const metadataFor = (cue: StoredCue, timing: ReturnType<typeof timingFor>, text:
   finalAudioDurationMs,
   rewriteAttempts,
   speedApplied,
+  adaptiveFitVersion: 0,
   extensionMs: timing.extensionMs,
   ...(warning ? { warning } : {}),
 });
 
 function providerReference(provider: AIProvider) {
   return safeName(provider.id || provider.name || createHash('sha1').update(provider.baseUrl).digest('hex').slice(0, 10));
+}
+
+function isCapCutProvider(provider: AIProvider) {
+  return provider.providerType === 'capcut-tts' || provider.baseUrl.trim().toLowerCase() === 'local://capcut-tts';
+}
+
+export function effectiveTtsConcurrency(cues: DubbingCueInput[], requested?: number) {
+  const normal = clamp(Math.round(requested || DEFAULTS.ttsConcurrency), 1, 16);
+  return cues.some((cue) => isCapCutProvider(cue.provider)) ? 1 : normal;
 }
 
 async function saveCue(jobId: string, cue: StoredCue) {
@@ -338,7 +473,7 @@ export async function createDubbingJob(input: CreateJobInput) {
   const config: DubbingJobConfig = {
     timingMode: input.timingMode === 'strict' ? 'strict' : 'natural',
     batchSize: clamp(Math.round(input.batchSize || DEFAULTS.batchSize), 1, 100),
-    ttsConcurrency: clamp(Math.round(input.ttsConcurrency || DEFAULTS.ttsConcurrency), 1, 16),
+    ttsConcurrency: effectiveTtsConcurrency(input.cues, input.ttsConcurrency),
     llmConcurrency: clamp(Math.round(input.llmConcurrency || DEFAULTS.llmConcurrency), 1, 8),
     maxRetries: clamp(Math.round(input.maxRetries ?? DEFAULTS.maxRetries), 0, 3),
     audioMix: normalizeAudioMix(input.audioMix),
@@ -395,6 +530,18 @@ export async function getDubbingJobStatus(id: string): Promise<DubbingJobStatus>
     failedCueIds: failed.map((cue) => cue.id),
     failedCueErrors: failed.map((cue) => ({ id: cue.id, index: cue.index, stage: cue.errorStage || 'failed', attempts: cue.attempts, error: cue.error || 'Unknown cue error.' })),
   };
+}
+
+export async function findLatestDubbingJobByVideoId(videoId: string): Promise<DubbingJobStatus | undefined> {
+  const normalizedVideoId = videoId.trim();
+  if (!normalizedVideoId) return undefined;
+  const entries = await readdir(jobsRoot, { withFileTypes: true }).catch(() => []);
+  const jobs = (await Promise.all(entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('dub-'))
+    .map((entry) => readDubbingJob(entry.name).catch(() => undefined))))
+    .filter((job): job is DubbingJob => Boolean(job?.videoId === normalizedVideoId))
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  return jobs[0] ? getDubbingJobStatus(jobs[0].id) : undefined;
 }
 
 export async function recoverDubbingJob(id: string) {
@@ -471,12 +618,16 @@ class DubbingRunner {
     let ttsDurationMs = 0;
     let requiredSpeed = 1;
     let rawPath = '';
+    let speechPath = '';
     let rewriteWarning: string | undefined;
+    let rewriteRequests = 0;
+    const rejectedRewrites: string[] = [];
 
     for (let attempt = 0; attempt <= DEFAULTS.maxRewriteAttempts; attempt += 1) {
       const ttsSpeed = clamp(Number(cue.input.speed) || 1, DEFAULTS.minSpeed, DEFAULTS.hardSpeedMax);
-      const cacheKey = createHash('sha256').update(JSON.stringify([provider.id, provider.baseUrl, cue.input.model, cue.input.voice, finalText, ttsSpeed, 'wav'])).digest('hex');
+      const cacheKey = createHash('sha256').update(JSON.stringify([TTS_CACHE_VERSION, provider.id, provider.baseUrl, cue.input.model, cue.input.voice, finalText, ttsSpeed, 'wav'])).digest('hex');
       rawPath = path.join(cacheDir(this.job.id), `${cacheKey}.wav`);
+      speechPath = path.join(cacheDir(this.job.id), `${cacheKey}.speech.wav`);
       try {
         await stat(rawPath);
       } catch {
@@ -484,9 +635,14 @@ class DubbingRunner {
         const generated = await this.ttsSemaphore.use(() => retryDubbingOperation(() => synthesize(provider, cue.input.model, cue.input.voice, finalText, { speed: ttsSpeed, format: 'wav', signal: this.controller.signal }), this.job.config.maxRetries, this.controller.signal));
         await writeBufferAtomic(rawPath, generated);
       }
-      ttsDurationMs = await probeDuration(rawPath);
+      try {
+        await stat(speechPath);
+      } catch {
+        await run('ffmpeg', ['-y', '-i', rawPath, '-af', speechTrimFilter, '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', speechPath], this.controller.signal);
+      }
+      ttsDurationMs = await probeDuration(speechPath);
       requiredSpeed = ttsDurationMs / timing.targetDurationMs;
-      if (requiredSpeed <= DEFAULTS.acceptableSpeedMax || attempt >= DEFAULTS.maxRewriteAttempts) break;
+      if (requiredSpeed <= DEFAULTS.rewriteTriggerSpeed || attempt >= DEFAULTS.maxRewriteAttempts) break;
       if (cue.skipRewrite || !rewriteProvider || !this.job.config.rewriteModel) {
         rewriteWarning = cue.skipRewrite
           ? `Cue ${cue.index}: the previous AI rewrite was not shorter; keeping the original text and capping speed at ${DEFAULTS.hardSpeedMax.toFixed(2)}x.`
@@ -494,36 +650,44 @@ class DubbingRunner {
         break;
       }
       await this.setCueStatus(cue, 'rewriting');
-      let rewritten: string;
+      let rewritten: { text: string; maxWords: number };
+      rewriteRequests += 1;
       try {
-        rewritten = await this.llmSemaphore.use(() => retryDubbingOperation(() => rewriteTranslation(cue, rewriteProvider, this.job.config.rewriteModel as string, finalText, timing.targetDurationMs, this.controller.signal), this.job.config.maxRetries, this.controller.signal));
+        rewritten = await this.llmSemaphore.use(() => retryDubbingOperation(() => rewriteTranslation(cue, rewriteProvider, this.job.config.rewriteModel as string, finalText, timing.targetDurationMs, ttsDurationMs, rewriteRequests, rejectedRewrites, this.controller.signal), this.job.config.maxRetries, this.controller.signal));
       } catch (error) {
         if (!isRewriteUnavailableError(error)) throw error;
         rewriteWarning = `Cue ${cue.index} could not use the configured provider for rewriting; speed will be capped at ${DEFAULTS.hardSpeedMax.toFixed(2)}x.`;
         break;
       }
-      if (!isUsefulDubbingRewrite(finalText, rewritten, [cue.input.previousText || '', cue.input.nextText || ''])) {
-        rewriteWarning = `Cue ${cue.index}: AI rewrite did not produce a shorter sentence; keeping the original text and capping speed at ${DEFAULTS.hardSpeedMax.toFixed(2)}x.`;
-        break;
+      if (!isUsefulDubbingRewrite(finalText, rewritten.text, [cue.input.previousText || '', cue.input.nextText || ''])) {
+        rejectedRewrites.push(rewritten.text);
+        rewriteWarning = `Cue ${cue.index}: rewrite request ${rewriteRequests} was not shorter; trying again with a stricter word limit.`;
+        continue;
       }
-      finalText = rewritten;
+      finalText = rewritten.text;
       rewriteAttempts += 1;
     }
 
-    const finalTempo = requiredSpeed > DEFAULTS.hardSpeedMax
-      ? DEFAULTS.hardSpeedMax
-      : requiredSpeed < DEFAULTS.idealSpeedMin
-        ? clamp(requiredSpeed, DEFAULTS.minSpeed, DEFAULTS.idealSpeedMin)
-        : requiredSpeed > DEFAULTS.idealSpeedMax ? requiredSpeed : 1;
-    const needsHardLimit = requiredSpeed > DEFAULTS.hardSpeedMax;
-    const warning = rewriteWarning || (needsHardLimit ? `Cue ${cue.index} remains over duration after ${rewriteAttempts} rewrite attempts; speed capped at ${DEFAULTS.hardSpeedMax.toFixed(2)}x.` : (rewriteAttempts > 0 ? `Cue ${cue.index} was rewritten to fit its speaking window.` : undefined));
+    // The provider already receives the user-selected voice speed. Do not add a
+    // second baseline speed-up here; fit only audio that truly exceeds its cue.
+    const finalTempo = fittingTempo(requiredSpeed);
+    const warnings = [
+      rewriteAttempts > 0 ? `Cue ${cue.index} đã được rút gọn để đọc tự nhiên hơn.` : undefined,
+      rewriteWarning,
+      !canFitSpeechWithoutCut(ttsDurationMs, timing.targetDurationMs)
+        ? `Cue ${cue.index} vẫn dài hơn cửa sổ thoại sau khi rút gọn; AutoSub giữ trọn lời ở tốc độ ${finalTempo.toFixed(2)}x và tự dời các cue phía sau để không chồng tiếng.`
+        : undefined,
+    ].filter((value): value is string => Boolean(value));
+    const warning = warnings.join(' ') || undefined;
     await this.setCueStatus(cue, 'fitting');
     const finalPath = audioFile(this.job.id, cue.id);
     const temporary = `${finalPath}.${process.pid}.${Date.now()}.tmp.wav`;
-    await run('ffmpeg', ['-y', '-i', rawPath, '-filter:a', tempoFilter(finalTempo, needsHardLimit ? undefined : timing.targetDurationMs), '-ar', '48000', '-ac', '2', temporary], this.controller.signal);
+    // Preserve a clean, un-stretched speech master. Group-aware fitting runs
+    // after all neighboring cue durations are available.
+    await run('ffmpeg', ['-y', '-i', speechPath, '-filter:a', tempoFilter(1), '-ar', '48000', '-ac', '2', temporary], this.controller.signal);
     await rename(temporary, finalPath).catch(async (error) => { await rm(finalPath, { force: true }); await rename(temporary, finalPath).catch(() => { throw error; }); });
     const finalAudioDurationMs = await probeDuration(finalPath);
-    const metadata = metadataFor(cue, timing, finalText, ttsDurationMs, finalAudioDurationMs, rewriteAttempts, finalTempo, warning);
+    const metadata = metadataFor(cue, timing, finalText, ttsDurationMs, finalAudioDurationMs, rewriteAttempts, 1, warning);
     await this.setCueStatus(cue, 'done', { audioFile: path.relative(jobDir(this.job.id), finalPath), metadata, error: undefined });
   }
 
@@ -546,24 +710,72 @@ class DubbingRunner {
   }
 
   private async buildTimeline(cues: StoredCue[]) {
-    const completed = cues.filter((cue) => cue.status === 'done' && cue.audioFile && cue.metadata);
+    const completed = cues
+      .filter((cue) => cue.status === 'done' && cue.audioFile && cue.metadata)
+      .sort((left, right) => left.input.startMs - right.input.startMs || left.index - right.index);
     if (completed.length !== this.job.totalCues) throw new Error('Chưa thể dựng timeline cuối vì vẫn còn cue chưa hoàn tất.');
+    const adaptiveTempoById = new Map(planAdaptiveCueTempos(completed.map((cue) => ({
+      cueId: cue.id,
+      startMs: cue.input.startMs,
+      endMs: cue.input.endMs,
+      audioDurationMs: cue.metadata?.ttsDurationMs || cue.input.endMs - cue.input.startMs,
+      targetDurationMs: cue.metadata?.targetDurationMs || cue.input.endMs - cue.input.startMs,
+    }))).map((item) => [item.cueId, item.tempo]));
+    for (const cue of completed) {
+      if (!cue.audioFile || !cue.metadata || cue.metadata.adaptiveFitVersion !== 0) continue;
+      const tempo = adaptiveTempoById.get(cue.id) || 1;
+      const sourcePath = path.join(jobDir(this.job.id), cue.audioFile);
+      if (Math.abs(tempo - 1) > 0.005) {
+        const temporary = `${sourcePath}.${process.pid}.${Date.now()}.fit.wav`;
+        await run('ffmpeg', ['-y', '-i', sourcePath, '-filter:a', tempoFilter(tempo), '-ar', '48000', '-ac', '2', temporary], this.controller.signal);
+        await rm(sourcePath, { force: true });
+        await rename(temporary, sourcePath);
+      }
+      cue.metadata = {
+        ...cue.metadata,
+        speedApplied: tempo,
+        finalAudioDurationMs: await probeDuration(sourcePath),
+        adaptiveFitVersion: 1,
+      };
+      await saveCue(this.job.id, cue);
+    }
+    const planById = new Map(planDubbingTimeline(completed.map((cue) => ({
+      cueId: cue.id,
+      startMs: cue.input.startMs,
+      endMs: cue.input.endMs,
+      audioDurationMs: cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs,
+    }))).map((item) => [item.cueId, item]));
+    for (const cue of completed) {
+      const plan = planById.get(cue.id);
+      if (!plan || !cue.metadata) continue;
+      cue.metadata = {
+        ...cue.metadata,
+        timelineStartMs: plan.timelineStartMs,
+        timelineEndMs: plan.timelineEndMs,
+        timelineShiftMs: plan.timelineShiftMs,
+      };
+      await saveCue(this.job.id, cue);
+    }
     await rm(timelineDir(this.job.id), { recursive: true, force: true });
     await mkdir(timelineDir(this.job.id), { recursive: true });
     const segments: string[] = [];
     const batchSize = this.job.config.batchSize;
     for (let offset = 0; offset < completed.length; offset += batchSize) {
       const batch = completed.slice(offset, offset + batchSize);
-      const nextStart = completed[offset + batch.length]?.input.startMs;
-      const segmentStart = offset === 0 ? 0 : batch[0].input.startMs;
-      const segmentEnd = nextStart ?? Math.max(...batch.map((cue) => cue.input.startMs + (cue.metadata?.targetDurationMs || cue.input.endMs - cue.input.startMs)));
+      const nextCue = completed[offset + batch.length];
+      const nextStart = nextCue ? planById.get(nextCue.id)?.timelineStartMs : undefined;
+      const firstPlan = planById.get(batch[0].id);
+      const segmentStart = offset === 0 ? 0 : firstPlan?.timelineStartMs ?? batch[0].input.startMs;
+      const segmentEnd = nextStart ?? Math.max(...batch.map((cue) => planById.get(cue.id)?.timelineEndMs ?? cue.input.endMs));
       const durationMs = Math.max(segmentEnd - segmentStart, 100);
       const args: string[] = ['-y'];
       const filters: string[] = [];
       batch.forEach((cue, index) => {
-        const delay = Math.max(0, Math.round(cue.input.startMs - segmentStart));
+        const delay = Math.max(0, Math.round((planById.get(cue.id)?.timelineStartMs ?? cue.input.startMs) - segmentStart));
+        const cueDurationMs = cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs;
+        const fadeOutStart = Math.max(0, (cueDurationMs - 12) / 1000).toFixed(3);
         args.push('-i', path.join(jobDir(this.job.id), cue.audioFile as string));
-        filters.push(`[${index}:a]volume=${clamp(cue.input.volume ?? 1, 0, 2).toFixed(3)},adelay=${delay}|${delay}[a${index}]`);
+        filters.push(`[${index}:a]volume=${clamp(cue.input.volume ?? 1, 0, 2).toFixed(3)},afade=t=in:st=0:d=0.008,afade=t=out:st=${fadeOutStart}:d=0.012,adelay=${delay}|${delay}[a${index}]`);
       });
       filters.push(buildTimelineMixFilter(batch.length, durationMs));
       const output = path.join(timelineDir(this.job.id), `segment-${String(segments.length).padStart(5, '0')}.wav`);
@@ -588,8 +800,10 @@ class DubbingRunner {
       try {
         await run('py', ['-3.12', '-m', 'demucs', '--two-stems', 'vocals', '-n', 'htdemucs', '--out', separationDir, source.absolutePath], this.controller.signal);
         await stat(backgroundPath);
-        const originalVolume = clamp(this.job.config.audioMix.originalVolume, 0, 1).toFixed(3);
-        await run('ffmpeg', ['-y', '-i', finalPath, '-i', backgroundPath, '-filter_complex', `[1:a]volume=${originalVolume}[background];[0:a]anull[dub];[dub][background]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[audioout]`, '-map', '[audioout]', '-ar', '48000', '-ac', '2', temporaryMixedPath], this.controller.signal);
+        const originalVolume = clamp(this.job.config.audioMix.originalVolume, 0, 1);
+        const sourceDurationMs = await probeDuration(source.absolutePath);
+        const finiteMix = buildSeparatedAudioMixFilter(sourceDurationMs, originalVolume);
+        await run('ffmpeg', ['-y', '-i', finalPath, '-i', backgroundPath, '-filter_complex', finiteMix.filter, '-map', '[audioout]', '-t', finiteMix.duration, '-ar', '48000', '-ac', '2', temporaryMixedPath], this.controller.signal);
         await rm(mixedPath, { force: true });
         await rename(temporaryMixedPath, mixedPath);
         outputPath = mixedPath;

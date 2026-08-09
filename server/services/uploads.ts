@@ -146,7 +146,8 @@ export async function cleanupIncompleteUploads() {
   await Promise.all(sessions.filter((entry) => entry.isDirectory()).map(async (session) => {
     const directory = path.join(root, session.name);
     const details = await stat(directory).catch(() => undefined);
-    if (details && Date.now() - details.mtimeMs > UPLOAD_SESSION_RETENTION_MS) {
+    const hasCompletedUpload = await stat(path.join(directory, 'upload.json')).then(() => true).catch(() => false);
+    if (details && !hasCompletedUpload && Date.now() - details.mtimeMs > UPLOAD_SESSION_RETENTION_MS) {
       await rm(directory, { recursive: true, force: true });
       return;
     }

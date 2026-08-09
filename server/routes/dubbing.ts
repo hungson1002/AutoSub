@@ -6,6 +6,7 @@ import { resolveProviderType } from '../providers/base';
 import {
   cancelDubbingJob,
   createDubbingJob,
+  findLatestDubbingJobByVideoId,
   getDubbingJobStatus,
   getDubbingResult,
   initializeDubbingJobs,
@@ -51,6 +52,13 @@ export async function dubbingRoutes(app: FastifyInstance) {
       const job = await createDubbingJob(request.body as Parameters<typeof createDubbingJob>[0]);
       return reply.code(201).send({ jobId: job.id, status: job.status, totalCues: job.totalCues });
     } catch (error) { return sendRouteError(reply, error, 'Không thể tạo dubbing job.'); }
+  });
+
+  app.get('/api/dubbing/jobs/latest-for-video', async (request, reply) => {
+    const videoId = String((request.query as { videoId?: string }).videoId || '').trim();
+    if (!videoId) return reply.code(400).send({ error: 'Thiếu uploadId của video cần khôi phục bản lồng tiếng.' });
+    try { return reply.send({ job: await findLatestDubbingJobByVideoId(videoId) }); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể tìm bản lồng tiếng mới nhất của video.'); }
   });
 
   app.post('/api/dubbing/jobs/:id/start', async (request, reply) => {
