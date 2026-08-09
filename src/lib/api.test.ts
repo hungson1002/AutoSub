@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { api, buildRequestInit, friendlyErrorMessage } from './api';
 import { LatestUploadGuard } from './latestUpload';
+import { videoAssetUploadFile } from './videoAsset';
 
 const responsePayload = { id: 'job-1', status: 'paused', totalCues: 1, doneCues: 0, failedCues: 0 };
 
@@ -117,6 +118,19 @@ test('latest video upload wins when an earlier upload resolves later', () => {
   assert.equal(uploadA.controller.signal.aborted, true);
   assert.equal(finalState.file, fileB);
   assert.equal(finalState.uploadId, 'upload-b');
+});
+
+test('editor can recover an upload file from the video asset preview URL', async () => {
+  const calls: string[] = [];
+  const file = await videoAssetUploadFile({ name: 'source.mp4', type: 'video/mp4', url: '/preview/source' }, undefined, (async (input) => {
+    calls.push(String(input));
+    return new Response(new Blob(['video-bytes'], { type: 'video/mp4' }), { status: 200 });
+  }) as typeof fetch);
+
+  assert.deepEqual(calls, ['/preview/source']);
+  assert.equal(file.name, 'source.mp4');
+  assert.equal(file.type, 'video/mp4');
+  assert.equal(file.size, 11);
 });
 
 test('translation request sends each cue independently without neighboring cue text', async () => {

@@ -17,6 +17,7 @@ import { capabilityAssignments, updateCapabilityAssignments } from '../lib/setti
 import { LogoModal } from '../editor/LogoModal';
 import { LatestUploadGuard } from '../lib/latestUpload';
 import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
+import { videoAssetUploadFile } from '../lib/videoAsset';
 
 function applyPronunciation(text: string, entries: PronunciationEntry[]) {
   return entries.filter((entry) => entry.enabled && entry.source.trim()).reduce((value, entry) => value.split(entry.source).join(entry.reading), text);
@@ -237,10 +238,38 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
   const selectCue = useCallback((id: string) => { setSelectedId(id); const cue = cues.find((item) => item.id === id); if (cue) { setCurrentTime(cue.startMs); setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: cue.startMs }); } }, [cues]);
   const deleteCue = useCallback((id: string) => { const next = cues.filter((cue) => cue.id !== id).map((cue, index) => ({ ...cue, index: index + 1 })); onCuesChange(next); if (selectedId === id) setSelectedId(next[0]?.id); }, [cues, onCuesChange, selectedId]);
   const addCue = useCallback(() => { const last = cues.at(-1); const next: SubtitleCue = { id: crypto.randomUUID(), index: cues.length + 1, startMs: last?.endMs || 0, endMs: (last?.endMs || 0) + 2500, originalText: '', translatedText: '', voiceGroup: 'G1', enabled: true }; onCuesChange([...cues, next]); setSelectedId(next.id); }, [cues, onCuesChange]);
+  const uploadVideoAsset = (nextAsset: VideoAsset, recovering = false) => {
+    uploadGuardRef.current.cancel();
+    const request = uploadGuardRef.current.begin();
+    assetRef.current = nextAsset;
+    onAssetChange(nextAsset);
+    setUploadingVideo(true);
+    onNotice(recovering ? 'Đang khôi phục liên kết video cho chức năng lồng tiếng…' : `Đang lưu video ${nextAsset.name} trên máy…`, 'success');
+    void videoAssetUploadFile(nextAsset, request.controller.signal).then((file) => api.uploadMedia(file, request.controller.signal).then((stored) => ({ file, stored }))).then(({ file, stored }) => {
+      if (!uploadGuardRef.current.isCurrent(request)) {
+        void api.deleteUpload(stored.uploadId).catch(() => undefined);
+        return;
+      }
+      if (assetRef.current?.url !== nextAsset.url) {
+        void api.deleteUpload(stored.uploadId).catch(() => undefined);
+        return;
+      }
+      const uploadedAsset = { ...nextAsset, file, uploadId: stored.uploadId, storedPath: stored.storedPath, path: stored.storedPath };
+      assetRef.current = uploadedAsset;
+      onAssetChange(uploadedAsset);
+      onNotice(recovering ? 'Đã khôi phục video cho lồng tiếng và tách vocal.' : `Đã lưu video ${file.name} trên máy.`, 'success');
+    }).catch((error) => {
+      if (!uploadGuardRef.current.isCurrent(request)) return;
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      onNotice(friendlyErrorMessage(error, recovering ? 'Không thể khôi phục video. Hãy bấm Thay video và chọn lại file nguồn.' : 'Không thể lưu video trên máy.'), 'error');
+    }).finally(() => {
+      if (uploadGuardRef.current.complete(request)) setUploadingVideo(false);
+    });
+  };
+
   const selectVideo = (file?: File) => {
     if (!file) return;
     const previousAsset = assetRef.current;
-    uploadGuardRef.current.cancel();
     if (previousAsset?.uploadId) {
       storage.removeDubbingJob(previousAsset.uploadId);
       void api.deleteUpload(previousAsset.uploadId).catch(() => undefined);
@@ -250,29 +279,15 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     setDubAudioMix(undefined);
     setDubbingJob(undefined);
     dubbingTerminalNoticeRef.current = '';
-    const nextAsset: VideoAsset = { name: file.name, file, url: URL.createObjectURL(file), type: file.type };
-    const request = uploadGuardRef.current.begin();
-    assetRef.current = nextAsset;
-    onAssetChange(nextAsset);
-    setUploadingVideo(true);
-    onNotice(`Đang lưu video ${file.name} trên máy…`, 'success');
-    void api.uploadMedia(file, request.controller.signal).then((stored) => {
-      if (!uploadGuardRef.current.isCurrent(request)) {
-        void api.deleteUpload(stored.uploadId).catch(() => undefined);
-        return;
-      }
-      const uploadedAsset = { ...nextAsset, uploadId: stored.uploadId, storedPath: stored.storedPath, path: stored.storedPath };
-      assetRef.current = uploadedAsset;
-      onAssetChange(uploadedAsset);
-      onNotice(`Đã lưu video ${file.name} trên máy.`, 'success');
-    }).catch((error) => {
-      if (!uploadGuardRef.current.isCurrent(request)) return;
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      onNotice(friendlyErrorMessage(error, 'Không thể lưu video trên máy.'), 'error');
-    }).finally(() => {
-      if (uploadGuardRef.current.complete(request)) setUploadingVideo(false);
-    });
+    uploadVideoAsset({ name: file.name, file, url: URL.createObjectURL(file), type: file.type });
   };
+
+  useEffect(() => {
+    if (!asset || asset.uploadId || uploadingVideo) return;
+    uploadVideoAsset(asset, true);
+  // The upload function intentionally owns cancellation/latest-request checks.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asset?.url, asset?.uploadId]);
 
   const clearTranslationProgressTimer = () => {
     if (translationProgressTimerRef.current !== undefined) {
@@ -442,7 +457,7 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     <BlurEditor open={blurOpen} regions={blurRegions} asset={asset} currentTimeMs={currentTime} onClose={() => setBlurOpen(false)} onChange={setBlurRegions} />
     <TranslationSetupModal open={translationOpen} provider={providers.find((item) => item.id === translationSetup.providerId)} providers={providers} assignments={capabilityAssignments(settings, 'translation')} cues={cues} setup={translationSetup} onChange={(patch) => setTranslationSetup((current) => ({ ...current, ...patch }))} onClose={() => setTranslationOpen(false)} onStart={(setup) => void translateAll(setup)} />
     <LogoModal open={logoOpen} logo={logo} externalPosition={logoPreview} onClose={() => setLogoOpen(false)} onPreviewChange={setLogoPreview} onChange={(next) => { if (logo?.url && logo.url !== next.url && logo.url.startsWith('blob:')) URL.revokeObjectURL(logo.url); setLogo(next); setLogoPreview(next); onNotice('Đã cập nhật logo/watermark.', 'success'); }} />
-    <DubbingModal open={dubbingOpen} providers={providers} assignments={assignments} availableAssignments={capabilityAssignments(settings, 'tts')} cues={cues} pronunciation={pronunciation} sourceVideoReady={Boolean(asset?.uploadId)} job={dubbingJob} onJobAction={(action) => void dubbingJobAction(action)} onClose={() => setDubbingOpen(false)} onPronunciationChange={setPronunciation} onNotice={onNotice} onRun={(configs, options) => void runDubbingJob(configs, options)} />
+    <DubbingModal open={dubbingOpen} providers={providers} assignments={assignments} availableAssignments={capabilityAssignments(settings, 'tts')} cues={cues} pronunciation={pronunciation} sourceVideoReady={Boolean(asset?.uploadId)} sourceVideoUploading={uploadingVideo} job={dubbingJob} onJobAction={(action) => void dubbingJobAction(action)} onClose={() => setDubbingOpen(false)} onPronunciationChange={setPronunciation} onNotice={onNotice} onRun={(configs, options) => void runDubbingJob(configs, options)} />
     <ExportModal open={exportOpen} cues={cues} style={settings.subtitleStyle} asset={asset} logo={logo} fontFile={fontFile} blurRegions={blurRegions} dubTrack={dubTrack} dubbingJobId={dubbingJob?.status === 'completed' ? dubbingJob.id : undefined} dubbingAudioMix={dubbingJob?.config.audioMix} onClose={() => setExportOpen(false)} onNotice={onNotice} />
     <ProgressModal open={working} title="Đang xử lý audio" message="Provider → FFprobe → atempo → dub-track.wav" onCancel={() => { controllerRef.current?.abort(); setWorking(false); }} />
     <ProgressModal open={translationWorking} title="Đang dịch subtitle" message={translationStage} value={translationProgress} onCancel={() => { translationControllerRef.current?.abort(); clearTranslationProgressTimer(); }} />

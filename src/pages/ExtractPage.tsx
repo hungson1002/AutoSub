@@ -148,6 +148,10 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
             setProgressStage('Đã dịch xong · đang lưu SubtitleCue[]');
           }
         }
+        // Re-assert the server-backed asset together with the extraction result.
+        // This prevents a transient File/blob asset from surviving navigation/HMR
+        // without the uploadId required by dubbing and vocal separation.
+        onAssetChange(asset);
         onCuesChange(nextCues);
         updateRunState({ status: 'completed', mode: tab, fileName: file.name, cueCount: nextCues.length, updatedAt: Date.now() });
         onNotice(`Đã trích xuất ${nextCues.length} cue${autoTranslate ? ' và xử lý auto-translation.' : '.'}`, 'success');
@@ -156,6 +160,7 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
         clearProgressTimers();
         setProgress(95);
         setProgressStage(`Đã nhận OCR · ${result.cues.length} cue, đang lưu kết quả`);
+        onAssetChange(asset);
         onCuesChange(result.cues);
         updateRunState({ status: 'completed', mode: tab, fileName: file.name, cueCount: result.cues.length, updatedAt: Date.now() });
         onNotice(`Đã OCR ${result.cues.length} cue.`, 'success');
