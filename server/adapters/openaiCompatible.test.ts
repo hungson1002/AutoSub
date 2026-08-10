@@ -94,3 +94,20 @@ test('keeps translation results in input id order and uses a strict one-to-one p
     globalThis.fetch = originalFetch;
   }
 });
+
+test('rejects Chinese source text echoed unchanged for Vietnamese translation', async () => {
+  const originalFetch = globalThis.fetch;
+  const provider: AIProvider = {
+    id: 'translation-provider', name: 'Translation provider', baseUrl: 'http://provider.test/v1', enabled: true,
+    models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true },
+  };
+  globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: [{ id: 'a', translation: '你为什么不杀我' }] }) } }] }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => translateBatch(provider, 'model', [{ id: 'a', text: '你为什么不杀我', targetDurationMs: 1000 }], 'Chinese', 'Vietnamese', 'Natural', '', []),
+      /nguyên văn tiếng Trung/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

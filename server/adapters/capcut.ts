@@ -4,6 +4,23 @@ import { ProviderError } from './errors';
 
 export const CAPCUT_TTS_MODEL = 'capcut-tts';
 
+/**
+ * The unofficial bridge has to preserve CapCut's response text for diagnosis,
+ * but that payload is not useful in the editor.  In particular, `TTSInvalidText`
+ * is a permanent validation failure, not a retryable upstream/server failure.
+ */
+export function capCutTtsFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || 'CapCut TTS thất bại.');
+  if (/TTSInvalidText|err_code['"]?\s*[:=]\s*['"]?40402002/i.test(message)) {
+    return new ProviderError(
+      'CapCut không đọc được nội dung của cue này. Hãy kiểm tra ký tự đặc biệt, emoji hoặc tạo lại voice cho riêng cue đó.',
+      422,
+      message,
+    );
+  }
+  return error instanceof ProviderError ? error : new ProviderError('CapCut TTS không thể tạo audio cho cue này. Hãy thử lại sau.', 502, message);
+}
+
 // The unofficial CapCut endpoint is not safe to drive concurrently. A long
 // dubbing job otherwise gets intermittent, valid-looking but wrong audio
 // responses. Keep the bridge process/request lifecycle strictly ordered even
@@ -72,10 +89,15 @@ export async function testConnection(_provider: AIProvider) {
 export async function synthesize(provider: AIProvider, _model: string, voice: string, text: string, options: { speed?: number; signal?: AbortSignal }) {
   if (!voice?.trim()) throw new ProviderError('CapCut TTS cần chọn Voice ID.', 400);
   const resourceId = capcutVoiceResourceId(provider, voice);
-  const response = await withCapCutQueue(
-    () => runCapCutBridge({ op: 'synthesize', voice: voice.trim(), ...(resourceId ? { resourceId } : {}), text, rate: options.speed || 1 }, options.signal),
-    options.signal,
-  );
+  let response;
+  try {
+    response = await withCapCutQueue(
+      () => runCapCutBridge({ op: 'synthesize', voice: voice.trim(), ...(resourceId ? { resourceId } : {}), text, rate: options.speed || 1 }, options.signal),
+      options.signal,
+    );
+  } catch (error) {
+    throw capCutTtsFailure(error);
+  }
   if (typeof response.audioBase64 !== 'string') throw new ProviderError('CapCut TTS không trả về audio.', 502);
   return Buffer.from(response.audioBase64, 'base64');
 }

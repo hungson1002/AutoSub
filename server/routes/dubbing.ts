@@ -14,6 +14,7 @@ import {
   openDubbingAudio,
   pauseDubbingJob,
   resumeDubbingJob,
+  regenerateDubbingCue,
   retryFailedDubbingJob,
   startDubbingJob,
   type DubbingCueInput,
@@ -89,6 +90,12 @@ export async function dubbingRoutes(app: FastifyInstance) {
   app.post('/api/dubbing/jobs/:id/retry-failed', async (request, reply) => {
     try { return reply.send(await retryFailedDubbingJob(idFrom(request))); }
     catch (error) { return sendRouteError(reply, error, 'Không thể chạy lại các cue lỗi.'); }
+  });
+
+  app.post('/api/dubbing/jobs/:id/cues/:cueId/regenerate', async (request, reply) => {
+    const cueId = String((request.params as { cueId?: string }).cueId || '');
+    try { return reply.send(await regenerateDubbingCue(idFrom(request), cueId, request.body as Parameters<typeof regenerateDubbingCue>[2])); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể tạo lại voice cho cue này.'); }
   });
 
   app.get('/api/dubbing/jobs/:id/result', async (request, reply) => {

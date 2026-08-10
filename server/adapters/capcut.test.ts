@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import type { AIProvider } from '../types';
-import { CAPCUT_TTS_MODEL, capcutVoiceResourceId, listModels, synthesize } from './capcut';
+import { CAPCUT_TTS_MODEL, capCutTtsFailure, capcutVoiceResourceId, listModels, synthesize } from './capcut';
 import { capCutBridgeEnvironment } from '../services/capcutTtsBridge';
 
 const provider: AIProvider = {
@@ -20,6 +20,13 @@ test('requires a selected CapCut voice before spawning the bridge', async () => 
 test('preserves the stable CapCut resource id for a selected voice', () => {
   assert.equal(capcutVoiceResourceId({ ...provider, voices: [{ id: 'BV074_streaming', resourceId: '710235489' }] }, 'BV074_streaming'), '710235489');
   assert.equal(capcutVoiceResourceId(provider, 'missing'), undefined);
+});
+
+test('turns CapCut invalid-text payloads into a non-retryable Vietnamese error', () => {
+  const error = capCutTtsFailure(new Error("CapCut TTS task failed: {'err_code': 40402002, 'err_msg': 'TTSInvalidText'}"));
+  assert.equal(error.status, 422);
+  assert.match(error.message, /không đọc được nội dung/i);
+  assert.match(error.detail || '', /TTSInvalidText/);
 });
 
 test('forces UTF-8 at the Node to Python bridge boundary', () => {

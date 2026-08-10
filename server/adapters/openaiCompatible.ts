@@ -113,7 +113,23 @@ export async function testModel(provider: AIProvider, model: string, capability:
   }
 }
 
-export async function chat(provider: AIProvider, model: string, messages: Array<{ role: 'system' | 'user'; content: string | Array<Record<string, string>> }>, signal?: AbortSignal) { const response = await fetch(withAuthQuery(endpoint(provider, 'chat', '/chat/completions'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, temperature: 0.2 }) }); const data = await responseJson(response, provider, 'Provider chat không phản hồi.'); const choices = Array.isArray(data.choices) ? data.choices : []; const content = (choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content; if (typeof content !== 'string') throw new ProviderError('Provider không trả về message content.'); return content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim(); }
+export async function chat(provider: AIProvider, model: string, messages: Array<{ role: 'system' | 'user'; content: string | Array<Record<string, string>> }>, signal?: AbortSignal, maxTokens?: number) { const response = await fetch(withAuthQuery(endpoint(provider, 'chat', '/chat/completions'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, temperature: 0.2, ...(maxTokens ? { max_tokens: maxTokens } : {}) }) }); const data = await responseJson(response, provider, 'Provider chat không phản hồi.'); const choices = Array.isArray(data.choices) ? data.choices : []; const content = (choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content; if (typeof content !== 'string') throw new ProviderError('Provider không trả về message content.'); return content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim(); }
+
+function normalizedTranslationText(text: string) {
+  return text.normalize('NFKC').toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+}
+
+function isVietnameseTarget(language: string) {
+  return /vietnamese|tiếng\s*việt/i.test(language);
+}
+
+function isUntranslatedCjk(source: string, translation: string, targetLanguage: string) {
+  const sourceNormalized = normalizedTranslationText(source);
+  return isVietnameseTarget(targetLanguage)
+    && /[\u3400-\u9fff\uf900-\ufaff]/u.test(source)
+    && sourceNormalized.length >= 2
+    && sourceNormalized === normalizedTranslationText(translation);
+}
 
 export async function translateBatch(provider: AIProvider, model: string, items: TranslationItem[], sourceLanguage: string, targetLanguage: string, style: string, customPrompt: string, glossary: Array<{ source: string; target: string }>) {
   const glossaryText = glossary.length ? `\nGlossary:\n${glossary.map((entry) => `- ${entry.source} -> ${entry.target}`).join('\n')}` : '';
@@ -126,9 +142,10 @@ This is a strict one-to-one mapping task:
 - Keep the meaning and all important details of that item. Do not silently omit a clause just to shorten it.
 - Use targetDurationMs only to choose concise, natural wording for that same item.
 - Preserve a fragment as a fragment when the source cue is a fragment; do not borrow words from the next cue.
+- Never return the source text unchanged when it needs translation. Translate every cue, including short lines and names when appropriate.
 
 Source language: ${sourceLanguage}. Target language: ${targetLanguage}. Style: ${style}.${customPrompt ? ` Custom instruction: ${customPrompt}.` : ''}${glossaryText}`;
-  const content = await chat(provider, model, [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ items }) }]);
+  const content = await chat(provider, model, [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ items }) }], undefined, 4096);
   let parsed: unknown;
   try { parsed = JSON.parse(content); } catch { throw new ProviderError('Translation provider trả về JSON không hợp lệ.'); }
   const output = (parsed as { items?: unknown }).items;
@@ -136,9 +153,10 @@ Source language: ${sourceLanguage}. Target language: ${targetLanguage}. Style: $
   const result = output.flatMap((item) => item && typeof item === 'object' && typeof (item as { id?: unknown }).id === 'string' && typeof (item as { translation?: unknown }).translation === 'string' ? [{ id: (item as { id: string }).id, translation: (item as { translation: string }).translation }] : []);
   const expected = new Set(items.map((item) => item.id));
   const seen = new Set<string>();
-  const partialItems = result.filter((item) => expected.has(item.id) && !seen.has(item.id) && seen.add(item.id));
-  const valid = result.length === items.length && result.every((item) => expected.has(item.id)) && seen.size === items.length;
-  if (!valid) throw new TranslationValidationError('Translation response thiếu/trùng id. Chỉ retry các cue còn thiếu.', partialItems);
+  const partialItems = result.filter((item) => expected.has(item.id) && !seen.has(item.id) && seen.add(item.id) && !isUntranslatedCjk(items.find((input) => input.id === item.id)?.text || '', item.translation, targetLanguage));
+  const hasUntranslatedCjk = result.some((item) => expected.has(item.id) && isUntranslatedCjk(items.find((input) => input.id === item.id)?.text || '', item.translation, targetLanguage));
+  const valid = result.length === items.length && result.every((item) => expected.has(item.id)) && seen.size === items.length && !hasUntranslatedCjk;
+  if (!valid) throw new TranslationValidationError(hasUntranslatedCjk ? 'Provider trả lại nguyên văn tiếng Trung cho một hoặc nhiều cue. AutoSub sẽ retry riêng các cue đó.' : 'Translation response thiếu/trùng id. Chỉ retry các cue còn thiếu.', partialItems);
   return items.map((item) => result.find((candidate) => candidate.id === item.id) as { id: string; translation: string });
 }
 

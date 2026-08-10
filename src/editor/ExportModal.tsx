@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import type { BlurRegion, LogoOverlay, SubtitleCue, SubtitleStyle, VideoAsset } from '../types';
+import type { BlurRegion, LogoOverlay, SubtitleCue, SubtitleStyle, VideoAsset, VideoEditState } from '../types';
 import { Modal } from '../components/Modal';
 import { Check, Download } from '../components/Icons';
 import { cuesToAss, cuesToSrt, downloadText, validateCues } from '../lib/subtitles';
@@ -20,6 +20,7 @@ export function ExportModal({
   cues,
   style,
   asset,
+  videoEdit = { aspectRatio: 'original', trimStartMs: 0 },
   logo,
   fontFile,
   blurRegions = [],
@@ -33,6 +34,7 @@ export function ExportModal({
   cues: SubtitleCue[];
   style: SubtitleStyle;
   asset?: VideoAsset;
+  videoEdit?: VideoEditState;
   logo?: LogoOverlay;
   fontFile?: File;
   blurRegions?: BlurRegion[];
@@ -69,6 +71,20 @@ export function ExportModal({
       onNotice?.('Video chưa được lưu trên máy. Hãy chọn lại video và chờ upload hoàn tất.', 'error');
       return;
     }
+    const trimStartMs = Math.max(0, Math.round(videoEdit.trimStartMs || 0));
+    const trimEndMs = videoEdit.trimEndMs ? Math.round(videoEdit.trimEndMs) : undefined;
+    if (trimEndMs !== undefined && trimEndMs <= trimStartMs) {
+      onNotice?.('Điểm kết thúc phải nằm sau điểm bắt đầu.', 'error');
+      return;
+    }
+    const exportCues = cues
+      .filter((cue) => cue.endMs > trimStartMs && (trimEndMs === undefined || cue.startMs < trimEndMs))
+      .map((cue) => ({ ...cue, startMs: Math.max(0, cue.startMs - trimStartMs), endMs: Math.max(1, Math.min(cue.endMs, trimEndMs ?? cue.endMs) - trimStartMs) }));
+    const exportBlurRegions = blurRegions.map((region) => ({
+      ...region,
+      startMs: Math.max(0, region.startMs - trimStartMs),
+      endMs: Math.max(0, Math.min(region.endMs, trimEndMs ?? region.endMs) - trimStartMs),
+    })).filter((region) => region.endMs > region.startMs);
 
     const controller = new AbortController();
     const exportId = `export-${Date.now()}-${crypto.randomUUID()}`;
@@ -85,7 +101,7 @@ export function ExportModal({
     try {
       const blob = await api.exportVideo(
         asset.file,
-        cues,
+        exportCues,
         style,
         {
           exportId,
@@ -96,7 +112,8 @@ export function ExportModal({
           originalVolume: dubbingAudioMix?.originalVolume ?? 0.25,
           burnSubtitles: true,
           separateVocals: false,
-          blurRegions,
+          blurRegions: exportBlurRegions,
+          videoEdit,
           logo,
           dubTrack: hasDub ? dubTrack : undefined,
           dubbingJobId: hasDub ? dubbingJobId : undefined,

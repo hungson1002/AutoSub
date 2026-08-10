@@ -143,6 +143,9 @@ export interface BlurRegion {
 export interface GlossaryEntry { id: string; source: string; target: string; enabled: boolean; }
 export interface PronunciationEntry { id: string; source: string; reading: string; enabled: boolean; }
 export interface VideoAsset { name: string; path?: string; url: string; type: string; file?: File; uploadId?: string; storedPath?: string; durationMs?: number; }
+export type VideoAspectRatio = 'original' | '16:9' | '9:16' | '1:1' | '4:5';
+export interface VideoCropRegion { xPercent: number; yPercent: number; widthPercent: number; heightPercent: number; }
+export interface VideoEditState { aspectRatio: VideoAspectRatio; trimStartMs: number; trimEndMs?: number; crop?: VideoCropRegion; }
 export type LogoPosition = 'top-left' | 'top-center' | 'top-right' | 'middle-left' | 'center' | 'middle-right' | 'bottom-left' | 'bottom-center' | 'bottom-right' | 'custom';
 export interface LogoOverlay { name: string; url?: string; file?: File; enabled: boolean; kind: 'image' | 'text'; text: string; fontFamily: string; fontSize: number; textColor: string; outlineColor: string; position: LogoPosition; xPercent: number; yPercent: number; widthPercent: number; opacity: number; }
 

@@ -1,4 +1,4 @@
-import type { AIProvider, AppSettings, GlossaryEntry, ModelPreferences, PronunciationEntry, SubtitleCue, VideoAsset } from '../types';
+import type { AIProvider, AppSettings, GlossaryEntry, ModelPreferences, PronunciationEntry, SubtitleCue, VideoAsset, VideoEditState } from '../types';
 import { defaultSettings } from '../types';
 import { createCapCutTtsProvider, normalizeProvider } from './providers';
 import { normalizeSettings } from './settings';
@@ -6,7 +6,7 @@ import { normalizeSettings } from './settings';
 export type ExtractionRunStatus = 'idle' | 'uploading' | 'ready' | 'running' | 'completed' | 'failed' | 'cancelled';
 export interface ExtractionRunState { status: ExtractionRunStatus; mode?: 'ocr' | 'stt'; fileName?: string; cueCount?: number; updatedAt?: number; }
 
-const keys = { providers: 'autosub.providers', settings: 'autosub.settings', cues: 'autosub.cues', asset: 'autosub.asset', dubbingJobs: 'autosub.dubbing-jobs', glossary: 'autosub.glossary', pronunciation: 'autosub.pronunciation', modelPreferences: 'autosub.model-preferences' };
+const keys = { providers: 'autosub.providers', settings: 'autosub.settings', cues: 'autosub.cues', asset: 'autosub.asset', videoEdits: 'autosub.video-edits', dubbingJobs: 'autosub.dubbing-jobs', glossary: 'autosub.glossary', pronunciation: 'autosub.pronunciation', modelPreferences: 'autosub.model-preferences' };
 function read<T>(key: string, fallback: T): T { try { return JSON.parse(localStorage.getItem(key) || '') as T; } catch { return fallback; } }
 function write<T>(key: string, value: T) { localStorage.setItem(key, JSON.stringify(value)); }
 const cueDebug = (cues: SubtitleCue[]) => cues.slice(0, 5).map((cue) => ({ text: cue.originalText, startMs: cue.startMs, endMs: cue.endMs }));
@@ -27,6 +27,8 @@ export const storage = {
     if (!value?.uploadId) { localStorage.removeItem(keys.asset); return; }
     write<StoredVideoAsset>(keys.asset, { name: value.name, type: value.type, uploadId: value.uploadId, storedPath: value.storedPath, durationMs: value.durationMs });
   },
+  videoEdit: (uploadId?: string): VideoEditState => uploadId ? read<Record<string, VideoEditState>>(keys.videoEdits, {})[uploadId] || { aspectRatio: 'original', trimStartMs: 0 } : { aspectRatio: 'original', trimStartMs: 0 },
+  saveVideoEdit: (uploadId: string, value: VideoEditState) => write(keys.videoEdits, { ...read<Record<string, VideoEditState>>(keys.videoEdits, {}), [uploadId]: value }),
   dubbingJob: (uploadId: string) => read<Record<string, string>>(keys.dubbingJobs, {})[uploadId],
   saveDubbingJob: (uploadId: string, jobId: string) => write(keys.dubbingJobs, { ...read<Record<string, string>>(keys.dubbingJobs, {}), [uploadId]: jobId }),
   removeDubbingJob: (uploadId: string, jobId?: string) => {

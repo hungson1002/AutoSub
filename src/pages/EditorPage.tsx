@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AIProvider, AppSettings, BlurRegion, DubbingJobStatus, DubbingMetadata, LogoOverlay, PronunciationEntry, ProviderAssignment, SubtitleCue, SubtitleStyle, VideoAsset, VoiceGroup } from '../types';
+import type { AIProvider, AppSettings, BlurRegion, DubbingJobStatus, DubbingMetadata, LogoOverlay, PronunciationEntry, ProviderAssignment, SubtitleCue, SubtitleStyle, VideoAsset, VideoEditState, VoiceGroup } from '../types';
 import { api, friendlyErrorMessage } from '../lib/api';
 import { storage } from '../lib/storage';
 import { AudioLines, Captions, ChevronDown, Download, Image as ImageIcon, Languages, Plus, Scissors, Settings2, Upload } from '../components/Icons';
@@ -84,6 +84,8 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
   const [dubAudioUrl, setDubAudioUrl] = useState<string>();
   const [dubAudioMix, setDubAudioMix] = useState<{ keepOriginal: boolean; originalVolume: number; separateVocals?: boolean }>();
   const [dubbingJob, setDubbingJob] = useState<DubbingJobStatus>();
+  const [regeneratingCueId, setRegeneratingCueId] = useState<string>();
+  const [videoEdit, setVideoEdit] = useState<VideoEditState>(() => storage.videoEdit(asset?.uploadId));
   const dubbingTerminalNoticeRef = useRef('');
   const [working, setWorking] = useState(false);
   const [translationOpen, setTranslationOpen] = useState(false);
@@ -131,6 +133,8 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     return () => document.removeEventListener('pointerdown', close);
   }, []);
   useEffect(() => { assetRef.current = asset; }, [asset]);
+  useEffect(() => { setVideoEdit(storage.videoEdit(asset?.uploadId)); }, [asset?.uploadId]);
+  useEffect(() => { if (asset?.uploadId) storage.saveVideoEdit(asset.uploadId, videoEdit); }, [asset?.uploadId, videoEdit]);
   useEffect(() => {
     const uploadId = asset?.uploadId;
     setDubTrack(undefined);
@@ -176,12 +180,14 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
             dubbingTerminalNoticeRef.current = `${next.id}:${next.status}`;
             setDubbingJob(next);
             onCuesChange(applyDubbingMetadata(cues, result.metadata));
-            setDubAudioUrl(result.audioUrl);
+            setDubAudioUrl(`${result.audioUrl}?v=${encodeURIComponent(next.updatedAt)}`);
+            setRegeneratingCueId(undefined);
             setDubAudioMix({ keepOriginal: next.config.audioMix.keepOriginal, originalVolume: next.config.audioMix.originalVolume, separateVocals: next.config.audioMix.separateVocals });
             onNotice(`Dubbing hoàn tất ${next.doneCues}/${next.totalCues} cue. Dub track được lưu trên server theo job ${next.id}.`, 'success');
           } else if (next.status === 'completed_with_errors') {
             dubbingTerminalNoticeRef.current = `${next.id}:${next.status}`;
             setDubbingJob(next);
+            setRegeneratingCueId(undefined);
             const firstFailure = next.failedCueErrors?.[0];
             const detail = firstFailure ? ` Cue #${firstFailure.index}, bước ${firstFailure.stage}: ${friendlyErrorMessage(new Error(firstFailure.error), firstFailure.error)}` : '';
             onNotice(`Dubbing có ${next.failedCues} cue lỗi.${detail}`, 'error');
@@ -209,7 +215,7 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     void api.getDubbingResult(dubbingJob.id).then((result) => {
       if (disposed) return;
       onCuesChange(applyDubbingMetadata(cues, result.metadata));
-      setDubAudioUrl(result.audioUrl);
+      setDubAudioUrl(`${result.audioUrl}?v=${encodeURIComponent(dubbingJob.updatedAt)}`);
       setDubAudioMix({ keepOriginal: dubbingJob.config.audioMix.keepOriginal, originalVolume: dubbingJob.config.audioMix.originalVolume, separateVocals: dubbingJob.config.audioMix.separateVocals });
     }).catch((error) => {
       if (!disposed) onNotice(friendlyErrorMessage(error, 'Không thể tải bản preview dubbing.'), 'error');
@@ -226,6 +232,36 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
       if (action === 'retry-failed') dubbingTerminalNoticeRef.current = '';
     } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể điều khiển dubbing job.'), 'error'); }
   };
+
+  const regenerateCueVoice = useCallback(async (cue: SubtitleCue) => {
+    if (!dubbingJob || dubbingJob.status !== 'completed') {
+      onNotice('Hãy tạo một dub track hoàn chỉnh trước khi tạo lại voice riêng cho cue.', 'error');
+      return;
+    }
+    const cueIndex = cues.findIndex((item) => item.id === cue.id);
+    const spokenText = applyPronunciation(cue.translatedText || cue.originalText, pronunciation).trim();
+    if (!spokenText) { onNotice(`Cue #${cue.index} chưa có nội dung để đọc.`, 'error'); return; }
+    setRegeneratingCueId(cue.id);
+    setDubAudioUrl(undefined);
+    dubbingTerminalNoticeRef.current = '';
+    try {
+      const next = await api.regenerateDubbingCue(dubbingJob.id, {
+        id: cue.id,
+        startMs: cue.startMs,
+        endMs: cue.endMs,
+        originalText: cue.originalText,
+        translatedText: cue.translatedText,
+        text: spokenText,
+        previousText: cues[cueIndex - 1]?.translatedText || cues[cueIndex - 1]?.originalText || '',
+        nextText: cues[cueIndex + 1]?.translatedText || cues[cueIndex + 1]?.originalText || '',
+      });
+      setDubbingJob(next);
+      onNotice(`Đang tạo lại voice riêng cho cue #${cue.index}. Các cue khác được giữ nguyên.`, 'success');
+    } catch (error) {
+      setRegeneratingCueId(undefined);
+      onNotice(friendlyErrorMessage(error, `Không thể tạo lại voice cho cue #${cue.index}.`), 'error');
+    }
+  }, [cues, dubbingJob, onNotice, pronunciation]);
 
   const changeCue = useCallback((id: string, patch: Partial<SubtitleCue>) => onCuesChange(cues.map((cue) => {
     if (cue.id !== id) return cue;
@@ -453,12 +489,12 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     <div className="subtitle-download-bar"><span><Download size={14} /> Tải phụ đề</span><div className="subtitle-download-control" ref={subtitleDownloadRef}><button type="button" className="button small ghost" onClick={() => { if (!subtitleDownloadOpen) announceDropdownOpen(subtitleDownloadId.current); setSubtitleDownloadOpen((value) => !value); }}><span>Chọn định dạng</span><ChevronDown size={14} className={subtitleDownloadOpen ? 'rotated' : ''} /></button>{subtitleDownloadOpen && <div className="subtitle-download-menu"><button type="button" onClick={() => downloadSubtitle('translated')}><span>SRT bản dịch</span><small>.srt</small></button><button type="button" onClick={() => downloadSubtitle('original')}><span>SRT bản gốc</span><small>.srt</small></button><button type="button" onClick={() => downloadSubtitle('ass')}><span>ASS styled</span><small>.ass</small></button></div>}</div></div>
     <div className="preview-audio-bar"><div><span>PREVIEW AUDIO</span><small>{dubAudioUrl ? 'Đang phát bản lồng tiếng mới nhất' : 'Chưa có bản lồng tiếng · video nguồn chỉ dùng để dựng'}</small></div>{dubAudioUrl && <strong className="preview-audio-status">DUB MỚI NHẤT</strong>}</div>
     {blurEditMode && <div className="editor-mode-banner"><Scissors size={14} /> Kéo trực tiếp các vùng blur trên video. Bấm Làm mờ lần nữa để mở bảng điều khiển.</div>}
-    <section className="editor-main"><div className="editor-left"><VideoPlayer asset={asset} cues={cues} style={settings.subtitleStyle} blurRegions={blurRegions} logo={logoOpen ? logoPreview : logo} currentTimeMs={currentTime} dubAudioUrl={dubAudioUrl} audioMode={dubAudioUrl ? 'dubbed' : 'original'} dubAudioMix={dubAudioMix} seekRequest={seekRequest} onTime={setCurrentTime} onStyleChange={styleChange} onLogoChange={previewLogoChange} onBlurRegionsChange={setBlurRegions} blurEditMode={blurEditMode} /><SubtitleTimeline cues={cues} currentTime={currentTime} selectedId={selectedId} onSelect={selectCue} /><div className="editor-footnote"><span><i className="status-dot" /> Autosave local</span><small>SubtitleCue[] là source of truth · {cues.filter((cue) => cue.translatedText).length}/{cues.length} bản dịch</small></div></div><div className="editor-right"><div className="editor-metrics"><div className="editor-metric"><span>TỐC ĐỘ</span><strong>Gốc: <b>{editorMetrics.original.toFixed(1)}</b> c/s · Dịch: <b>{editorMetrics.translated.toFixed(1)}</b> c/s</strong><small>TB tốc độ thoại theo cue</small></div><div className="editor-metric"><span>CPS CHUẨN</span><strong>G1: <b>{editorMetrics.groups[0]?.value.toFixed(1)}</b> · G2: <b>{editorMetrics.groups[1]?.value.toFixed(1)}</b> · G3: <b>{editorMetrics.groups[2]?.value.toFixed(1)}</b></strong><small>Chuẩn: {editorMetrics.standard.group} · {editorMetrics.standard.value.toFixed(1)} c/s</small></div></div><div className="list-heading"><div><span>SUBTITLE LIST</span><b>{cues.length}</b></div><button className="icon-button" onClick={addCue} aria-label="Thêm cue"><Plus size={16} /></button></div><SubtitleList cues={cues} activeCueId={activeCueId} selectedId={selectedId} onSelect={selectCue} onChange={changeCue} onDelete={deleteCue} /></div>{panel === 'style' && <aside className="floating-panel style-floating-panel"><div className="floating-head"><span><Settings2 size={15} /> SUBTITLE STYLE</span><button className="icon-button" onClick={() => setPanel('none')}><span aria-hidden="true">×</span></button></div><SubtitleStylePanel style={settings.subtitleStyle} onChange={styleChange} onFontUpload={setFontFile} /><div className="style-preview"><span>PREVIEW</span><div style={{ color: settings.subtitleStyle.textColor, fontFamily: settings.subtitleStyle.fontFamily, fontSize: `${Math.max(settings.subtitleStyle.fontSize * 0.45, 12)}px`, fontWeight: settings.subtitleStyle.bold ? 700 : 400, fontStyle: settings.subtitleStyle.italic ? 'italic' : 'normal', WebkitTextFillColor: settings.subtitleStyle.textColor, WebkitTextStroke: settings.subtitleStyle.background === 'outline' ? `${(settings.subtitleStyle.outlineWidth ?? 2) * (Math.max(settings.subtitleStyle.fontSize * 0.45, 12) / Math.max(settings.subtitleStyle.fontSize, 1))}px ${settings.subtitleStyle.outlineColor}` : '0 transparent', paintOrder: 'stroke fill', background: settings.subtitleStyle.background === 'box' ? `${settings.subtitleStyle.backgroundColor ?? settings.subtitleStyle.outlineColor}${Math.round(settings.subtitleStyle.backgroundOpacity * 255).toString(16).padStart(2, '0')}` : 'transparent' }}>{selected?.translatedText || selected?.originalText || 'Bản dịch preview'}</div></div></aside>}</section>
+    <section className="editor-main"><div className="editor-left"><VideoPlayer asset={asset} cues={cues} style={settings.subtitleStyle} blurRegions={blurRegions} logo={logoOpen ? logoPreview : logo} currentTimeMs={currentTime} dubAudioUrl={dubAudioUrl} audioMode={dubAudioUrl ? 'dubbed' : 'original'} dubAudioMix={dubAudioMix} seekRequest={seekRequest} onTime={setCurrentTime} onStyleChange={styleChange} onLogoChange={previewLogoChange} onBlurRegionsChange={setBlurRegions} blurEditMode={blurEditMode} videoEdit={videoEdit} onVideoEditChange={setVideoEdit} /><SubtitleTimeline cues={cues} currentTime={currentTime} selectedId={selectedId} onSelect={selectCue} /><div className="editor-footnote"><span><i className="status-dot" /> Autosave local</span><small>SubtitleCue[] là source of truth · {cues.filter((cue) => cue.translatedText).length}/{cues.length} bản dịch</small></div></div><div className="editor-right"><div className="editor-metrics"><div className="editor-metric"><span>TỐC ĐỘ</span><strong>Gốc: <b>{editorMetrics.original.toFixed(1)}</b> c/s · Dịch: <b>{editorMetrics.translated.toFixed(1)}</b> c/s</strong><small>TB tốc độ thoại theo cue</small></div><div className="editor-metric"><span>CPS CHUẨN</span><strong>G1: <b>{editorMetrics.groups[0]?.value.toFixed(1)}</b> · G2: <b>{editorMetrics.groups[1]?.value.toFixed(1)}</b> · G3: <b>{editorMetrics.groups[2]?.value.toFixed(1)}</b></strong><small>Chuẩn: {editorMetrics.standard.group} · {editorMetrics.standard.value.toFixed(1)} c/s</small></div></div><div className="list-heading"><div><span>SUBTITLE LIST</span><b>{cues.length}</b></div><button className="icon-button" onClick={addCue} aria-label="Thêm cue"><Plus size={16} /></button></div><SubtitleList cues={cues} activeCueId={activeCueId} selectedId={selectedId} onSelect={selectCue} onChange={changeCue} onDelete={deleteCue} onRegenerateVoice={(cue) => void regenerateCueVoice(cue)} regeneratingCueId={regeneratingCueId} voiceReady={dubbingJob?.status === 'completed'} /></div>{panel === 'style' && <aside className="floating-panel style-floating-panel"><div className="floating-head"><span><Settings2 size={15} /> SUBTITLE STYLE</span><button className="icon-button" onClick={() => setPanel('none')}><span aria-hidden="true">×</span></button></div><SubtitleStylePanel style={settings.subtitleStyle} onChange={styleChange} onFontUpload={setFontFile} /><div className="style-preview"><span>PREVIEW</span><div className="style-preview-surface"><span className="style-preview-text" style={{ color: settings.subtitleStyle.textColor, fontFamily: settings.subtitleStyle.fontFamily, fontSize: `${Math.max(settings.subtitleStyle.fontSize * 0.45, 12)}px`, fontWeight: settings.subtitleStyle.bold ? 700 : 400, fontStyle: settings.subtitleStyle.italic ? 'italic' : 'normal', WebkitTextFillColor: settings.subtitleStyle.textColor, WebkitTextStroke: settings.subtitleStyle.background === 'outline' ? `${(settings.subtitleStyle.outlineWidth ?? 2) * (Math.max(settings.subtitleStyle.fontSize * 0.45, 12) / Math.max(settings.subtitleStyle.fontSize, 1))}px ${settings.subtitleStyle.outlineColor}` : '0 transparent', paintOrder: 'stroke fill', background: settings.subtitleStyle.background === 'box' ? `${settings.subtitleStyle.backgroundColor ?? settings.subtitleStyle.outlineColor}${Math.round((settings.subtitleStyle.backgroundOpacity ?? 0.72) * 255).toString(16).padStart(2, '0')}` : 'transparent' }}>{selected?.translatedText || selected?.originalText || 'Bản dịch preview'}</span></div></div></aside>}</section>
     <BlurEditor open={blurOpen} regions={blurRegions} asset={asset} currentTimeMs={currentTime} onClose={() => setBlurOpen(false)} onChange={setBlurRegions} />
     <TranslationSetupModal open={translationOpen} provider={providers.find((item) => item.id === translationSetup.providerId)} providers={providers} assignments={capabilityAssignments(settings, 'translation')} cues={cues} setup={translationSetup} onChange={(patch) => setTranslationSetup((current) => ({ ...current, ...patch }))} onClose={() => setTranslationOpen(false)} onStart={(setup) => void translateAll(setup)} />
     <LogoModal open={logoOpen} logo={logo} externalPosition={logoPreview} onClose={() => setLogoOpen(false)} onPreviewChange={setLogoPreview} onChange={(next) => { if (logo?.url && logo.url !== next.url && logo.url.startsWith('blob:')) URL.revokeObjectURL(logo.url); setLogo(next); setLogoPreview(next); onNotice('Đã cập nhật logo/watermark.', 'success'); }} />
     <DubbingModal open={dubbingOpen} providers={providers} assignments={assignments} availableAssignments={capabilityAssignments(settings, 'tts')} cues={cues} pronunciation={pronunciation} sourceVideoReady={Boolean(asset?.uploadId)} sourceVideoUploading={uploadingVideo} job={dubbingJob} onJobAction={(action) => void dubbingJobAction(action)} onClose={() => setDubbingOpen(false)} onPronunciationChange={setPronunciation} onNotice={onNotice} onRun={(configs, options) => void runDubbingJob(configs, options)} />
-    <ExportModal open={exportOpen} cues={cues} style={settings.subtitleStyle} asset={asset} logo={logo} fontFile={fontFile} blurRegions={blurRegions} dubTrack={dubTrack} dubbingJobId={dubbingJob?.status === 'completed' ? dubbingJob.id : undefined} dubbingAudioMix={dubbingJob?.config.audioMix} onClose={() => setExportOpen(false)} onNotice={onNotice} />
+    <ExportModal open={exportOpen} cues={cues} style={settings.subtitleStyle} asset={asset} videoEdit={videoEdit} logo={logo} fontFile={fontFile} blurRegions={blurRegions} dubTrack={dubTrack} dubbingJobId={dubbingJob?.status === 'completed' ? dubbingJob.id : undefined} dubbingAudioMix={dubbingJob?.config.audioMix} onClose={() => setExportOpen(false)} onNotice={onNotice} />
     <ProgressModal open={working} title="Đang xử lý audio" message="Provider → FFprobe → atempo → dub-track.wav" onCancel={() => { controllerRef.current?.abort(); setWorking(false); }} />
     <ProgressModal open={translationWorking} title="Đang dịch subtitle" message={translationStage} value={translationProgress} onCancel={() => { translationControllerRef.current?.abort(); clearTranslationProgressTimer(); }} />
   </div>;

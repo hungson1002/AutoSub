@@ -2,7 +2,7 @@ import { memo, useEffect, useRef } from 'react';
 import type { MutableRefObject } from 'react';
 import type { SubtitleCue } from '../types';
 import { formatClock, subtitleStats } from '../lib/subtitles';
-import { Trash2 } from '../components/Icons';
+import { RefreshCw, Trash2 } from '../components/Icons';
 
 type SubtitleCardProps = {
   cue: SubtitleCue;
@@ -10,10 +10,13 @@ type SubtitleCardProps = {
   onSelect: (id: string) => void;
   onChange: (id: string, patch: Partial<SubtitleCue>) => void;
   onDelete: (id: string) => void;
+  onRegenerateVoice?: (cue: SubtitleCue) => void;
+  regenerating: boolean;
+  voiceReady: boolean;
   cueRefs: MutableRefObject<Map<string, HTMLElement>>;
 };
 
-const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, onChange, onDelete, cueRefs }: SubtitleCardProps) {
+const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, onChange, onDelete, onRegenerateVoice, regenerating, voiceReady, cueRefs }: SubtitleCardProps) {
   const stats = subtitleStats(cue);
 
   return <article
@@ -21,14 +24,16 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
       if (element) cueRefs.current.set(cue.id, element);
       else cueRefs.current.delete(cue.id);
     }}
-    className={`cue-card ${highlighted ? 'selected' : ''}`}
+    className={`cue-card ${highlighted ? 'selected' : ''} ${cue.enabled ? '' : 'disabled'}`}
     onClick={() => onSelect(cue.id)}
   >
     <div className="cue-meta">
       <span className="cue-index">#{String(cue.index).padStart(2, '0')}</span>
+      <button type="button" className={`cue-enable ${cue.enabled ? 'active' : ''}`} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { enabled: !cue.enabled }); }}>{cue.enabled ? 'ON' : 'OFF'}</button>
       <button className="cue-delete" onClick={(event) => { event.stopPropagation(); onDelete(cue.id); }} aria-label="Xóa cue"><Trash2 size={14} /></button>
       <span>{formatClock(cue.startMs)} → {formatClock(cue.endMs)}</span>
       <small>{stats.duration} ms</small>
+      {cue.dubbing && <span className="cue-voice-badge">VOICE {cue.dubbing.speedApplied.toFixed(2)}×</span>}
     </div>
     <div className="cue-row">
       <span>BẢN GỐC</span>
@@ -45,11 +50,12 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
       <div className="voice-pills">
         {(['G1', 'G2', 'G3'] as const).map((group) => <button key={group} className={cue.voiceGroup === group ? 'active' : ''} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { voiceGroup: group }); }}>{group}</button>)}
       </div>
+      <button type="button" className="cue-regenerate" disabled={!voiceReady || regenerating} title={voiceReady ? 'Tạo lại voice riêng cho cue này' : 'Hãy tạo dub track trước'} onClick={(event) => { event.stopPropagation(); onRegenerateVoice?.(cue); }}><RefreshCw size={11} className={regenerating ? 'spinning' : ''} /> {regenerating ? 'Đang tạo' : 'Tạo voice'}</button>
     </div>
   </article>;
 });
 
-export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, selectedId, onSelect, onChange, onDelete }: { cues: SubtitleCue[]; activeCueId?: string; selectedId?: string; onSelect: (id: string) => void; onChange: (id: string, patch: Partial<SubtitleCue>) => void; onDelete: (id: string) => void }) {
+export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, selectedId, onSelect, onChange, onDelete, onRegenerateVoice, regeneratingCueId, voiceReady = false }: { cues: SubtitleCue[]; activeCueId?: string; selectedId?: string; onSelect: (id: string) => void; onChange: (id: string, patch: Partial<SubtitleCue>) => void; onDelete: (id: string) => void; onRegenerateVoice?: (cue: SubtitleCue) => void; regeneratingCueId?: string; voiceReady?: boolean }) {
   const listRef = useRef<HTMLDivElement>(null);
   const cueRefs = useRef(new Map<string, HTMLElement>());
 
@@ -79,6 +85,9 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
       onSelect={onSelect}
       onChange={onChange}
       onDelete={onDelete}
+      onRegenerateVoice={onRegenerateVoice}
+      regenerating={regeneratingCueId === cue.id}
+      voiceReady={voiceReady}
       cueRefs={cueRefs}
     />)}
   </div>;

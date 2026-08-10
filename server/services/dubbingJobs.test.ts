@@ -5,7 +5,7 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { buildSeparatedAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFades, cueDeclickFilter, dubbingRewriteWordLimit, effectiveTtsConcurrency, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, planAdaptiveCueTempos, planDubbingTimeline, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter } from './dubbingJobs';
+import { buildSeparatedAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFades, cueDeclickFilter, dubbingRewriteWordLimit, effectiveTtsConcurrency, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, planAdaptiveCueTempos, planDubbingTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
@@ -85,7 +85,7 @@ test('timeline planner preserves natural gaps and shifts later cues after an ove
   assert.deepEqual(plan.map(({ cueId, timelineStartMs, timelineEndMs, timelineShiftMs }) => ({ cueId, timelineStartMs, timelineEndMs, timelineShiftMs })), [
     { cueId: 'a', timelineStartMs: 0, timelineEndMs: 2_000, timelineShiftMs: 0 },
     { cueId: 'b', timelineStartMs: 2_000, timelineEndMs: 4_500, timelineShiftMs: 0 },
-    { cueId: 'c', timelineStartMs: 4_540, timelineEndMs: 5_540, timelineShiftMs: 1_540 },
+    { cueId: 'c', timelineStartMs: 4_520, timelineEndMs: 5_520, timelineShiftMs: 1_520 },
     { cueId: 'd', timelineStartMs: 9_000, timelineEndMs: 10_000, timelineShiftMs: 0 },
   ]);
 });
@@ -133,6 +133,85 @@ test('adaptive fitting does not spread tempo across a real pause', () => {
   assert.equal(byId.get('after-gap'), 1);
 });
 
+test('auto cadence raises only overloaded cues in a sustained pressured block', () => {
+  const items = Array.from({ length: 10 }, (_, index) => ({
+    cueId: `dense-${index + 1}`,
+    startMs: index * 1_000,
+    endMs: index * 1_000 + 1_000,
+    targetDurationMs: 1_000,
+    audioDurationMs: index % 4 === 3 ? 900 : 1_220,
+  }));
+  const plan = planAdaptiveCueTempos(items);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+
+  assert.equal(byId.get('dense-1'), 1.22);
+  assert.equal(byId.get('dense-4'), 1);
+  assert.ok(plan.every((item) => item.tempo >= 1 && item.tempo <= 1.5));
+
+  const timeline = planDubbingTimeline(items.map((item) => ({
+    cueId: item.cueId,
+    startMs: item.startMs,
+    endMs: item.endMs,
+    audioDurationMs: item.audioDurationMs / (byId.get(item.cueId) || 1),
+  })));
+  assert.ok(Math.max(...timeline.map((item) => item.timelineShiftMs)) <= 40);
+});
+
+test('auto cadence reserves the high tempo ceiling for an extreme cue inside a pressured block', () => {
+  const plan = planAdaptiveCueTempos(Array.from({ length: 8 }, (_, index) => ({
+    cueId: `extreme-${index + 1}`,
+    startMs: index * 1_000,
+    endMs: index * 1_000 + 1_000,
+    targetDurationMs: 1_000,
+    audioDurationMs: index === 3 ? 1_900 : 1_100,
+  })));
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+
+  assert.equal(byId.get('extreme-4'), 1.5);
+  assert.equal(byId.get('extreme-1'), 1.1);
+});
+
+test('auto cadence leaves a roomy short block at the conservative speed', () => {
+  const plan = planAdaptiveCueTempos([
+    { cueId: 'short-1', startMs: 0, endMs: 1_000, targetDurationMs: 1_000, audioDurationMs: 900 },
+    { cueId: 'short-2', startMs: 2_000, endMs: 3_000, targetDurationMs: 1_000, audioDurationMs: 1_600 },
+    { cueId: 'short-3', startMs: 4_000, endMs: 5_000, targetDurationMs: 1_000, audioDurationMs: 900 },
+    { cueId: 'short-4', startMs: 6_000, endMs: 7_000, targetDurationMs: 1_000, audioDurationMs: 900 },
+  ]);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+
+  assert.equal(byId.get('short-1'), 1);
+  assert.equal(byId.get('short-2'), 1);
+  assert.equal(byId.get('short-3'), 1);
+  assert.equal(byId.get('short-4'), 1);
+});
+
+test('long-form final fit removes the remaining per-cue SRT overrun', () => {
+  const items = Array.from({ length: 10 }, (_, index) => ({
+    cueId: `final-fit-${index + 1}`,
+    startMs: index * 1_200,
+    endMs: index * 1_200 + 1_000,
+    targetDurationMs: 1_000,
+    audioDurationMs: index === 5 ? 1_420 : 900,
+  }));
+  const plan = planAdaptiveCueTempos(items);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+
+  assert.ok(Math.abs((byId.get('final-fit-6') || 0) - 1.42) < 0.001);
+  assert.ok(1_420 / (byId.get('final-fit-6') || 1) <= 1_020);
+  assert.equal(byId.get('final-fit-1'), 1);
+});
+
+test('final fit does not speed an isolated line in a short video', () => {
+  const plan = planAdaptiveCueTempos([
+    { cueId: 'short-a', startMs: 0, endMs: 1_000, targetDurationMs: 1_000, audioDurationMs: 900 },
+    { cueId: 'short-b', startMs: 2_000, endMs: 3_000, targetDurationMs: 1_000, audioDurationMs: 1_300 },
+  ]);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+  assert.equal(byId.get('short-b'), byId.get('short-a'));
+  assert.ok((byId.get('short-b') || 0) <= 1.18);
+});
+
 test('finds the latest persisted dubbing job for an existing uploaded video', async () => {
   const videoId = `restore-${crypto.randomUUID()}`;
   const first = await createDubbingJob({ videoId, cues: cues(1) });
@@ -143,6 +222,42 @@ test('finds the latest persisted dubbing job for an existing uploaded video', as
   } finally {
     await cleanup(first.id);
     await cleanup(second.id);
+  }
+});
+
+test('queues only the edited cue for voice regeneration', async () => {
+  const job = await createDubbingJob({ cues: cues(3) });
+  const directory = path.join(jobsPath, job.id);
+  try {
+    const persistedPath = path.join(directory, 'job.json');
+    const persisted = JSON.parse(await readFile(persistedPath, 'utf8')) as Record<string, unknown>;
+    persisted.status = 'completed';
+    persisted.doneCues = 3;
+    persisted.result = { audioFile: 'result/dub-track.wav', metadataFile: 'result/metadata.json', durationMs: 6000 };
+    await writeFile(persistedPath, JSON.stringify(persisted), 'utf8');
+    for (let index = 1; index <= 3; index += 1) {
+      const cuePath = path.join(directory, 'cues', `synthetic-${index}.json`);
+      const cue = JSON.parse(await readFile(cuePath, 'utf8')) as Record<string, unknown>;
+      cue.status = 'done';
+      cue.audioFile = `cues/synthetic-${index}.wav`;
+      cue.metadata = { cueId: `synthetic-${index}`, adaptiveFitVersion: 1 };
+      await writeFile(cuePath, JSON.stringify(cue), 'utf8');
+    }
+
+    const status = await queueDubbingCueRegeneration(job.id, 'synthetic-2', { text: 'Nội dung vừa sửa', translatedText: 'Nội dung vừa sửa' });
+    assert.equal(status.status, 'queued');
+    assert.equal(status.doneCues, 2);
+    const first = JSON.parse(await readFile(path.join(directory, 'cues', 'synthetic-1.json'), 'utf8')) as { status: string };
+    const edited = JSON.parse(await readFile(path.join(directory, 'cues', 'synthetic-2.json'), 'utf8')) as { status: string; input: { text: string }; metadata?: unknown; audioFile?: string };
+    const third = JSON.parse(await readFile(path.join(directory, 'cues', 'synthetic-3.json'), 'utf8')) as { status: string };
+    assert.equal(first.status, 'done');
+    assert.equal(third.status, 'done');
+    assert.equal(edited.status, 'pending');
+    assert.equal(edited.input.text, 'Nội dung vừa sửa');
+    assert.equal(edited.metadata, undefined);
+    assert.equal(edited.audioFile, undefined);
+  } finally {
+    await cleanup(job.id);
   }
 });
 

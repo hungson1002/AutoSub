@@ -10,6 +10,8 @@ import { cleanupUploadSession, createUploadSession, discardUploadStream, persist
 type Fields = Record<string, string>;
 type Region = { xPercent: number; yPercent: number; widthPercent: number; heightPercent: number; startMs: number; endMs: number; blurStrength: number; borderRadius?: number; mode?: 'blur' | 'neighbor' };
 type Logo = { xPercent: number; yPercent: number; widthPercent: number; opacity: number };
+type CropRegion = { xPercent: number; yPercent: number; widthPercent: number; heightPercent: number };
+type VideoEdit = { aspectRatio?: 'original' | '16:9' | '9:16' | '1:1' | '4:5'; trimStartMs?: number; trimEndMs?: number; crop?: CropRegion };
 type ExportProgress = { percent: number; stage: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; error?: string; updatedAt: number };
 
 const exportProgress = new Map<string, ExportProgress>();
@@ -21,6 +23,14 @@ const setExportProgress = (id: string | undefined, patch: Partial<ExportProgress
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 const uploadError = (error: unknown) => error instanceof UploadTooLargeError || (error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE');
 const ffmpegPath = (file: string) => file.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+const outputSize = (resolution: string, aspectRatio?: VideoEdit['aspectRatio']) => {
+  const shortEdge = resolution === '1440' ? 1440 : resolution === '1080' ? 1080 : resolution === '720' ? 720 : undefined;
+  if (!shortEdge) return undefined;
+  if (aspectRatio === '9:16') return `${shortEdge}x${Math.round(shortEdge * 16 / 9)}`;
+  if (aspectRatio === '1:1') return `${shortEdge}x${shortEdge}`;
+  if (aspectRatio === '4:5') return `${shortEdge}x${Math.round(shortEdge * 5 / 4)}`;
+  return `${Math.round(shortEdge * 16 / 9)}x${shortEdge}`;
+};
 
 export async function exportRoutes(app: FastifyInstance) {
   app.get('/api/export/progress/:id', async (request, reply) => {
@@ -72,7 +82,7 @@ export async function exportRoutes(app: FastifyInstance) {
     }
     if (!input) { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: 'Thiếu video để xuất.' }); }
 
-    let options: { resolution: 'original' | '1440' | '1080' | '720'; crf?: number; keepAudio: boolean; originalVolume?: number; burnSubtitles?: boolean; separateVocals?: boolean; blurRegions?: Region[]; logo?: Logo; dubbingJobId?: string };
+    let options: { resolution: 'original' | '1440' | '1080' | '720'; crf?: number; keepAudio: boolean; originalVolume?: number; burnSubtitles?: boolean; separateVocals?: boolean; blurRegions?: Region[]; logo?: Logo; dubbingJobId?: string; videoEdit?: VideoEdit };
     try {
       options = JSON.parse(fields.options || '{"resolution":"original","crf":20,"keepAudio":true,"blurRegions":[]}');
     } catch {
@@ -83,6 +93,11 @@ export async function exportRoutes(app: FastifyInstance) {
     const ass = fields.ass;
     if (options.burnSubtitles !== false && !ass) { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: 'Thiếu ASS subtitle.' }); }
     const exportId = fields.exportId;
+    const trimStartMs = Math.max(0, Number(options.videoEdit?.trimStartMs) || 0);
+    const trimEndMs = Number(options.videoEdit?.trimEndMs) || undefined;
+    if (trimEndMs !== undefined && trimEndMs <= trimStartMs) { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: 'Điểm kết thúc phải nằm sau điểm bắt đầu.' }); }
+    const trimStartSeconds = trimStartMs / 1000;
+    const trimDurationSeconds = trimEndMs === undefined ? undefined : (trimEndMs - trimStartMs) / 1000;
     setExportProgress(exportId, { percent: 6, stage: 'Đang chuẩn bị media', status: 'running' });
     let jobDubPath: string | undefined;
     let jobDubIncludesBackground = false;
@@ -111,6 +126,32 @@ export async function exportRoutes(app: FastifyInstance) {
       const regions = options.blurRegions || [];
       const filters: string[] = [];
       let current = '0:v';
+
+      const requestedCrop = options.videoEdit?.crop;
+      if (requestedCrop) {
+        const xPercent = clamp(Number(requestedCrop.xPercent), 0, 99);
+        const yPercent = clamp(Number(requestedCrop.yPercent), 0, 99);
+        const widthPercent = clamp(Number(requestedCrop.widthPercent), 1, 100 - xPercent);
+        const heightPercent = clamp(Number(requestedCrop.heightPercent), 1, 100 - yPercent);
+        const cropX = `trunc(iw*${xPercent / 100}/2)*2`;
+        const cropY = `trunc(ih*${yPercent / 100}/2)*2`;
+        const cropW = `max(2,trunc(iw*${widthPercent / 100}/2)*2)`;
+        const cropH = `max(2,trunc(ih*${heightPercent / 100}/2)*2)`;
+        filters.push(`[${current}]crop=w='${cropW}':h='${cropH}':x='${cropX}':y='${cropY}'[cropOut]`);
+        current = 'cropOut';
+      } else {
+        const canvasRatio = options.videoEdit?.aspectRatio && options.videoEdit.aspectRatio !== 'original'
+          ? ({ '16:9': 16 / 9, '9:16': 9 / 16, '1:1': 1, '4:5': 4 / 5 } as const)[options.videoEdit.aspectRatio]
+          : undefined;
+        if (canvasRatio) {
+          // The aspect-ratio picker changes the output canvas, not the source
+          // crop. Fit the full source and letterbox/pillarbox surplus space.
+          // Cropping remains an explicit Crop-modal action.
+          const ratio = canvasRatio.toFixed(8);
+          filters.push(`[${current}]scale=w='if(gt(a,${ratio}),round(ih*${ratio}/2)*2,iw)':h='if(gt(a,${ratio}),-2,round(iw/${ratio}/2)*2)',pad=w='max(iw,round(ih*${ratio}/2)*2)':h='max(ih,round(iw/${ratio}/2)*2)':x='(ow-iw)/2':y='(oh-ih)/2':color=black,setsar=1[aspectOut]`);
+          current = 'aspectOut';
+        }
+      }
 
       regions.forEach((region, index) => {
         const xPercent = clamp(Number(region.xPercent), 0, 99);
@@ -153,13 +194,15 @@ export async function exportRoutes(app: FastifyInstance) {
         current = out;
       });
 
-      const args: string[] = ['-y', '-i', input];
+      const args: string[] = ['-y'];
+      if (trimStartSeconds > 0) args.push('-ss', trimStartSeconds.toFixed(3));
+      args.push('-i', input);
       let nextInputIndex = 1;
       let logoInputIndex: number | undefined;
       if (logoFile) { logoInputIndex = nextInputIndex; nextInputIndex += 1; args.push('-loop', '1', '-i', logoFile); }
       const hasDub = Boolean(dubFile || jobDubPath);
       let dubInputIndex: number | undefined;
-      if (hasDub) { dubInputIndex = nextInputIndex; nextInputIndex += 1; args.push('-i', jobDubPath || dubFile as string); }
+      if (hasDub) { dubInputIndex = nextInputIndex; nextInputIndex += 1; if (trimStartSeconds > 0) args.push('-ss', trimStartSeconds.toFixed(3)); args.push('-i', jobDubPath || dubFile as string); }
 
       let backgroundAudioPath: string | undefined;
       if (options.separateVocals && !jobDubIncludesBackground) {
@@ -170,7 +213,7 @@ export async function exportRoutes(app: FastifyInstance) {
         setExportProgress(exportId, { percent: 42, stage: 'Đã tách lời, đang dựng video', status: 'running' });
       }
       let backgroundInputIndex: number | undefined;
-      if (backgroundAudioPath) { backgroundInputIndex = nextInputIndex; nextInputIndex += 1; args.push('-i', backgroundAudioPath); }
+      if (backgroundAudioPath) { backgroundInputIndex = nextInputIndex; nextInputIndex += 1; if (trimStartSeconds > 0) args.push('-ss', trimStartSeconds.toFixed(3)); args.push('-i', backgroundAudioPath); }
 
       if (logoInputIndex !== undefined && options.logo) {
         const xPercent = clamp(Number(options.logo.xPercent), 0, 99);
@@ -199,16 +242,17 @@ export async function exportRoutes(app: FastifyInstance) {
 
       args.push('-filter_complex', filters.join(';'), '-map', '[videoout]');
       if (audio) args.push('-map', '[audioout]');
-      if ((options.resolution as string) === '1440') args.push('-s', '2560x1440');
-      if (options.resolution === '1080') args.push('-s', '1920x1080');
-      if (options.resolution === '720') args.push('-s', '1280x720');
+      const scaledOutput = outputSize(options.resolution, options.videoEdit?.aspectRatio);
+      if (scaledOutput) args.push('-s', scaledOutput);
       args.push('-c:v', 'libx264', '-crf', String(Math.round(clamp(Number(options.crf ?? 20), 16, 35))), '-preset', 'medium');
       if (audio) args.push('-c:a', 'aac', '-shortest');
       else args.push('-an');
+      if (trimDurationSeconds !== undefined) args.push('-t', trimDurationSeconds.toFixed(3));
       args.push('-progress', 'pipe:2', '-nostats', output);
 
       const durationProbe = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', input], requestAbort.signal);
-      const durationMs = Math.max(1, Number(durationProbe.stdout.trim()) * 1000);
+      const sourceDurationMs = Math.max(1, Number(durationProbe.stdout.trim()) * 1000);
+      const durationMs = Math.max(1, Math.min(trimDurationSeconds === undefined ? sourceDurationMs - trimStartMs : trimDurationSeconds * 1000, sourceDurationMs - trimStartMs));
       let progressBuffer = '';
       setExportProgress(exportId, { percent: Math.max(45, exportProgress.get(exportId || '')?.percent || 0), stage: 'FFmpeg đang render video và âm thanh', status: 'running' });
       await run('ffmpeg', args, requestAbort.signal, (chunk) => {
