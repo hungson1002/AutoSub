@@ -199,6 +199,9 @@ input[type="range"] { width: 100%; accent-color: var(--orange); cursor: pointer;
 .editor-main { grid-template-columns: minmax(0, 1.24fr) minmax(390px, .76fr); }
 .editor-right { min-height: 560px; max-height: calc(100vh - 195px); }
 .editor-right .subtitle-list { flex: 1 1 auto; min-height: 0; }
+.subtitle-list-virtual-space { position: relative; width: 100%; }
+.subtitle-list-item { position: absolute; inset-inline: 0; top: 0; padding-bottom: 7px; contain: layout paint style; }
+.subtitle-list-item .cue-card { min-height: 100%; margin-bottom: 0; }
 .video-stage { aspect-ratio: 16 / 9; }
 .play-button { width: 32px; height: 32px; min-width: 32px; padding: 0; flex: 0 0 32px; aspect-ratio: 1; border-radius: 50%; line-height: 0; }
 .volume-control { position: relative; display: flex; align-items: center; }

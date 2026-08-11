@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent, PointerEvent } from 'react';
 import type { BlurRegion, LogoOverlay, SubtitleCue, SubtitleStyle, VideoAspectRatio, VideoAsset, VideoEditState } from '../types';
 import { defaultStyle } from '../types';
@@ -9,6 +9,7 @@ import { RangeInput } from '../components/RangeInput';
 import { VideoTrimModal } from './VideoTrimModal';
 import { VideoCropModal } from './VideoCropModal';
 import { cropVideoStyle } from '../lib/videoCrop';
+import { buildActiveCueIndex, findActiveCue } from '../lib/activeCue';
 
 type Roi = { x: number; y: number; w: number; h: number };
 type DragKind = 'move' | 'nw' | 'ne' | 'sw' | 'se';
@@ -63,12 +64,12 @@ type Props = {
   style?: SubtitleStyle;
   blurRegions?: BlurRegion[];
   logo?: LogoOverlay;
-  currentTimeMs?: number;
   dubAudioUrl?: string;
   audioMode?: 'original' | 'dubbed';
   dubAudioMix?: { keepOriginal: boolean; originalVolume: number; separateVocals?: boolean };
   seekRequest?: { id: number; timeMs: number };
   onTime?: (ms: number) => void;
+  onActiveCueChange?: (id?: string) => void;
   roi?: Roi;
   onRoiChange?: (roi: Roi) => void;
   onBlurRegionsChange?: (regions: BlurRegion[]) => void;
@@ -79,7 +80,7 @@ type Props = {
   onVideoEditChange?: (next: VideoEditState) => void;
 };
 
-export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [], logo, currentTimeMs, dubAudioUrl, audioMode = 'original', dubAudioMix, seekRequest, onTime, roi, onRoiChange, onBlurRegionsChange, onStyleChange, onLogoChange, blurEditMode = false, videoEdit, onVideoEditChange }: Props) {
+export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [], logo, dubAudioUrl, audioMode = 'original', dubAudioMix, seekRequest, onTime, onActiveCueChange, roi, onRoiChange, onBlurRegionsChange, onStyleChange, onLogoChange, blurEditMode = false, videoEdit, onVideoEditChange }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const dubAudioRef = useRef<HTMLAudioElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -99,7 +100,6 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
   const [draftSubtitlePosition, setDraftSubtitlePosition] = useState<SubtitlePosition>();
   const [logoDrag, setLogoDrag] = useState<LogoDrag>();
   const logoDragRef = useRef<LogoDrag | undefined>(undefined);
-  const lastReportedTimeMsRef = useRef<number | undefined>(undefined);
   const subtitleFrameRef = useRef<number | undefined>(undefined);
   const pendingSubtitlePositionRef = useRef<SubtitlePosition | undefined>(undefined);
   const [draftBlurRegion, setDraftBlurRegion] = useState<BlurRegion>();
@@ -118,10 +118,13 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const [internalVideoEdit, setInternalVideoEdit] = useState<VideoEditState>({ aspectRatio: 'original', trimStartMs: 0 });
   const effectiveVideoEdit = videoEdit || internalVideoEdit;
-  const activeCue = cues.reduce<SubtitleCue | undefined>((current, cue) => {
-    if (!cue.enabled || time < cue.startMs || time >= cue.endMs) return current;
-    return !current || cue.startMs > current.startMs || (cue.startMs === current.startMs && cue.index > current.index) ? cue : current;
-  }, undefined);
+  const cueIndex = useMemo(() => buildActiveCueIndex(cues), [cues]);
+  const [activeCueId, setActiveCueId] = useState<string>();
+  const activeCue = useMemo(() => activeCueId ? cues.find((cue) => cue.id === activeCueId) : undefined, [activeCueId, cues]);
+  const syncActiveCue = useCallback((nextTimeMs: number) => {
+    const nextId = findActiveCue(cueIndex, nextTimeMs)?.id;
+    setActiveCueId((current) => current === nextId ? current : nextId);
+  }, [cueIndex]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -208,27 +211,37 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
     if (blurFrameRef.current !== undefined) cancelAnimationFrame(blurFrameRef.current);
   }, []);
   useEffect(() => {
-    if (!videoRef.current || typeof currentTimeMs !== 'number') return;
-    if (lastReportedTimeMsRef.current === currentTimeMs) {
-      lastReportedTimeMsRef.current = undefined;
-      return;
-    }
-    const next = currentTimeMs / 1000;
-    setTime(currentTimeMs);
-    if (Math.abs(videoRef.current.currentTime - next) > 0.06) videoRef.current.currentTime = next;
-    if (audioMode === 'dubbed' && dubAudioUrl && dubAudioRef.current && Math.abs(audioRefTime(dubAudioRef.current) - next) > 0.06) dubAudioRef.current.currentTime = next;
-  }, [currentTimeMs, audioMode, dubAudioUrl]);
+    onActiveCueChange?.(activeCueId);
+  }, [activeCueId, onActiveCueChange]);
+  useEffect(() => {
+    syncActiveCue((videoRef.current?.currentTime || 0) * 1000);
+  }, [syncActiveCue]);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || typeof video.requestVideoFrameCallback !== 'function') return;
+    let frameId = 0;
+    let cancelled = false;
+    const updateActiveCue: VideoFrameRequestCallback = (_now, metadata) => {
+      syncActiveCue(metadata.mediaTime * 1000);
+      if (!cancelled) frameId = video.requestVideoFrameCallback(updateActiveCue);
+    };
+    frameId = video.requestVideoFrameCallback(updateActiveCue);
+    return () => {
+      cancelled = true;
+      video.cancelVideoFrameCallback(frameId);
+    };
+  }, [asset?.url, syncActiveCue]);
   useEffect(() => {
     if (!videoRef.current || !seekRequest) return;
     const next = seekRequest.timeMs / 1000;
-    lastReportedTimeMsRef.current = seekRequest.timeMs;
     setTime(seekRequest.timeMs);
+    syncActiveCue(seekRequest.timeMs);
     if (Math.abs(videoRef.current.currentTime - next) > 0.001) videoRef.current.currentTime = next;
     if (audioMode === 'dubbed' && dubAudioUrl && dubAudioRef.current) dubAudioRef.current.currentTime = next;
-  }, [seekRequest?.id, audioMode, dubAudioUrl]);
+  }, [seekRequest?.id, audioMode, dubAudioUrl, syncActiveCue]);
 
   const toggle = () => { if (!videoRef.current) return; const video = videoRef.current; const audio = dubAudioRef.current; if (video.paused) { if (!Number.isFinite(video.currentTime) || video.currentTime * 1000 < effectiveVideoEdit.trimStartMs || (effectiveVideoEdit.trimEndMs && video.currentTime * 1000 >= effectiveVideoEdit.trimEndMs)) video.currentTime = effectiveVideoEdit.trimStartMs / 1000; if (audioMode === 'dubbed' && dubAudioUrl && audio) { audio.currentTime = video.currentTime; void audio.play().catch(() => undefined); } void video.play().then(() => setPlaying(true)).catch(() => setPlaying(false)); } else { video.pause(); audio?.pause(); setPlaying(false); } };
-  const reportTime = (next: number) => { lastReportedTimeMsRef.current = next; setTime(next); if (audioMode === 'dubbed' && dubAudioUrl && dubAudioRef.current && !dubAudioRef.current.paused && Math.abs(audioRefTime(dubAudioRef.current) - next / 1000) > 0.18) dubAudioRef.current.currentTime = next / 1000; onTime?.(next); };
+  const reportTime = (next: number) => { setTime(next); syncActiveCue(next); if (audioMode === 'dubbed' && dubAudioUrl && dubAudioRef.current && !dubAudioRef.current.paused && Math.abs(audioRefTime(dubAudioRef.current) - next / 1000) > 0.18) dubAudioRef.current.currentTime = next / 1000; onTime?.(next); };
   const seek = (next: number) => { if (!videoRef.current) return; videoRef.current.currentTime = next / 1000; if (audioMode === 'dubbed' && dubAudioUrl && dubAudioRef.current) dubAudioRef.current.currentTime = next / 1000; reportTime(next); };
   const beginRoiDrag = (event: PointerEvent<HTMLElement>, kind: DragKind) => { if (!roi || !onRoiChange) return; event.preventDefault(); event.stopPropagation(); stageRef.current?.setPointerCapture?.(event.pointerId); setRoiDrag({ kind, startX: event.clientX, startY: event.clientY, origin: roi }); };
   const beginBlurDrag = (event: PointerEvent<HTMLElement>, region: BlurRegion, kind: DragKind) => {
