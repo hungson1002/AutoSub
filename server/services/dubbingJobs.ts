@@ -34,7 +34,7 @@ export interface DubbingJobConfig {
   ttsConcurrency: number;
   llmConcurrency: number;
   maxRetries: number;
-  audioMix: { keepOriginal: boolean; originalVolume: number; separateVocals: boolean };
+  audioMix: { mode: 'mute' | 'original' | 'background'; keepOriginal: boolean; originalVolume: number; separateVocals: boolean };
   rewriteProviderRef?: string;
   rewriteModel?: string;
 }
@@ -121,7 +121,7 @@ interface CreateJobInput {
   ttsConcurrency?: number;
   llmConcurrency?: number;
   maxRetries?: number;
-  audioMix?: { keepOriginal?: boolean; originalVolume?: number; separateVocals?: boolean };
+  audioMix?: { components?: Partial<LegacySourceAudioComponents>; mode?: 'mute' | 'original' | 'background'; keepOriginal?: boolean; originalVolume?: number; separateVocals?: boolean };
   rewrite?: { provider?: AIProvider; model?: string };
 }
 
@@ -140,17 +140,16 @@ const DEFAULTS = {
   hardSpeedMax: 1.18,
   gentleSpeedMax: 1.12,
   pressuredSpeedMax: 1.50,
-  // Last-resort per-cue fit. This is deliberately higher than the normal
-  // narration cap, but is only used when a cue would still end after its SRT
-  // window after the local/block cadence passes.
-  finalFitSpeedMax: 1.50,
   adaptiveBlockLoadTrigger: 1.03,
   adaptiveBlockLoadMinCues: 8,
   adaptiveBlockDelayTriggerMs: 500,
   adaptiveBlockMinCues: 3,
   adaptiveBlockMinDelayedCues: 3,
-  adaptiveGroupSize: 6,
-  adaptiveLookBehind: 1,
+  // A difficult line borrows cadence from a small conversational neighbourhood
+  // (up to two earlier lines and the following lines).  This avoids a single
+  // cue suddenly sounding rushed while nearby silent gaps go unused.
+  adaptiveGroupSize: 7,
+  adaptiveLookBehind: 2,
   adaptiveMaxGapMs: 1_200,
   joinGapMaxMs: 450,
   joinedCueGapMs: 20,
@@ -170,7 +169,26 @@ const TTS_CACHE_VERSION = 'tts-v6-natural-cue-boundaries';
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
 const safeName = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'item';
-const normalizeAudioMix = (value?: { keepOriginal?: boolean; originalVolume?: number; separateVocals?: boolean }) => ({ keepOriginal: value?.keepOriginal ?? true, originalVolume: clamp(Number(value?.originalVolume ?? 0.25), 0, 1), separateVocals: Boolean(value?.separateVocals && (value?.keepOriginal ?? true)) });
+interface LegacySourceAudioComponents { voice: boolean; music: boolean; effects: boolean; }
+
+const normalizeAudioMix = (value?: CreateJobInput['audioMix']) => {
+  const legacy = value?.components;
+  // Older jobs could select music and effects independently. Demucs cannot
+  // do that faithfully, so migrate them to the nearest reliable mode.
+  const mode = value?.mode
+    ?? (value?.keepOriginal === false || (legacy && !legacy.voice && !legacy.music && !legacy.effects)
+      ? 'mute'
+      : value?.separateVocals || (legacy && !legacy.voice && (legacy.music || legacy.effects))
+        ? 'background'
+        : 'original');
+  const keepOriginal = mode !== 'mute';
+  return {
+    mode,
+    keepOriginal,
+    originalVolume: keepOriginal ? clamp(Number(value?.originalVolume ?? 0.25), 0, 1) : 0,
+    separateVocals: mode === 'background',
+  };
+};
 const jobDir = (id: string) => path.join(jobsRoot, safeName(id));
 const cueDir = (id: string) => path.join(jobDir(id), 'cues');
 const providerDir = (id: string) => path.join(jobDir(id), 'providers');
@@ -212,14 +230,24 @@ const gentleDeclick = 'adeclick=w=20:o=75:a=4:t=1.5:b=2:m=s';
 export const cueDeclickFilter = `${gentleDeclick},${gentleDeclick}`;
 
 export const buildSeparatedAudioMixFilter = (durationMs: number, originalVolume: number) => {
+  return buildStemAudioMixFilter(durationMs, originalVolume, 1);
+};
+
+export const buildStemAudioMixFilter = (durationMs: number, originalVolume: number, stemCount: number) => {
   const seconds = (Math.max(100, durationMs) / 1000).toFixed(3);
   const volume = clamp(Number(originalVolume), 0, 1).toFixed(3);
+  const count = Math.max(1, Math.floor(stemCount));
+  const stemLabels = Array.from({ length: count }, (_value, index) => `stem${index}`);
+  const preparation = stemLabels.map((label, index) => `[${index + 1}:a]apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB[${label}]`).join(';');
+  const background = count === 1
+    ? `[stem0]volume=${volume}[background]`
+    : `${stemLabels.map((label) => `[${label}]`).join('')}amix=inputs=${count}:duration=longest:dropout_transition=0:normalize=0,volume=${volume}[background]`;
   return {
     duration: seconds,
     // Demucs can leave faint vocal residue in no_vocals.wav. Duck that stem
     // only while the dub voice is active so it cannot sound like a second,
     // reverberant speaker, while retaining the background between cues.
-    filter: `[0:a]apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB,asplit=2[dub][sidechain];[1:a]volume=${volume},apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB[background];[background][sidechain]sidechaincompress=threshold=0.005:ratio=12:attack=5:release=180:makeup=1[ducked];[dub][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891:level=false[audioout]`,
+    filter: `[0:a]apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB,asplit=2[dub][sidechain];${preparation};${background};[background][sidechain]sidechaincompress=threshold=0.005:ratio=12:attack=5:release=180:makeup=1[ducked];[dub][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891:level=false[audioout]`,
   };
 };
 
@@ -297,8 +325,6 @@ export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: numb
     if (!block || !previous || item.startMs - previous.endMs > DEFAULTS.adaptiveMaxGapMs) blocks.push([item]);
     else block.push(item);
   }
-  const longFormCueIds = new Set(blocks.filter((block) => block.length >= DEFAULTS.adaptiveBlockLoadMinCues).flatMap((block) => block.map((cue) => cue.cueId)));
-
   for (const block of blocks) {
     if (block.length < 2) continue;
     const spanMs = Math.max(1, block[block.length - 1].endMs - block[0].startMs);
@@ -318,26 +344,16 @@ export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: numb
     const isPressuredPair = block.length === 2 && delayedCues > 0;
     if (!isDensePressuredBlock && !isPressuredPair) continue;
 
+    // Do not overwrite the local cadence with each cue's own SRT duration.
+    // That was technically punctual, but it made one long cue race at 1.42x
+    // while the immediately adjacent cues kept their unused time at 1.00x.
+    // A pressured run is spoken as one natural phrase: share a modest tempo
+    // across its continuous cues, leave real pauses alone, and let the normal
+    // timeline ripple through harmless gaps instead of starting speech early.
+    const sharedTempo = fittingTempo(blockLoad, pressuredMaxSpeed);
     for (const cue of block) {
-      const ownRequiredSpeed = cue.audioDurationMs / Math.max(cue.targetDurationMs, 1);
-      // In a pressured block, fit each spoken line to its own available window.
-      // Easy lines stay natural; only the lines causing drift can exceed 1.18x.
-      tempos.set(cue.cueId, fittingTempo(ownRequiredSpeed, pressuredMaxSpeed));
+      tempos.set(cue.cueId, Math.max(tempos.get(cue.cueId) || 1, sharedTempo));
     }
-  }
-
-  // Group cadence can legitimately choose a tempo that is comfortable for a
-  // block while leaving one line a little longer than its own SRT window. That
-  // remaining overrun accumulates into visible lip/subtitle drift on long
-  // videos. Perform one final, local fit and leave every cue that already fits
-  // untouched. The small 20 ms tolerance avoids processing encoder jitter.
-  for (const cue of ordered) {
-    if (!longFormCueIds.has(cue.cueId)) continue;
-    const currentTempo = Math.max(tempos.get(cue.cueId) || 1, 0.01);
-    const projectedDurationMs = cue.audioDurationMs / currentTempo;
-    if (projectedDurationMs <= cue.targetDurationMs + 20) continue;
-    const ownRequiredSpeed = cue.audioDurationMs / Math.max(cue.targetDurationMs, 1);
-    tempos.set(cue.cueId, fittingTempo(ownRequiredSpeed, DEFAULTS.finalFitSpeedMax));
   }
   return ordered.map((item) => ({ cueId: item.cueId, tempo: tempos.get(item.cueId) || 1 }));
 }
@@ -899,18 +915,18 @@ class DubbingRunner {
       const source = await resolveUpload(this.job.videoId);
       const separationDir = path.join(jobDir(this.job.id), 'source-stems');
       const sourceBase = path.parse(source.absolutePath).name;
-      const backgroundPath = path.join(separationDir, 'htdemucs', sourceBase, 'no_vocals.wav');
+      const stemPaths = [path.join(separationDir, 'htdemucs', sourceBase, 'no_vocals.wav')];
       const mixedPath = path.join(resultDir(this.job.id), 'dub-track-mixed.wav');
       const temporaryMixedPath = `${mixedPath}.${process.pid}.${Date.now()}.tmp.wav`;
       await rm(separationDir, { recursive: true, force: true });
       await mkdir(separationDir, { recursive: true });
       try {
         await run('py', ['-3.12', '-m', 'demucs', '--two-stems', 'vocals', '-n', 'htdemucs', '--out', separationDir, source.absolutePath], this.controller.signal);
-        await stat(backgroundPath);
+        await Promise.all(stemPaths.map((stemPath) => stat(stemPath)));
         const originalVolume = clamp(this.job.config.audioMix.originalVolume, 0, 1);
         const sourceDurationMs = await probeDuration(source.absolutePath);
-        const finiteMix = buildSeparatedAudioMixFilter(sourceDurationMs, originalVolume);
-        await run('ffmpeg', ['-y', '-i', finalPath, '-i', backgroundPath, '-filter_complex', finiteMix.filter, '-map', '[audioout]', '-t', finiteMix.duration, '-ar', '48000', '-ac', '2', temporaryMixedPath], this.controller.signal);
+        const finiteMix = buildStemAudioMixFilter(sourceDurationMs, originalVolume, stemPaths.length);
+        await run('ffmpeg', ['-y', '-i', finalPath, ...stemPaths.flatMap((stemPath) => ['-i', stemPath]), '-filter_complex', finiteMix.filter, '-map', '[audioout]', '-t', finiteMix.duration, '-ar', '48000', '-ac', '2', temporaryMixedPath], this.controller.signal);
         await rm(mixedPath, { force: true });
         await rename(temporaryMixedPath, mixedPath);
         outputPath = mixedPath;

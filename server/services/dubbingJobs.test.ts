@@ -5,7 +5,7 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { buildSeparatedAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFades, cueDeclickFilter, dubbingRewriteWordLimit, effectiveTtsConcurrency, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, planAdaptiveCueTempos, planDubbingTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter } from './dubbingJobs';
+import { buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFades, cueDeclickFilter, dubbingRewriteWordLimit, effectiveTtsConcurrency, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, planAdaptiveCueTempos, planDubbingTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
@@ -43,6 +43,14 @@ test('final separated-audio mix is finite and carries a hard output duration', (
   assert.match(mix.filter, /sidechaincompress=threshold=0\.005:ratio=12/);
   assert.match(mix.filter, /amix=inputs=2:duration=first/);
   assert.doesNotMatch(mix.filter, /,apad,/);
+});
+
+test('stem mix combines selected source stems only once before ducking under dub', () => {
+  const mix = buildStemAudioMixFilter(84_600, 0.25, 2);
+  assert.match(mix.filter, /\[1:a\].*\[stem0\]/);
+  assert.match(mix.filter, /\[2:a\].*\[stem1\]/);
+  assert.match(mix.filter, /amix=inputs=2:duration=longest/);
+  assert.match(mix.filter, /sidechaincompress/);
 });
 
 test('cue boundaries retain natural room tone and use click-safe fades', () => {
@@ -133,7 +141,7 @@ test('adaptive fitting does not spread tempo across a real pause', () => {
   assert.equal(byId.get('after-gap'), 1);
 });
 
-test('auto cadence raises only overloaded cues in a sustained pressured block', () => {
+test('auto cadence shares sustained timing pressure across a dense block', () => {
   const items = Array.from({ length: 10 }, (_, index) => ({
     cueId: `dense-${index + 1}`,
     startMs: index * 1_000,
@@ -144,8 +152,9 @@ test('auto cadence raises only overloaded cues in a sustained pressured block', 
   const plan = planAdaptiveCueTempos(items);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
 
-  assert.equal(byId.get('dense-1'), 1.22);
-  assert.equal(byId.get('dense-4'), 1);
+  assert.ok((byId.get('dense-1') || 0) > 1.15);
+  assert.equal(byId.get('dense-1'), byId.get('dense-4'));
+  assert.equal(byId.get('dense-4'), byId.get('dense-10'));
   assert.ok(plan.every((item) => item.tempo >= 1 && item.tempo <= 1.5));
 
   const timeline = planDubbingTimeline(items.map((item) => ({
@@ -154,10 +163,13 @@ test('auto cadence raises only overloaded cues in a sustained pressured block', 
     endMs: item.endMs,
     audioDurationMs: item.audioDurationMs / (byId.get(item.cueId) || 1),
   })));
-  assert.ok(Math.max(...timeline.map((item) => item.timelineShiftMs)) <= 40);
+  // The whole run shares one natural cadence, so a tiny final ripple is
+  // preferable to forcing only the long lines to race at their individual
+  // SRT speed.
+  assert.ok(Math.max(...timeline.map((item) => item.timelineShiftMs)) <= 180);
 });
 
-test('auto cadence reserves the high tempo ceiling for an extreme cue inside a pressured block', () => {
+test('auto cadence distributes an extreme cue across its continuous block', () => {
   const plan = planAdaptiveCueTempos(Array.from({ length: 8 }, (_, index) => ({
     cueId: `extreme-${index + 1}`,
     startMs: index * 1_000,
@@ -167,8 +179,8 @@ test('auto cadence reserves the high tempo ceiling for an extreme cue inside a p
   })));
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
 
-  assert.equal(byId.get('extreme-4'), 1.5);
-  assert.equal(byId.get('extreme-1'), 1.1);
+  assert.ok((byId.get('extreme-4') || 0) > 1.2);
+  assert.equal(byId.get('extreme-4'), byId.get('extreme-1'));
 });
 
 test('auto cadence leaves a roomy short block at the conservative speed', () => {
@@ -186,7 +198,7 @@ test('auto cadence leaves a roomy short block at the conservative speed', () => 
   assert.equal(byId.get('short-4'), 1);
 });
 
-test('long-form final fit removes the remaining per-cue SRT overrun', () => {
+test('roomy long-form cue does not speed up just to match its own SRT window', () => {
   const items = Array.from({ length: 10 }, (_, index) => ({
     cueId: `final-fit-${index + 1}`,
     startMs: index * 1_200,
@@ -197,9 +209,38 @@ test('long-form final fit removes the remaining per-cue SRT overrun', () => {
   const plan = planAdaptiveCueTempos(items);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
 
-  assert.ok(Math.abs((byId.get('final-fit-6') || 0) - 1.42) < 0.001);
-  assert.ok(1_420 / (byId.get('final-fit-6') || 1) <= 1_020);
+  assert.equal(byId.get('final-fit-6'), 1);
   assert.equal(byId.get('final-fit-1'), 1);
+});
+
+test('uses nearby cue slack instead of forcing the long middle cue to 1.4x', () => {
+  const items = [
+    { cueId: '13', startMs: 35_280, endMs: 36_800, targetDurationMs: 1_520, audioDurationMs: 1_855 },
+    { cueId: '14', startMs: 36_800, endMs: 39_160, targetDurationMs: 2_360, audioDurationMs: 3_351 },
+    { cueId: '15', startMs: 39_160, endMs: 42_600, targetDurationMs: 3_440, audioDurationMs: 2_740 },
+    { cueId: '16', startMs: 42_600, endMs: 43_960, targetDurationMs: 1_360, audioDurationMs: 1_810 },
+    { cueId: '17', startMs: 43_960, endMs: 45_080, targetDurationMs: 1_120, audioDurationMs: 1_029 },
+    { cueId: '18', startMs: 45_080, endMs: 48_080, targetDurationMs: 3_000, audioDurationMs: 2_829 },
+  ];
+  const plan = planAdaptiveCueTempos(items);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+  const sharedTempo = byId.get('14') || 0;
+
+  assert.ok(sharedTempo > 1.05 && sharedTempo < 1.10);
+  assert.equal(byId.get('13'), sharedTempo);
+  assert.equal(byId.get('15'), sharedTempo);
+  assert.equal(byId.get('16'), sharedTempo);
+  assert.equal(byId.get('17'), sharedTempo);
+  assert.equal(byId.get('18'), sharedTempo);
+
+  const timeline = planDubbingTimeline(items.map((item) => ({
+    cueId: item.cueId,
+    startMs: item.startMs,
+    endMs: item.endMs,
+    audioDurationMs: item.audioDurationMs / (byId.get(item.cueId) || 1),
+  })));
+  assert.ok(timeline.every((cue) => cue.timelineStartMs >= cue.startMs));
+  assert.ok(timeline[timeline.length - 1].timelineEndMs <= items[items.length - 1].endMs + 20);
 });
 
 test('final fit does not speed an isolated line in a short video', () => {
@@ -272,7 +313,7 @@ test('persists synthetic jobs with 100, 1000 and 3000 cues', { timeout: 120_000 
       assert.equal(status.doneCues, 0);
       assert.equal(status.progressPercent, 0);
       assert.equal(status.config.batchSize, 30);
-      assert.deepEqual(status.config.audioMix, { keepOriginal: true, originalVolume: 0.25, separateVocals: false });
+      assert.deepEqual(status.config.audioMix, { mode: 'original', keepOriginal: true, originalVolume: 0.25, separateVocals: false });
       assert.equal(status.providerInfo.length, 1);
     }
   } finally { await Promise.all(ids.map(cleanup)); }

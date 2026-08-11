@@ -22,17 +22,30 @@ type AlignmentGuide = { value: number; label: string };
 const VIDEO_CENTER_SNAP_PX = 14;
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const audioRefTime = (audio: HTMLAudioElement) => Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+const nearestGuide = (value: number, targets: AlignmentGuide[], threshold: number) => targets.reduce<AlignmentGuide | undefined>((best, target) => {
+  if (Math.abs(target.value - value) > threshold) return best;
+  return !best || Math.abs(target.value - value) < Math.abs(best.value - value) ? target : best;
+}, undefined);
 
-function blurRegionPreviewStyle(region: BlurRegion): CSSProperties {
-  const strength = Math.min(36, Math.max(8, Number(region.blurStrength) || 24));
+function blurRegionPreviewStyle(region: BlurRegion, outputScale: number): CSSProperties {
+  // Blur values use the 1920px export coordinate space.  Scale the corner
+  // radius here so preview and rendered video use the same geometry.
+  const strength = Math.min(60, Math.max(3, Number(region.blurStrength) || 24));
+  const borderRadius = Math.max(0, Math.min(40, region.borderRadius ?? 0)) * outputScale;
   return {
     left: `${region.xPercent}%`,
     top: `${region.yPercent}%`,
     width: `${region.widthPercent}%`,
     height: `${region.heightPercent}%`,
-    borderRadius: `${Math.max(0, Math.min(40, region.borderRadius ?? 0))}px`,
-    backdropFilter: `blur(${strength}px)`,
-    WebkitBackdropFilter: `blur(${strength}px)`,
+    borderRadius: `${borderRadius}px`,
+    // A nearly transparent tint makes backdrop-filter reliably composite in
+    // Chromium, while keeping the live preview close to the exported local
+    // scene blur rather than showing a flat grey box.
+    background: 'rgba(12, 18, 24, 0.045)',
+    backdropFilter: `blur(${Math.max(12, strength * 1.35)}px) saturate(0.92) brightness(0.975)`,
+    WebkitBackdropFilter: `blur(${Math.max(12, strength * 1.35)}px) saturate(0.92) brightness(0.975)`,
+    maskImage: 'linear-gradient(to bottom, transparent 0%, black 6%, black 94%, transparent 100%)',
+    WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 6%, black 94%, transparent 100%)',
   };
 }
 
@@ -223,7 +236,6 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
     event.preventDefault();
     event.stopPropagation();
     setActiveBlurId(region.id);
-    if (activeBlurId !== region.id) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setBlurDrag({ kind, startX: event.clientX, startY: event.clientY, origin: region });
   };
@@ -275,7 +287,7 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
     return () => window.removeEventListener('wheel', onWheelCapture, { capture: true });
   }, [asset?.url, videoZoom]);
   const beginVideoPan = (event: PointerEvent<HTMLElement>) => {
-    if (blurEditMode || roi || Math.abs(videoZoom - 1) < 0.01) return;
+    if (!asset || blurEditMode || roi || Math.abs(videoZoom - 1) < 0.01) return;
     event.preventDefault();
     event.stopPropagation();
     // Capture on the immutable stage instead of the transformed media child.
@@ -345,6 +357,7 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
     const rect = event.currentTarget.getBoundingClientRect();
     const activeVideoPanDrag = videoPanDragRef.current;
     if (activeVideoPanDrag) {
+      event.preventDefault();
       const rawX = activeVideoPanDrag.originX + event.clientX - activeVideoPanDrag.startX;
       const rawY = activeVideoPanDrag.originY + event.clientY - activeVideoPanDrag.startY;
       const snapX = Math.abs(rawX) <= VIDEO_CENTER_SNAP_PX;
@@ -360,7 +373,29 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
       const dx = ((event.clientX - blurDrag.startX) / (rect.width * videoZoom)) * 100;
       const dy = ((event.clientY - blurDrag.startY) / (rect.height * videoZoom)) * 100;
       const next = patchRect({ x: blurDrag.origin.xPercent, y: blurDrag.origin.yPercent, w: blurDrag.origin.widthPercent, h: blurDrag.origin.heightPercent }, blurDrag.kind, dx, dy);
-      const nextRegion = { ...blurDrag.origin, xPercent: next.x, yPercent: next.y, widthPercent: next.w, heightPercent: next.h };
+      const thresholdX = Math.max(0.65, (9 / Math.max(rect.width * videoZoom, 1)) * 100);
+      const thresholdY = Math.max(0.65, (9 / Math.max(rect.height * videoZoom, 1)) * 100);
+      const subtitleX = style.position === 'custom' ? style.customX ?? 50 : 50;
+      const subtitleY = style.position === 'top' ? 12 : style.position === 'middle' ? 50 : style.position === 'bottom' ? 82 : style.customY ?? 82;
+      const xTargets: AlignmentGuide[] = [
+        { value: 50, label: 'Giữa khung' },
+        { value: subtitleX, label: 'Giữa phụ đề' },
+        ...blurRegions.filter((region) => region.id !== blurDrag.origin.id).map((region, index) => ({ value: region.xPercent + region.widthPercent / 2, label: `Giữa blur ${index + 1}` })),
+      ];
+      const yTargets: AlignmentGuide[] = [
+        { value: 50, label: 'Giữa khung' },
+        { value: subtitleY, label: 'Giữa phụ đề' },
+        ...blurRegions.filter((region) => region.id !== blurDrag.origin.id).map((region, index) => ({ value: region.yPercent + region.heightPercent / 2, label: `Giữa blur ${index + 1}` })),
+      ];
+      const snappedX = blurDrag.kind === 'move' ? nearestGuide(next.x + next.w / 2, xTargets, thresholdX) : undefined;
+      const snappedY = blurDrag.kind === 'move' ? nearestGuide(next.y + next.h / 2, yTargets, thresholdY) : undefined;
+      const snappedRect = {
+        ...next,
+        x: snappedX ? clamp(snappedX.value - next.w / 2, 0, 100 - next.w) : next.x,
+        y: snappedY ? clamp(snappedY.value - next.h / 2, 0, 100 - next.h) : next.y,
+      };
+      if (blurDrag.kind === 'move') setAlignmentGuides({ x: snappedX, y: snappedY });
+      const nextRegion = { ...blurDrag.origin, xPercent: snappedRect.x, yPercent: snappedRect.y, widthPercent: snappedRect.w, heightPercent: snappedRect.h };
       pendingBlurRegionRef.current = nextRegion;
       if (blurFrameRef.current === undefined) {
         blurFrameRef.current = requestAnimationFrame(() => {
@@ -377,12 +412,8 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
       const yTargets: AlignmentGuide[] = [{ value: 50, label: 'Giữa khung' }, ...blurRegions.map((region, index) => ({ value: region.yPercent + region.heightPercent / 2, label: `Giữa blur ${index + 1}` }))];
       const thresholdX = Math.max(0.65, (9 / Math.max(rect.width * videoZoom, 1)) * 100);
       const thresholdY = Math.max(0.65, (9 / Math.max(rect.height * videoZoom, 1)) * 100);
-      const nearest = (value: number, targets: AlignmentGuide[], threshold: number) => targets.reduce<AlignmentGuide | undefined>((best, target) => {
-        if (Math.abs(target.value - value) > threshold) return best;
-        return !best || Math.abs(target.value - value) < Math.abs(best.value - value) ? target : best;
-      }, undefined);
-      const snappedX = nearest(rawPosition.x, xTargets, thresholdX);
-      const snappedY = nearest(rawPosition.y, yTargets, thresholdY);
+      const snappedX = nearestGuide(rawPosition.x, xTargets, thresholdX);
+      const snappedY = nearestGuide(rawPosition.y, yTargets, thresholdY);
       const nextPosition = { x: snappedX?.value ?? rawPosition.x, y: snappedY?.value ?? rawPosition.y };
       setAlignmentGuides({ x: snappedX, y: snappedY });
       pendingSubtitlePositionRef.current = nextPosition;
@@ -444,8 +475,8 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
     fontFamily: previewStyle.fontFamily,
     fontSize: `${Math.max(previewStyle.fontSize * previewScale, 10)}px`,
     color: previewStyle.textColor,
-    fontWeight: previewStyle.bold ? 700 : 400,
-    fontStyle: previewStyle.italic ? 'italic' : 'normal',
+    fontWeight: previewStyle.bold === true ? 700 : 400,
+    fontStyle: previewStyle.italic === true ? 'italic' : 'normal',
     WebkitTextFillColor: previewStyle.textColor,
     WebkitTextStroke: outlineWidth > 0 ? `${outlineWidth}px ${previewStyle.outlineColor}` : '0 transparent',
     paintOrder: 'stroke fill',
@@ -464,7 +495,7 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
     {asset ? <div className="video-media-layer"><div className="video-crop-viewport"><video ref={videoRef} src={asset.url} style={mediaCropStyle} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration * 1000); setVideoSize({ width: event.currentTarget.videoWidth || 16, height: event.currentTarget.videoHeight || 9 }); }} onTimeUpdate={(event) => { const next = event.currentTarget.currentTime * 1000; if (effectiveVideoEdit.trimEndMs && next >= effectiveVideoEdit.trimEndMs) { event.currentTarget.pause(); dubAudioRef.current?.pause(); setPlaying(false); seek(effectiveVideoEdit.trimEndMs); return; } reportTime(next); }} onEnded={() => { dubAudioRef.current?.pause(); setPlaying(false); }} /></div></div> : <div className="video-empty"><div className="reel-icon">✦</div><span>Chưa có video preview</span><small>Thêm video ở Trích xuất hoặc Editor</small></div>}
     {asset && logo?.enabled && <>{logo.kind === 'image' && logo.url ? <img className="logo-overlay" src={logo.url} alt={logo.name} draggable={false} onPointerDown={beginLogoDrag} style={{ left: `${logo.xPercent}%`, top: `${logo.yPercent}%`, width: `${logo.widthPercent}%`, opacity: logo.opacity, pointerEvents: 'auto', cursor: logoDrag ? 'grabbing' : 'grab' }} /> : logo.kind === 'text' && <div className="logo-overlay logo-text-overlay" onPointerDown={beginLogoDrag} style={{ left: `${logo.xPercent}%`, top: `${logo.yPercent}%`, width: `${logo.widthPercent}%`, opacity: logo.opacity, color: logo.textColor, fontFamily: logo.fontFamily, fontSize: `${logo.fontSize}px`, textShadow: `1px 1px 0 ${logo.outlineColor}, -1px -1px 0 ${logo.outlineColor}`, pointerEvents: 'auto', cursor: logoDrag ? 'grabbing' : 'grab' }}>{logo.text}</div>}</>}
     {asset && activeCue && style.visible && <div className={`subtitle-overlay ${style.position}`} onPointerDown={beginSubtitleDrag} style={subtitleStyle}>{style.content === 'original' ? activeCue.originalText : style.content === 'both' ? <><span>{activeCue.originalText}</span><br /><span>{activeCue.translatedText}</span></> : activeCue.translatedText || activeCue.originalText}</div>}
-    {blurRegions.map((region, index) => { const previewRegion = draftBlurRegion?.id === region.id ? draftBlurRegion : region; const selectedBlur = activeBlurId === region.id; return <div key={region.id} className={`blur-overlay ${blurEditMode ? selectedBlur ? 'blur-overlay-editable selected' : 'blur-overlay-selectable' : ''}`} style={blurRegionPreviewStyle(previewRegion)} onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'move')}><span>{selectedBlur ? `BLUR ${index + 1}` : ''}</span>{selectedBlur && <><i className="roi-handle nw" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'nw')} /><i className="roi-handle ne" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'ne')} /><i className="roi-handle sw" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'sw')} /><i className="roi-handle se" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'se')} /></>}</div>; })}
+    {blurRegions.map((region, index) => { const previewRegion = draftBlurRegion?.id === region.id ? draftBlurRegion : region; const selectedBlur = activeBlurId === region.id; return <div key={region.id} className={`blur-overlay ${blurEditMode ? selectedBlur ? 'blur-overlay-editable selected' : 'blur-overlay-selectable' : ''}`} style={blurRegionPreviewStyle(previewRegion, previewScale)} onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'move')}><span>{selectedBlur ? `BLUR ${index + 1}` : ''}</span>{selectedBlur && <><i className="roi-handle nw" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'nw')} /><i className="roi-handle ne" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'ne')} /><i className="roi-handle sw" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'sw')} /><i className="roi-handle se" onPointerDown={(event) => beginBlurDrag(event, previewRegion, 'se')} /></>}</div>; })}
     {roi && <div className="roi-box" style={{ left: `${roi.x}%`, top: `${roi.y}%`, width: `${roi.w}%`, height: `${roi.h}%` }} onPointerDown={(event) => beginRoiDrag(event, 'move')}><span>OCR REGION</span><i className="roi-handle nw" onPointerDown={(event) => beginRoiDrag(event, 'nw')} /><i className="roi-handle ne" onPointerDown={(event) => beginRoiDrag(event, 'ne')} /><i className="roi-handle sw" onPointerDown={(event) => beginRoiDrag(event, 'sw')} /><i className="roi-handle se" onPointerDown={(event) => beginRoiDrag(event, 'se')} /></div>}
     {alignmentGuides.x && <div className="alignment-guide vertical" style={{ left: `${alignmentGuides.x.value}%` }}><span>{alignmentGuides.x.label}</span></div>}
     {alignmentGuides.y && <div className="alignment-guide horizontal" style={{ top: `${alignmentGuides.y.value}%` }}><span>{alignmentGuides.y.label}</span></div>}

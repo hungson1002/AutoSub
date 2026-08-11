@@ -4,14 +4,47 @@ import { spawn } from 'node:child_process';
 
 export const workdir = path.join(process.cwd(), 'workdir');
 export async function ensureWorkdir() { for (const name of ['uploads', 'audio', 'frames', 'subtitles', 'tts', 'exports']) await mkdir(path.join(workdir, name), { recursive: true }); }
-export function run(command: string, args: string[], signal?: AbortSignal, onStderr?: (chunk: string) => void) {
+const mediaExecutableCache = new Map<string, string>();
+
+async function resolveMediaCommand(command: string) {
+  if (process.platform !== 'win32' || (command !== 'ffmpeg' && command !== 'ffprobe')) return command;
+  const cached = mediaExecutableCache.get(command);
+  if (cached) return cached;
+  const explicit = command === 'ffmpeg' ? process.env.FFMPEG_PATH : process.env.FFPROBE_PATH;
+  const candidates = explicit ? [explicit] : [];
+  // Winget installs FFmpeg under LocalAppData, but an already-open terminal
+  // can retain an old PATH until Windows is restarted. Discover that install
+  // directly so `npm run dev` does not randomly lose FFmpeg/FFprobe.
+  const wingetRoot = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Packages', 'Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe');
+  const packageDirectories = await readdir(wingetRoot, { withFileTypes: true }).catch(() => []);
+  for (const entry of packageDirectories) {
+    if (!entry.isDirectory()) continue;
+    candidates.push(path.join(wingetRoot, entry.name, 'bin', `${command}.exe`));
+  }
+  for (const candidate of candidates) {
+    try { await stat(candidate); mediaExecutableCache.set(command, candidate); return candidate; } catch { /* try next location */ }
+  }
+  return command;
+}
+
+export async function run(command: string, args: string[], signal?: AbortSignal, onStderr?: (chunk: string) => void) {
+  const executable = await resolveMediaCommand(command);
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true });
+    const child = spawn(executable, args, { windowsHide: true });
     let stdout = '';
     let stderr = '';
     let settled = false;
     const cleanup = () => signal?.removeEventListener('abort', abort);
-    const fail = (error: Error) => { if (settled) return; settled = true; cleanup(); reject(error); };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && (command === 'ffmpeg' || command === 'ffprobe')) {
+        reject(new Error(`Không tìm thấy ${command === 'ffprobe' ? 'FFprobe' : 'FFmpeg'}. Hãy cài FFmpeg hoặc đặt ${command === 'ffprobe' ? 'FFPROBE_PATH' : 'FFMPEG_PATH'} tới file .exe.`));
+        return;
+      }
+      reject(error);
+    };
     const abort = () => { child.kill(); fail(new Error(`${command} cancelled`)); };
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener('abort', abort, { once: true });

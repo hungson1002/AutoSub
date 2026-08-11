@@ -44,9 +44,9 @@ export function ExportModal({
   onClose: () => void;
   onNotice?: (message: string, kind?: 'success' | 'error') => void;
 }) {
-  const [format, setFormat] = useState<'translated' | 'original' | 'ass' | 'video'>('translated');
+  const [format, setFormat] = useState<'translated' | 'original' | 'ass' | 'video' | 'audio'>('translated');
   const [working, setWorking] = useState(false);
-  const [renderProgress, setRenderProgress] = useState(0);
+  const [renderProgress, setRenderProgress] = useState<number | undefined>(0);
   const [renderStage, setRenderStage] = useState('Đang chuẩn bị render');
   const hasDub = Boolean(dubTrack || dubbingJobId);
   const dubbingJobAlreadyMixed = Boolean(dubbingJobId && dubbingAudioMix?.keepOriginal && dubbingAudioMix?.separateVocals);
@@ -135,6 +135,52 @@ export function ExportModal({
     }
   };
 
+  const exportAudio = async () => {
+    const trimStartMs = Math.max(0, Math.round(videoEdit.trimStartMs || 0));
+    const trimEndMs = videoEdit.trimEndMs ? Math.round(videoEdit.trimEndMs) : undefined;
+    if (trimEndMs !== undefined && trimEndMs <= trimStartMs) {
+      onNotice?.('Điểm kết thúc phải nằm sau điểm bắt đầu.', 'error');
+      return;
+    }
+    if (!dubbingJobId && dubTrack?.size) {
+      if (trimStartMs > 0 || trimEndMs !== undefined) {
+        onNotice?.('Bản dub cũ không hỗ trợ cắt trực tiếp. Hãy tạo dub job mới hoặc bỏ phạm vi cắt.', 'error');
+        return;
+      }
+      saveBlob('autosub-current-audio.wav', dubTrack);
+      onNotice?.('Đã tải audio lồng tiếng hiện tại.', 'success');
+      onClose();
+      return;
+    }
+    if (!dubbingJobId && !asset?.uploadId) {
+      onNotice?.('Video chưa được lưu trên máy. Hãy chọn lại video và chờ upload hoàn tất.', 'error');
+      return;
+    }
+
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setWorking(true);
+    setRenderProgress(undefined);
+    setRenderStage(dubbingJobId ? 'Đang chuẩn bị audio lồng tiếng hiện tại' : 'Đang tách audio từ video hiện tại');
+    try {
+      const blob = await api.exportAudio({
+        uploadId: asset?.uploadId,
+        dubbingJobId,
+        trimStartMs,
+        trimEndMs,
+      }, controller.signal);
+      saveBlob('autosub-current-audio.wav', blob);
+      onNotice?.(dubbingJobId ? 'Đã tải audio lồng tiếng hiện tại.' : 'Đã tách và tải audio của video hiện tại.', 'success');
+      onClose();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') onNotice?.('Đã hủy xuất audio.', 'success');
+      else onNotice?.(friendlyErrorMessage(error, 'Xuất audio thất bại.'), 'error');
+    } finally {
+      controllerRef.current = undefined;
+      setWorking(false);
+    }
+  };
+
   return <>
     <Modal open={open} title="Xuất file" eyebrow="FINAL OUTPUT" onClose={onClose}>
       <div className="export-list">
@@ -142,9 +188,10 @@ export function ExportModal({
         <button className={format === 'original' ? 'selected' : ''} onClick={() => setFormat('original')}><span><Check size={14} /> SRT bản gốc</span><small>.srt</small></button>
         <button className={format === 'ass' ? 'selected' : ''} onClick={() => setFormat('ass')}><span><Check size={14} /> ASS styled</span><small>.ass</small></button>
         {asset && <button className={format === 'video' ? 'selected' : ''} onClick={() => setFormat('video')}><span><Check size={14} /> Video mới nhất</span><small>.mp4</small></button>}
+        {(asset || hasDub) && <button className={format === 'audio' ? 'selected' : ''} onClick={() => setFormat('audio')}><span><Check size={14} /> Audio hiện tại</span><small>.wav</small></button>}
       </div>
-      <div className="modal-actions"><button className="button ghost" onClick={onClose}>Hủy</button><button className="button primary" disabled={working} onClick={() => { if (format === 'video') void exportVideo(); else download(); }}><Download size={15} /> {working ? 'Đang render…' : format === 'video' ? 'Bắt đầu xuất' : 'Tải xuống'}</button></div>
+      <div className="modal-actions"><button className="button ghost" onClick={onClose}>Hủy</button><button className="button primary" disabled={working} onClick={() => { if (format === 'video') void exportVideo(); else if (format === 'audio') void exportAudio(); else download(); }}><Download size={15} /> {working ? (format === 'audio' ? 'Đang xuất audio…' : 'Đang render…') : format === 'video' ? 'Bắt đầu xuất' : 'Tải xuống'}</button></div>
     </Modal>
-    <ProgressModal open={working} title="Đang render video" message={renderStage} value={renderProgress} onCancel={() => { controllerRef.current?.abort(); setWorking(false); }} />
+    <ProgressModal open={working} title={format === 'audio' ? 'Đang xuất audio' : 'Đang render video'} message={renderStage} value={renderProgress} onCancel={() => { controllerRef.current?.abort(); setWorking(false); }} />
   </>;
 }

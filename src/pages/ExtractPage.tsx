@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AIProvider, AppSettings, ProviderAssignment, SubtitleCue, VideoAsset } from '../types';
 import { defaultStyle } from '../types';
-import { api, friendlyErrorMessage } from '../lib/api';
+import { api, friendlyErrorMessage, MAX_BROWSER_UPLOAD_BYTES } from '../lib/api';
 import { extractionStatusStorage, storage, type ExtractionRunState, type ExtractionRunStatus } from '../lib/storage';
 import { AudioLines, Check, FileAudio, FileVideo, Languages, Upload, Video, WandSparkles } from '../components/Icons';
 import { AssignmentSummary } from '../components/AssignmentSummary';
@@ -11,31 +11,37 @@ import { ProgressModal } from '../components/ProgressModal';
 import { VideoPlayer } from '../editor/VideoPlayer';
 import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
+import { TestedModelSelect } from '../components/TestedModelSelect';
+import { isCapabilityModelPassed } from '../lib/modelTests';
 
-export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, onOpenEditor, onNotice }: { providers: AIProvider[]; settings: AppSettings; onCuesChange: (cues: SubtitleCue[]) => void; onAssetChange: (asset?: VideoAsset) => void; onOpenEditor: () => void; onNotice: (message: string, kind?: 'success' | 'error') => void }) {
+export function ExtractPage({ providers, settings, initialAsset, onCuesChange, onAssetChange, onOpenEditor, onNotice }: { providers: AIProvider[]; settings: AppSettings; initialAsset?: VideoAsset; onCuesChange: (cues: SubtitleCue[]) => void; onAssetChange: (asset?: VideoAsset) => void; onOpenEditor: () => void; onNotice: (message: string, kind?: 'success' | 'error') => void }) {
   const [tab, setTab] = useState<'ocr' | 'stt'>('ocr');
   const [file, setFile] = useState<File>();
-  const [asset, setAsset] = useState<VideoAsset>();
+  const [asset, setAsset] = useState<VideoAsset | undefined>(() => initialAsset || storage.asset());
   const [roi, setRoi] = useState({ x: 0, y: 75, w: 100, h: 25 });
   const [sourceLanguage, setSourceLanguage] = useState('Auto Detect');
   const [autoTranslate, setAutoTranslate] = useState(false);
   const [filterWatermark, setFilterWatermark] = useState(false);
   const [samplingFps, setSamplingFps] = useState(2);
   const [working, setWorking] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [mediaAction, setMediaAction] = useState<'idle' | 'uploading' | 'picking'>('idle');
+  const uploading = mediaAction === 'uploading';
+  const pickingLocalFile = mediaAction === 'picking';
   const [progress, setProgress] = useState(0);
   const [progressStage, setProgressStage] = useState('Chuẩn bị pipeline');
   const [runState, setRunState] = useState<ExtractionRunState>(() => extractionStatusStorage.load());
   const controllerRef = useRef<AbortController | undefined>(undefined);
   const progressPollRef = useRef<number | undefined>(undefined);
   const progressTimerRef = useRef<number | undefined>(undefined);
-  const selectedFileRef = useRef<File | undefined>(undefined);
+  const mediaRequestRef = useRef(0);
+  const uploadControllerRef = useRef<AbortController | undefined>(undefined);
   const [activeAssignments, setActiveAssignments] = useState<Record<'vision' | 'stt', ProviderAssignment>>({ vision: settings.assignments.vision, stt: settings.assignments.stt });
   const [translationAssignment, setTranslationAssignment] = useState<ProviderAssignment>(settings.assignments.translation);
   const capability = tab === 'ocr' ? 'vision' : 'stt';
   const configuredAssignments = capabilityAssignments(settings, capability);
   const assignment = activeAssignments[capability];
   const provider = providers.find((item) => item.id === assignment.providerId);
+  const translationProvider = providers.find((item) => item.id === translationAssignment.providerId);
 
   const clearProgressTimers = () => {
     if (progressPollRef.current !== undefined) { window.clearTimeout(progressPollRef.current); progressPollRef.current = undefined; }
@@ -60,7 +66,7 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
     }
   };
 
-  useEffect(() => () => { controllerRef.current?.abort(); clearProgressTimers(); }, []);
+  useEffect(() => () => { controllerRef.current?.abort(); uploadControllerRef.current?.abort(); clearProgressTimers(); }, []);
   useEffect(() => { setActiveAssignments((current) => ({ ...current, vision: settings.assignments.vision, stt: settings.assignments.stt })); setTranslationAssignment(settings.assignments.translation); }, [settings.assignments.vision.providerId, settings.assignments.vision.model, settings.assignments.stt.providerId, settings.assignments.stt.model, settings.assignments.translation.providerId, settings.assignments.translation.model]);
 
   const updateRunState = (next: ExtractionRunState) => {
@@ -70,36 +76,92 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
 
   const selectFile = (next?: File) => {
     if (!next) return;
+    if (next.size > MAX_BROWSER_UPLOAD_BYTES) {
+      onNotice('File lớn hơn 4 GiB. Hãy dùng “Mở file lớn trên máy” để AutoSub đọc trực tiếp mà không upload hoặc sao chép.', 'error');
+      return;
+    }
+    uploadControllerRef.current?.abort();
+    const requestId = ++mediaRequestRef.current;
+    const uploadController = new AbortController();
+    uploadControllerRef.current = uploadController;
     if (asset?.uploadId) void api.deleteUpload(asset.uploadId);
+    if (asset?.url.startsWith('blob:')) URL.revokeObjectURL(asset.url);
     updateRunState({ status: 'uploading', mode: tab, fileName: next.name, updatedAt: Date.now() });
-    selectedFileRef.current = next;
     setFile(next);
-    const nextAsset: VideoAsset = { name: next.name, file: next, url: URL.createObjectURL(next), type: next.type };
+    const nextAsset: VideoAsset = { name: next.name, file: next, url: URL.createObjectURL(next), type: next.type, size: next.size, sourceMode: 'copied' };
     setAsset(nextAsset);
     onAssetChange(nextAsset);
-    setUploading(true);
-    void api.uploadMedia(next).then((stored) => {
-      if (selectedFileRef.current !== next) return;
-      const uploadedAsset = { ...nextAsset, uploadId: stored.uploadId, storedPath: stored.storedPath, path: stored.storedPath };
+    setMediaAction('uploading');
+    void api.uploadMedia(next, uploadController.signal).then((stored) => {
+      if (mediaRequestRef.current !== requestId) { void api.deleteUpload(stored.uploadId).catch(() => undefined); return; }
+      const uploadedAsset = { ...nextAsset, uploadId: stored.uploadId, storedPath: stored.storedPath, path: stored.storedPath, size: stored.size, sourceMode: stored.sourceMode || 'copied' };
       setAsset(uploadedAsset);
       onAssetChange(uploadedAsset);
       updateRunState({ status: 'ready', mode: tab, fileName: next.name, updatedAt: Date.now() });
       onNotice(`Đã lưu ${next.name} trên máy.`, 'success');
     }).catch((error) => {
-      if (selectedFileRef.current === next) {
+      if (mediaRequestRef.current === requestId && !(error instanceof DOMException && error.name === 'AbortError')) {
         updateRunState({ status: 'failed', mode: tab, fileName: next.name, updatedAt: Date.now() });
         onNotice(friendlyErrorMessage(error, 'Không thể lưu file trên máy.'), 'error');
       }
     }).finally(() => {
-      if (selectedFileRef.current === next) setUploading(false);
+      if (mediaRequestRef.current === requestId) { uploadControllerRef.current = undefined; setMediaAction('idle'); }
     });
+  };
+
+  const importLocalFile = async () => {
+    if (pickingLocalFile) {
+      uploadControllerRef.current?.abort();
+      uploadControllerRef.current = undefined;
+      mediaRequestRef.current += 1;
+      setMediaAction('idle');
+      return;
+    }
+    uploadControllerRef.current?.abort();
+    const requestId = ++mediaRequestRef.current;
+    const uploadController = new AbortController();
+    uploadControllerRef.current = uploadController;
+    setMediaAction('picking');
+    try {
+      const result = await api.importLocalMedia(tab === 'ocr' ? 'video' : 'media', uploadController.signal);
+      if ('cancelled' in result) return;
+      if (mediaRequestRef.current !== requestId) {
+        await api.deleteUpload(result.uploadId).catch(() => undefined);
+        return;
+      }
+      const previousAsset = asset;
+      if (previousAsset?.uploadId) void api.deleteUpload(previousAsset.uploadId).catch(() => undefined);
+      if (previousAsset?.url.startsWith('blob:')) URL.revokeObjectURL(previousAsset.url);
+      const linkedAsset: VideoAsset = {
+        name: result.filename,
+        type: result.contentType,
+        url: `/api/uploads/${encodeURIComponent(result.uploadId)}/media`,
+        uploadId: result.uploadId,
+        storedPath: result.storedPath,
+        path: result.storedPath,
+        size: result.size,
+        sourceMode: 'linked',
+      };
+      setFile(undefined);
+      setAsset(linkedAsset);
+      onAssetChange(linkedAsset);
+      updateRunState({ status: 'ready', mode: tab, fileName: result.filename, updatedAt: Date.now() });
+      onNotice(`Đã liên kết ${result.filename} mà không sao chép file.`, 'success');
+    } catch (error) {
+      if (mediaRequestRef.current === requestId && !(error instanceof DOMException && error.name === 'AbortError')) onNotice(friendlyErrorMessage(error, 'Không thể mở file local.'), 'error');
+    } finally {
+      if (mediaRequestRef.current === requestId) { uploadControllerRef.current = undefined; setMediaAction('idle'); }
+    }
   };
 
   const clearFile = (event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     if (asset?.url.startsWith('blob:')) URL.revokeObjectURL(asset.url);
     if (asset?.uploadId) void api.deleteUpload(asset.uploadId);
-    selectedFileRef.current = undefined;
+    uploadControllerRef.current?.abort();
+    uploadControllerRef.current = undefined;
+    mediaRequestRef.current += 1;
+    setMediaAction('idle');
     updateRunState({ status: 'idle' });
     setFile(undefined);
     setAsset(undefined);
@@ -107,19 +169,18 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
   };
 
   const run = async () => {
-    if (!file) { onNotice(tab === 'ocr' ? 'Hãy chọn video trước khi bắt đầu OCR.' : 'Hãy chọn video hoặc audio trước khi bắt đầu STT.', 'error'); return; }
-    if (uploading || !asset?.uploadId) { onNotice('File vẫn đang được lưu trên máy. Hãy chờ upload hoàn tất rồi thử lại.', 'error'); return; }
+    if (!asset) { onNotice(tab === 'ocr' ? 'Hãy chọn video trước khi bắt đầu OCR.' : 'Hãy chọn video hoặc audio trước khi bắt đầu STT.', 'error'); return; }
+    if (mediaAction !== 'idle' || !asset?.uploadId) { onNotice(pickingLocalFile ? 'Hãy chọn hoặc hủy hộp thoại file trước khi chạy.' : 'File vẫn đang được lưu trên máy. Hãy chờ upload hoàn tất rồi thử lại.', 'error'); return; }
     if (!provider) { onNotice(`Chưa có ${tab === 'ocr' ? 'Vision' : 'STT'} Provider trong Cài đặt.`, 'error'); return; }
     if (!provider.enabled) { onNotice(`Provider ${provider.name} đang bị tắt trong Cài đặt.`, 'error'); return; }
     if (!assignment.model) { onNotice(`Provider ${provider.name} đã chọn nhưng chưa có Model. Hãy chọn Model trong Cài đặt.`, 'error'); return; }
     const capability = tab === 'ocr' ? 'vision' : 'stt';
-    const tested = storage.modelPreferences()[`${provider.id}::${capability}::${assignment.model}`];
-    if (tested?.status === 'failed') { onNotice(`Model ${assignment.model} không hỗ trợ ${capability.toUpperCase()}. Hãy chọn model có trạng thái Chạy được trong Cài đặt.`, 'error'); return; }
+    if (!isCapabilityModelPassed(storage.modelPreferences(), provider.id, capability, assignment.model)) { onNotice(`Model ${assignment.model} chưa test ${capability.toUpperCase()} thành công. Hãy chọn model có trạng thái Chạy được trong Cài đặt.`, 'error'); return; }
 
     const controller = new AbortController();
     controllerRef.current = controller;
     clearProgressTimers();
-    updateRunState({ status: 'running', mode: tab, fileName: file.name, updatedAt: Date.now() });
+    updateRunState({ status: 'running', mode: tab, fileName: asset.name, updatedAt: Date.now() });
     setWorking(true);
     setProgress(10);
     setProgressStage(tab === 'ocr' ? 'Đang khởi tạo OCR progress' : autoTranslate ? 'FFmpeg → STT → Translation' : 'FFmpeg → STT provider');
@@ -135,9 +196,8 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
         setProgressStage(`STT hoàn tất · nhận ${result.cues.length} cue`);
         let nextCues = result.cues;
         if (autoTranslate) {
-          const translationProvider = providers.find((item) => item.id === translationAssignment.providerId);
-          if (!translationProvider || !translationAssignment.model) {
-            onNotice('STT đã xong; auto-translation bị bỏ qua vì chưa có Translation Provider + Model.', 'error');
+          if (!translationProvider || !translationAssignment.model || !isCapabilityModelPassed(storage.modelPreferences(), translationProvider.id, 'translation', translationAssignment.model)) {
+            onNotice('STT đã xong; auto-translation bị bỏ qua vì chưa chọn model Translation đã test thành công.', 'error');
           } else {
             setProgressStage('Đang dịch các cue vừa nhận');
             easeProgressTo(92);
@@ -153,7 +213,7 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
         // without the uploadId required by dubbing and vocal separation.
         onAssetChange(asset);
         onCuesChange(nextCues);
-        updateRunState({ status: 'completed', mode: tab, fileName: file.name, cueCount: nextCues.length, updatedAt: Date.now() });
+        updateRunState({ status: 'completed', mode: tab, fileName: asset.name, cueCount: nextCues.length, updatedAt: Date.now() });
         onNotice(`Đã trích xuất ${nextCues.length} cue${autoTranslate ? ' và xử lý auto-translation.' : '.'}`, 'success');
       } else {
         const result = await api.extractOcr(asset.uploadId, provider, assignment.model, roi, samplingFps, filterWatermark, controller.signal, progressId);
@@ -162,7 +222,7 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
         setProgressStage(`Đã nhận OCR · ${result.cues.length} cue, đang lưu kết quả`);
         onAssetChange(asset);
         onCuesChange(result.cues);
-        updateRunState({ status: 'completed', mode: tab, fileName: file.name, cueCount: result.cues.length, updatedAt: Date.now() });
+        updateRunState({ status: 'completed', mode: tab, fileName: asset.name, cueCount: result.cues.length, updatedAt: Date.now() });
         onNotice(`Đã OCR ${result.cues.length} cue.`, 'success');
       }
       setProgress(100);
@@ -171,7 +231,7 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
       if (error instanceof DOMException && error.name === 'AbortError') {
         clearProgressTimers();
         setProgressStage('Đã hủy pipeline');
-        updateRunState({ status: 'cancelled', mode: tab, fileName: file.name, updatedAt: Date.now() });
+        updateRunState({ status: 'cancelled', mode: tab, fileName: asset.name, updatedAt: Date.now() });
         onNotice('Đã hủy extraction.', 'success');
       }
       else {
@@ -183,7 +243,7 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
           const key = `${provider.id}::${tab === 'ocr' ? 'vision' : 'stt'}::${assignment.model}`;
           storage.saveModelPreferences({ ...current, [key]: { ...(current[key] || { bookmarked: false, status: 'unknown' }), status: 'failed', lastTestedAt: Date.now(), error: message } });
         }
-        updateRunState({ status: 'failed', mode: tab, fileName: file.name, updatedAt: Date.now() });
+        updateRunState({ status: 'failed', mode: tab, fileName: asset.name, updatedAt: Date.now() });
         onNotice(message, 'error');
       }
     } finally {
@@ -200,17 +260,19 @@ export function ExtractPage({ providers, settings, onCuesChange, onAssetChange, 
     <header className="page-header"><div><div className="eyebrow">EXTRACTION LAB / 03</div><h1>Trích xuất <span>phụ đề</span></h1><p>Đưa video hoặc âm thanh vào, lấy ra một SubtitleCue[] sạch để chỉnh sửa tiếp.</p></div></header>
     <div className="tab-bar"><button className={tab === 'ocr' ? 'active' : ''} onClick={() => setTab('ocr')}><Video size={16} /> OCR (Video)</button><button className={tab === 'stt' ? 'active' : ''} onClick={() => setTab('stt')}><AudioLines size={16} /> Trích xuất từ âm thanh</button></div>
     <section className="extract-grid"><div className="extract-left">
-      <label className={`dropzone compact ${file ? 'loaded' : ''}`}><input type="file" accept={tab === 'ocr' ? 'video/*' : 'video/*,audio/*'} onChange={(event) => selectFile(event.target.files?.[0])} />{file ? <><div className="file-icon">{tab === 'ocr' ? <FileVideo size={18} /> : <FileAudio size={18} />}</div><div><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(1)} MB · <button type="button" onClick={clearFile}>Thay file</button></small></div></> : <><div className="upload-icon"><Upload size={19} /></div><div><strong>{tab === 'ocr' ? 'Thả video vào đây' : 'Thả video hoặc audio vào đây'}</strong><small>{tab === 'ocr' ? '.mp4 · .mkv · .mov' : '.mp4 · .mp3 · .wav'}</small></div></>}</label>
+      <label className={`dropzone compact ${asset ? 'loaded' : ''}`}><input type="file" accept={tab === 'ocr' ? 'video/*' : 'video/*,audio/*'} onChange={(event) => { const next = event.currentTarget.files?.[0]; event.currentTarget.value = ''; selectFile(next); }} />{asset ? <><div className="file-icon">{tab === 'ocr' ? <FileVideo size={18} /> : <FileAudio size={18} />}</div><div><strong>{asset.name}</strong><small>{asset.size ? `${(asset.size / 1024 / 1024).toFixed(1)} MB · ` : ''}{asset.sourceMode === 'linked' ? 'Đọc trực tiếp, không sao chép · ' : ''}<button type="button" onClick={clearFile}>Thay file</button></small></div></> : <><div className="upload-icon"><Upload size={19} /></div><div><strong>{tab === 'ocr' ? 'Thả video vào đây' : 'Thả video hoặc audio vào đây'}</strong><small>{tab === 'ocr' ? '.mp4 · .mkv · .mov' : '.mp4 · .mp3 · .wav'}</small></div></>}</label>
+      <div className="local-file-import"><button type="button" className={`button ghost ${pickingLocalFile ? 'active' : ''}`} disabled={working} onClick={() => void importLocalFile()}><FileVideo size={15} /> {pickingLocalFile ? 'Hủy chọn file' : 'Mở file lớn trên máy'}</button><small>{pickingLocalFile ? 'Hộp thoại chọn file đang mở phía trước ứng dụng.' : 'Không upload hoặc sao chép; nên dùng cho file lớn hơn 4 GiB.'}</small></div>
       {tab === 'ocr' && <div className="ocr-stage"><VideoPlayer asset={asset} cues={[]} style={defaultStyle} roi={roi} onRoiChange={setRoi} /><div className="roi-caption"><span><i /> OCR region</span><small>Mặc định: x=0%, y=75%, w=100%, h=25% · kéo khung hoặc các góc để chỉnh</small></div></div>}
       {tab === 'stt' && <div className="audio-callout"><div className="audio-callout-icon"><AudioLines size={20} /></div><div><strong>STT sẽ tách audio bằng FFmpeg</strong><p>Chỉ gửi audio đã tách tới endpoint /audio/transcriptions của Provider. Capability STT được kiểm tra trong Cài đặt.</p></div></div>}
     </div><div className="extract-config">
       <div className="section-title"><span>{tab === 'ocr' ? 'OCR CONFIGURATION' : 'STT CONFIGURATION'}</span><span className="local-pill">LOCAL PIPELINE</span></div>
       <div className="field"><span>Ngôn ngữ gốc</span><SelectField ariaLabel="Ngôn ngữ gốc" value={sourceLanguage} onChange={setSourceLanguage} options={[{ value: 'Auto Detect', label: 'Auto Detect' }, { value: 'vi', label: 'Tiếng Việt' }, { value: 'zh', label: '中文' }, { value: 'en', label: 'English' }, { value: 'ko', label: '한국어' }]} /></div>
       <CapabilityAssignmentPicker capability={capability} assignments={configuredAssignments} providers={providers} value={assignment} onChange={(value) => setActiveAssignments((current) => ({ ...current, [capability]: value }))} />
+      <TestedModelSelect provider={provider} capability={capability} value={assignment.model} onChange={(model) => setActiveAssignments((current) => ({ ...current, [capability]: { ...current[capability], model } }))} candidateModelIds={configuredAssignments.filter((item) => item.providerId === provider?.id).map((item) => item.model)} />
       <AssignmentSummary label={tab === 'ocr' ? 'Vision Provider đang dùng' : 'STT Provider đang dùng'} assignment={assignment} provider={provider} capability={capability} />
       {tab === 'ocr' ? <><div className="two-fields"><label className="field"><span>Sampling <b className="value-badge">{samplingFps} FPS</b></span><RangeInput min={1} max={4} step={1} value={samplingFps} onChange={(event) => setSamplingFps(Number(event.target.value))} /></label><div className="field"><span>ROI</span><div className="coordinate-readout">{roi.x.toFixed(0)}% × {roi.y.toFixed(0)}% · {roi.w.toFixed(0)}% × {roi.h.toFixed(0)}%</div></div></div><label className="toggle-row"><span>Lọc logo / watermark khỏi OCR</span><input type="checkbox" checked={filterWatermark} onChange={(event) => setFilterWatermark(event.target.checked)} /><i /></label></> : <label className="toggle-row"><span>Dịch tự động sau khi trích xuất</span><input type="checkbox" checked={autoTranslate} onChange={(event) => setAutoTranslate(event.target.checked)} /><i /></label>}
-      {autoTranslate && tab === 'stt' && <><CapabilityAssignmentPicker capability="translation" assignments={capabilityAssignments(settings, 'translation')} providers={providers} value={translationAssignment} onChange={setTranslationAssignment} label="Translation Provider sau STT" /><div className="auto-translation-note"><Languages size={15} /> Sau STT, app dùng Translation Provider đã chọn và giữ timestamp của STT.</div></>}
-      <button className="button primary large full" onClick={() => void run()} disabled={working || uploading}><WandSparkles size={16} /> {uploading ? 'Đang lưu file…' : working ? 'Đang chạy pipeline…' : tab === 'ocr' ? 'Bắt đầu OCR' : 'Bắt đầu trích xuất'} <span>→</span></button>
+      {autoTranslate && tab === 'stt' && <><CapabilityAssignmentPicker capability="translation" assignments={capabilityAssignments(settings, 'translation')} providers={providers} value={translationAssignment} onChange={setTranslationAssignment} label="Translation Provider sau STT" /><TestedModelSelect provider={translationProvider} capability="translation" value={translationAssignment.model} onChange={(model) => setTranslationAssignment((current) => ({ ...current, model }))} candidateModelIds={capabilityAssignments(settings, 'translation').filter((item) => item.providerId === translationProvider?.id).map((item) => item.model)} label="Mô hình dịch sau STT" /><div className="auto-translation-note"><Languages size={15} /> Sau STT, app chỉ dùng model Translation đã test thành công và giữ timestamp của STT.</div></>}
+      <button className="button primary large full" onClick={() => void run()} disabled={working || mediaAction !== 'idle'}><WandSparkles size={16} /> {pickingLocalFile ? 'Đang chọn file…' : uploading ? 'Đang lưu file…' : working ? 'Đang chạy pipeline…' : tab === 'ocr' ? 'Bắt đầu OCR' : 'Bắt đầu trích xuất'} <span>→</span></button>
       <div className={`extraction-status-badge ${currentStatus}`} role="status"><span className="extraction-status-dot" /><strong>{statusLabels[currentStatus]}</strong>{currentStatus === 'completed' && runState.cueCount !== undefined && <small>· {runState.cueCount} cue</small>}{currentStatus !== 'idle' && runState.updatedAt && <time>{new Date(runState.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>}</div>
       <div className="pipeline-steps"><span className="done"><Check size={13} /> {tab === 'ocr' ? 'Crop ROI' : 'Tách audio'}</span><span>→</span><span>{tab === 'ocr' ? 'Frame change' : 'STT endpoint'}</span><span>→</span><span>SubtitleCue[]</span></div><button className="text-button full" onClick={onOpenEditor}>Mở Editor hiện tại →</button>
     </div></section>

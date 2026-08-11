@@ -52,9 +52,19 @@ export type StoredUpload = {
   storedPath: string;
   absolutePath: string;
   directory: string;
+  sourceMode: 'copied' | 'linked';
 };
 
-type StoredUploadRecord = Omit<StoredUpload, 'absolutePath' | 'directory'>;
+type StoredUploadRecord = Omit<StoredUpload, 'absolutePath' | 'directory'> & { sourcePath?: string };
+
+const contentTypeForFile = (filename: string) => {
+  const extension = path.extname(filename).toLowerCase();
+  return ({
+    '.mp4': 'video/mp4', '.m4v': 'video/x-m4v', '.mkv': 'video/x-matroska', '.mov': 'video/quicktime',
+    '.webm': 'video/webm', '.avi': 'video/x-msvideo', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac', '.ogg': 'audio/ogg',
+  } as Record<string, string>)[extension] || 'application/octet-stream';
+};
 
 async function writeJsonAtomic(file: string, value: unknown) {
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
@@ -111,7 +121,34 @@ export async function storeUpload(input: Readable, filename: string, contentType
       contentType: contentType || 'application/octet-stream',
       size: persisted.size,
       storedPath: path.posix.join('uploads', uploadId, storedName),
+      sourceMode: 'copied',
     };
+    await writeJsonAtomic(path.join(directory, 'upload.json'), record);
+    return { ...record, absolutePath, directory };
+  } catch (error) {
+    await cleanupUploadSession(directory);
+    throw error;
+  }
+}
+
+export async function registerLocalUpload(sourcePath: string): Promise<StoredUpload> {
+  const absolutePath = path.resolve(sourcePath);
+  const source = await stat(absolutePath).catch(() => undefined);
+  if (!source?.isFile()) throw new UploadReferenceError();
+
+  const directory = await createUploadSession();
+  const uploadId = path.basename(directory);
+  const filename = safeUploadName(path.basename(absolutePath));
+  const record: StoredUploadRecord = {
+    uploadId,
+    filename,
+    contentType: contentTypeForFile(filename),
+    size: source.size,
+    storedPath: path.posix.join('uploads', uploadId, `linked-${filename}`),
+    sourceMode: 'linked',
+    sourcePath: absolutePath,
+  };
+  try {
     await writeJsonAtomic(path.join(directory, 'upload.json'), record);
     return { ...record, absolutePath, directory };
   } catch (error) {
@@ -125,11 +162,17 @@ export async function resolveUpload(uploadId: string): Promise<StoredUpload> {
   try {
     const directory = path.join(workdir, 'uploads', uploadId);
     const record = JSON.parse(await readFile(path.join(directory, 'upload.json'), 'utf8')) as StoredUploadRecord;
-    const absolutePath = path.join(workdir, record.storedPath.replace(/^uploads[\\/]/, 'uploads/'));
-    const root = path.resolve(path.join(workdir, 'uploads'));
-    if (!path.resolve(absolutePath).startsWith(`${root}${path.sep}`)) throw new UploadReferenceError();
+    const sourceMode = record.sourceMode || 'copied';
+    const absolutePath = sourceMode === 'linked' && record.sourcePath
+      ? path.resolve(record.sourcePath)
+      : path.join(workdir, record.storedPath.replace(/^uploads[\\/]/, 'uploads/'));
+    if (sourceMode === 'copied') {
+      const root = path.resolve(path.join(workdir, 'uploads'));
+      if (!path.resolve(absolutePath).startsWith(`${root}${path.sep}`)) throw new UploadReferenceError();
+    }
     const file = await stat(absolutePath);
-    return { ...record, size: file.size, absolutePath, directory };
+    if (!file.isFile()) throw new UploadReferenceError();
+    return { ...record, sourceMode, size: file.size, absolutePath, directory };
   } catch (error) {
     if (error instanceof UploadReferenceError) throw error;
     throw new UploadReferenceError();

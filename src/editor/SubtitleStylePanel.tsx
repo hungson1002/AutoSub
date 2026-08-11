@@ -4,6 +4,7 @@ import { Upload } from '../components/Icons';
 import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
 import { subtitleFonts } from './subtitleFonts';
+import { subtitlePresets } from './subtitlePresets';
 
 type UploadedFont = { family: string; name: string; url: string };
 type ColorKey = 'textColor' | 'outlineColor' | 'backgroundColor';
@@ -90,6 +91,14 @@ export function SubtitleStylePanel({ style, onChange, onFontUpload }: SubtitleSt
   ];
 
   return <div className="style-panel">
+    <div className="subtitle-presets" aria-label="Preset subtitle style">
+      <div className="subtitle-presets-heading"><span>PRESET KIỂU PHỤ ĐỀ</span><small>Áp dụng rồi vẫn chỉnh riêng từng thuộc tính</small></div>
+      <div className="subtitle-preset-grid">
+        {subtitlePresets.map((preset) => <button type="button" key={preset.id} className="subtitle-preset" onClick={() => onChange(preset.style)} title={preset.description}>
+          <strong>{preset.name}</strong><small>{preset.description}</small>
+        </button>)}
+      </div>
+    </div>
     <div className="style-panel-intro"><span>LIVE TYPE CONTROL</span><p>Thay đổi sẽ cập nhật ngay trên frame video.</p></div>
     <label className="toggle-row"><span>Hiện phụ đề trên video</span><input type="checkbox" checked={style.visible} onChange={(event) => onChange({ visible: event.target.checked })} /><i /></label>
     <div className="field"><span>Nội dung</span><SelectField ariaLabel="Nội dung phụ đề" value={style.content} onChange={(value) => onChange({ content: value as SubtitleStyle['content'] })} options={[{ value: 'original', label: 'Bản gốc' }, { value: 'translated', label: 'Bản dịch' }, { value: 'both', label: 'Cả hai', description: 'Bản gốc và bản dịch' }]} /></div>

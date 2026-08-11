@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import type { AIProvider } from '../types';
+import { defaultStyle, type AIProvider } from '../types';
 import { api, buildRequestInit, friendlyErrorMessage } from './api';
 import { LatestUploadGuard } from './latestUpload';
 import { videoAssetUploadFile } from './videoAsset';
@@ -45,7 +45,7 @@ test('create dubbing job keeps JSON body, content type and audio mix config', as
   try {
     await api.createDubbingJob([{
       id: 'cue-1', index: 1, startMs: 0, endMs: 1000, originalText: 'Hello', translatedText: 'Xin chào', text: 'Xin chào', previousText: '', nextText: '', provider, model: 'model-1', voice: 'voice-1', speed: 1, volume: 1,
-    }], { videoId: 'upload-video-1', timingMode: 'natural', batchSize: 30, ttsConcurrency: 3, llmConcurrency: 2, maxRetries: 3, audioMix: { keepOriginal: true, originalVolume: 0.25, separateVocals: true } });
+    }], { videoId: 'upload-video-1', timingMode: 'natural', batchSize: 30, ttsConcurrency: 3, llmConcurrency: 2, maxRetries: 3, audioMix: { mode: 'background', keepOriginal: true, originalVolume: 0.25, separateVocals: true } });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -53,10 +53,10 @@ test('create dubbing job keeps JSON body, content type and audio mix config', as
   const init = calls[0]?.init;
   assert.equal(new Headers(init?.headers).get('content-type'), 'application/json');
   assert.ok(typeof init?.body === 'string');
-  const body = JSON.parse(init.body as string) as { cues: unknown[]; videoId: string; audioMix: { keepOriginal: boolean; originalVolume: number; separateVocals: boolean } };
+  const body = JSON.parse(init.body as string) as { cues: unknown[]; videoId: string; audioMix: { mode: string; keepOriginal: boolean; originalVolume: number; separateVocals: boolean } };
   assert.equal(body.cues.length, 1);
   assert.equal(body.videoId, 'upload-video-1');
-  assert.deepEqual(body.audioMix, { keepOriginal: true, originalVolume: 0.25, separateVocals: true });
+  assert.deepEqual(body.audioMix, { mode: 'background', keepOriginal: true, originalVolume: 0.25, separateVocals: true });
 });
 
 test('request helper removes an accidental JSON header when a request has no body', () => {
@@ -96,6 +96,78 @@ test('extraction sends only the stored upload reference after the one-time uploa
     assert.equal(body.uploadId, 'upload-1');
     assert.equal(String(call.init?.body).includes('[object File]'), false);
   }
+});
+
+test('local media import sends only a small JSON picker request', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return new Response(JSON.stringify({ uploadId: 'linked-1', storedPath: 'uploads/linked-1/source.mp4', filename: 'source.mp4', contentType: 'video/mp4', size: 8_079_268_316, sourceMode: 'linked' }), { status: 201, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    await api.importLocalMedia('video');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls[0]?.url, 'http://127.0.0.1:8787/api/uploads/import-local');
+  assert.equal(calls[0]?.init?.method, 'POST');
+  assert.equal(new Headers(calls[0]?.init?.headers).get('content-type'), 'application/json');
+  assert.equal(calls[0]?.init?.body, JSON.stringify({ kind: 'video' }));
+  assert.equal((calls[0]?.init?.body as unknown) instanceof FormData, false);
+});
+
+test('video export bypasses the Vite proxy and reuses the stored upload reference', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return new Response(new Blob(['rendered-video'], { type: 'video/mp4' }), { status: 200, headers: { 'content-type': 'video/mp4' } });
+  }) as typeof fetch;
+
+  try {
+    await api.exportVideo(undefined, [], defaultStyle, {
+      exportId: 'export-1',
+      uploadId: 'upload-1',
+      resolution: 'original',
+      crf: 20,
+      keepAudio: true,
+      originalVolume: 0.25,
+      burnSubtitles: true,
+      separateVocals: false,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, 'http://127.0.0.1:8787/api/export/video');
+  assert.equal(calls[0]?.init?.method, 'POST');
+  const form = calls[0]?.init?.body as FormData;
+  assert.equal(form.get('uploadId'), 'upload-1');
+  assert.equal(form.has('file'), false);
+});
+
+test('audio export sends only the current media references and trim as small JSON', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return new Response(new Blob(['wave'], { type: 'audio/wav' }), { status: 200, headers: { 'content-type': 'audio/wav' } });
+  }) as typeof fetch;
+
+  try {
+    await api.exportAudio({ uploadId: 'upload-1', dubbingJobId: 'dub-1', trimStartMs: 1250, trimEndMs: 9250 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, 'http://127.0.0.1:8787/api/export/audio');
+  assert.equal(calls[0]?.init?.method, 'POST');
+  assert.equal(new Headers(calls[0]?.init?.headers).get('content-type'), 'application/json');
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { uploadId: 'upload-1', dubbingJobId: 'dub-1', trimStartMs: 1250, trimEndMs: 9250 });
+  assert.equal((calls[0]?.init?.body as unknown) instanceof FormData, false);
 });
 
 test('latest video upload wins when an earlier upload resolves later', () => {

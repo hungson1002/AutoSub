@@ -100,10 +100,13 @@ export function BlurEditor({
   const add = () => {
     const region: BlurRegion = {
       id: crypto.randomUUID(),
-      xPercent: 20,
-      yPercent: 70,
-      widthPercent: 60,
-      heightPercent: 15,
+      // Source subtitles commonly occupy two lines at the very bottom of a
+      // video.  The old 70–85% preset stopped at the first line, leaving the
+      // line below it completely readable in the exported file.
+      xPercent: 8,
+      yPercent: 77,
+      widthPercent: 84,
+      heightPercent: 18,
       startMs: 0,
       endMs: 999999,
       wholeVideo: true,

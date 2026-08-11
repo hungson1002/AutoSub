@@ -5,12 +5,24 @@ import { normalizeSettings } from './settings';
 
 export type ExtractionRunStatus = 'idle' | 'uploading' | 'ready' | 'running' | 'completed' | 'failed' | 'cancelled';
 export interface ExtractionRunState { status: ExtractionRunStatus; mode?: 'ocr' | 'stt'; fileName?: string; cueCount?: number; updatedAt?: number; }
+export type TranslationRunStatus = 'idle' | 'ready' | 'running' | 'completed' | 'failed' | 'cancelled';
+export interface TranslationRunState {
+  status: TranslationRunStatus;
+  fileName?: string;
+  total?: number;
+  translated?: number;
+  remaining?: number;
+  message?: string;
+  progress?: number;
+  stage?: string;
+  updatedAt?: number;
+}
 
 const keys = { providers: 'autosub.providers', settings: 'autosub.settings', cues: 'autosub.cues', asset: 'autosub.asset', videoEdits: 'autosub.video-edits', dubbingJobs: 'autosub.dubbing-jobs', glossary: 'autosub.glossary', pronunciation: 'autosub.pronunciation', modelPreferences: 'autosub.model-preferences' };
 function read<T>(key: string, fallback: T): T { try { return JSON.parse(localStorage.getItem(key) || '') as T; } catch { return fallback; } }
 function write<T>(key: string, value: T) { localStorage.setItem(key, JSON.stringify(value)); }
 const cueDebug = (cues: SubtitleCue[]) => cues.slice(0, 5).map((cue) => ({ text: cue.originalText, startMs: cue.startMs, endMs: cue.endMs }));
-type StoredVideoAsset = Pick<VideoAsset, 'name' | 'type' | 'uploadId' | 'storedPath' | 'durationMs'>;
+type StoredVideoAsset = Pick<VideoAsset, 'name' | 'type' | 'uploadId' | 'storedPath' | 'durationMs' | 'size' | 'sourceMode'>;
 
 export const storage = {
   providers: () => { const providers = read<AIProvider[]>(keys.providers, []).map((provider) => normalizeProvider(provider)); return providers.some((provider) => provider.providerType === 'capcut-tts' || provider.id === 'capcut-tts-local') ? providers : [...providers, createCapCutTtsProvider()]; },
@@ -25,7 +37,7 @@ export const storage = {
   },
   saveAsset: (value?: VideoAsset) => {
     if (!value?.uploadId) { localStorage.removeItem(keys.asset); return; }
-    write<StoredVideoAsset>(keys.asset, { name: value.name, type: value.type, uploadId: value.uploadId, storedPath: value.storedPath, durationMs: value.durationMs });
+    write<StoredVideoAsset>(keys.asset, { name: value.name, type: value.type, uploadId: value.uploadId, storedPath: value.storedPath, durationMs: value.durationMs, size: value.size, sourceMode: value.sourceMode });
   },
   videoEdit: (uploadId?: string): VideoEditState => uploadId ? read<Record<string, VideoEditState>>(keys.videoEdits, {})[uploadId] || { aspectRatio: 'original', trimStartMs: 0 } : { aspectRatio: 'original', trimStartMs: 0 },
   saveVideoEdit: (uploadId: string, value: VideoEditState) => write(keys.videoEdits, { ...read<Record<string, VideoEditState>>(keys.videoEdits, {}), [uploadId]: value }),
@@ -49,4 +61,10 @@ const extractionStatusKey = 'autosub.extraction-status';
 export const extractionStatusStorage = {
   load: () => read<ExtractionRunState>(extractionStatusKey, { status: 'idle' }),
   save: (value: ExtractionRunState) => write(extractionStatusKey, value),
+};
+
+const translationStatusKey = 'autosub.translation-status';
+export const translationStatusStorage = {
+  load: () => read<TranslationRunState>(translationStatusKey, { status: 'idle' }),
+  save: (value: TranslationRunState) => write(translationStatusKey, value),
 };

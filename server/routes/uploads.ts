@@ -1,10 +1,19 @@
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
-import { cleanupUploadSession, discardUploadStream, resolveUpload, storeUpload, UploadReferenceError, UploadTooLargeError } from '../services/uploads';
+import { cleanupUploadSession, discardUploadStream, registerLocalUpload, resolveUpload, storeUpload, UploadReferenceError, UploadTooLargeError } from '../services/uploads';
+import { pickLocalMediaFile, type LocalMediaKind } from '../services/localFilePicker';
 
 const uploadError = (error: unknown) => error instanceof UploadTooLargeError || (error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE');
 
-export async function uploadRoutes(app: FastifyInstance) {
+type UploadRouteOptions = { pickLocalMediaFile?: (kind: LocalMediaKind, signal?: AbortSignal) => Promise<string | undefined> };
+
+const isLocalOrigin = (origin?: string) => {
+  if (!origin) return true;
+  try { return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(origin).hostname); }
+  catch { return false; }
+};
+
+export async function uploadRoutes(app: FastifyInstance, options: UploadRouteOptions = {}) {
   app.post('/api/uploads', async (request, reply) => {
     let stored: Awaited<ReturnType<typeof storeUpload>> | undefined;
     try {
@@ -24,6 +33,26 @@ export async function uploadRoutes(app: FastifyInstance) {
       }
       request.log.warn(details, error instanceof Error ? error.message : 'Upload failed');
       return reply.code(500).send({ error: 'Không thể lưu file upload. Hãy kiểm tra dung lượng trống và thử lại.' });
+    }
+  });
+
+  app.post('/api/uploads/import-local', async (request, reply) => {
+    if (!isLocalOrigin(request.headers.origin)) return reply.code(403).send({ error: 'Chỉ ứng dụng AutoSub trên máy này được phép mở file local.' });
+    const kind = (request.body as { kind?: LocalMediaKind } | undefined)?.kind;
+    if (kind !== 'video' && kind !== 'audio' && kind !== 'media') return reply.code(400).send({ error: 'Loại file local không hợp lệ.' });
+    const controller = new AbortController();
+    const onAborted = () => controller.abort();
+    request.raw.once('aborted', onAborted);
+    try {
+      const sourcePath = await (options.pickLocalMediaFile || pickLocalMediaFile)(kind, controller.signal);
+      if (!sourcePath) return reply.send({ cancelled: true });
+      const stored = await registerLocalUpload(sourcePath);
+      return reply.code(201).send({ uploadId: stored.uploadId, storedPath: stored.storedPath, filename: stored.filename, contentType: stored.contentType, size: stored.size, sourceMode: stored.sourceMode });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return reply.code(499).send({ error: 'Đã hủy chọn file.' });
+      return reply.code(error instanceof UploadReferenceError ? 404 : 500).send({ error: error instanceof Error ? error.message : 'Không thể mở file local.' });
+    } finally {
+      request.raw.off('aborted', onAborted);
     }
   });
 

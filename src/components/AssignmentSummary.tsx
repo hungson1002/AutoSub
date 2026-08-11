@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { AIProvider, Capability, ProviderAssignment } from '../types';
 import { storage } from '../lib/storage';
 import { Settings2 } from './Icons';
+import { isCapabilityModelPassed } from '../lib/modelTests';
 
 export function AssignmentSummary({ label, assignment, provider, capability = 'translation' }: { label: string; assignment: ProviderAssignment; provider?: AIProvider; capability?: Capability }) {
   const [preferences, setPreferences] = useState(storage.modelPreferences);
@@ -11,7 +12,7 @@ export function AssignmentSummary({ label, assignment, provider, capability = 't
     return () => window.removeEventListener('autosub:model-preferences-changed', sync);
   }, []);
   const preference = provider && assignment.model ? preferences[`${provider.id}::${capability}::${assignment.model}`] : undefined;
-  const status = !provider || !assignment.model ? 'missing' : preference?.status === 'failed' ? 'unsupported' : preference?.status === 'passed' ? 'tested' : 'unknown';
+  const status = !provider || !assignment.model ? 'missing' : preference?.status === 'failed' ? 'unsupported' : isCapabilityModelPassed(preferences, provider.id, capability, assignment.model) ? 'tested' : 'unknown';
   const statusText = status === 'missing' ? 'Thiếu cấu hình' : status === 'unsupported' ? 'Không hỗ trợ' : status === 'tested' ? 'Đã kiểm tra' : 'Chưa kiểm tra';
   return <div className="assignment-summary">
     <div className="assignment-summary-icon"><Settings2 size={16} /></div>

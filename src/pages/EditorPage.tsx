@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AIProvider, AppSettings, BlurRegion, DubbingJobStatus, DubbingMetadata, LogoOverlay, PronunciationEntry, ProviderAssignment, SubtitleCue, SubtitleStyle, VideoAsset, VideoEditState, VoiceGroup } from '../types';
-import { api, friendlyErrorMessage } from '../lib/api';
+import { api, friendlyErrorMessage, MAX_BROWSER_UPLOAD_BYTES } from '../lib/api';
 import { storage } from '../lib/storage';
-import { AudioLines, Captions, ChevronDown, Download, Image as ImageIcon, Languages, Plus, Scissors, Settings2, Upload } from '../components/Icons';
+import { AudioLines, Captions, ChevronDown, Download, FileVideo, Image as ImageIcon, Languages, Plus, Scissors, Settings2, Upload } from '../components/Icons';
 import { VideoPlayer } from '../editor/VideoPlayer';
 import { SubtitleList } from '../editor/SubtitleList';
 import { SubtitleTimeline } from '../editor/SubtitleTimeline';
@@ -18,6 +18,7 @@ import { LogoModal } from '../editor/LogoModal';
 import { LatestUploadGuard } from '../lib/latestUpload';
 import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
 import { videoAssetUploadFile } from '../lib/videoAsset';
+import { isCapabilityModelPassed } from '../lib/modelTests';
 
 function applyPronunciation(text: string, entries: PronunciationEntry[]) {
   return entries.filter((entry) => entry.enabled && entry.source.trim()).reduce((value, entry) => value.split(entry.source).join(entry.reading), text);
@@ -93,7 +94,9 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
   const [translationProgress, setTranslationProgress] = useState(0);
   const [translationStage, setTranslationStage] = useState('Chuẩn bị dịch subtitle');
   const [translationSetup, setTranslationSetup] = useState<TranslationSetup>(() => ({ providerId: settings.assignments.translation.providerId, model: settings.assignments.translation.model, mode: 'quality', style: 'Phổ thông', customPrompt: '', sourceLanguage: 'Auto Detect', targetLanguage: 'Tiếng Việt', glossary: storage.glossary() }));
-  const [uploadingVideo, setUploadingVideo] = useState(false);
+  const [videoAction, setVideoAction] = useState<'idle' | 'uploading' | 'picking'>('idle');
+  const uploadingVideo = videoAction === 'uploading';
+  const pickingLocalVideo = videoAction === 'picking';
   const [subtitleDownloadOpen, setSubtitleDownloadOpen] = useState(false);
   const subtitleDownloadRef = useRef<HTMLDivElement>(null);
   const subtitleDownloadId = useRef<DropdownId>({});
@@ -275,11 +278,18 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
   const deleteCue = useCallback((id: string) => { const next = cues.filter((cue) => cue.id !== id).map((cue, index) => ({ ...cue, index: index + 1 })); onCuesChange(next); if (selectedId === id) setSelectedId(next[0]?.id); }, [cues, onCuesChange, selectedId]);
   const addCue = useCallback(() => { const last = cues.at(-1); const next: SubtitleCue = { id: crypto.randomUUID(), index: cues.length + 1, startMs: last?.endMs || 0, endMs: (last?.endMs || 0) + 2500, originalText: '', translatedText: '', voiceGroup: 'G1', enabled: true }; onCuesChange([...cues, next]); setSelectedId(next.id); }, [cues, onCuesChange]);
   const uploadVideoAsset = (nextAsset: VideoAsset, recovering = false) => {
+    const assetSize = nextAsset.file?.size ?? nextAsset.size ?? 0;
+    if (assetSize > MAX_BROWSER_UPLOAD_BYTES) {
+      uploadGuardRef.current.cancel();
+      setVideoAction('idle');
+      onNotice('Video lớn hơn 4 GiB không thể upload qua trình duyệt. Hãy bấm “Mở video lớn” để liên kết trực tiếp file trên máy.', 'error');
+      return;
+    }
     uploadGuardRef.current.cancel();
     const request = uploadGuardRef.current.begin();
     assetRef.current = nextAsset;
     onAssetChange(nextAsset);
-    setUploadingVideo(true);
+    setVideoAction('uploading');
     onNotice(recovering ? 'Đang khôi phục liên kết video cho chức năng lồng tiếng…' : `Đang lưu video ${nextAsset.name} trên máy…`, 'success');
     void videoAssetUploadFile(nextAsset, request.controller.signal).then((file) => api.uploadMedia(file, request.controller.signal).then((stored) => ({ file, stored }))).then(({ file, stored }) => {
       if (!uploadGuardRef.current.isCurrent(request)) {
@@ -290,7 +300,7 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
         void api.deleteUpload(stored.uploadId).catch(() => undefined);
         return;
       }
-      const uploadedAsset = { ...nextAsset, file, uploadId: stored.uploadId, storedPath: stored.storedPath, path: stored.storedPath };
+      const uploadedAsset = { ...nextAsset, file, uploadId: stored.uploadId, storedPath: stored.storedPath, path: stored.storedPath, size: stored.size, sourceMode: stored.sourceMode || 'copied' as const };
       assetRef.current = uploadedAsset;
       onAssetChange(uploadedAsset);
       onNotice(recovering ? 'Đã khôi phục video cho lồng tiếng và tách vocal.' : `Đã lưu video ${file.name} trên máy.`, 'success');
@@ -299,12 +309,16 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
       if (error instanceof DOMException && error.name === 'AbortError') return;
       onNotice(friendlyErrorMessage(error, recovering ? 'Không thể khôi phục video. Hãy bấm Thay video và chọn lại file nguồn.' : 'Không thể lưu video trên máy.'), 'error');
     }).finally(() => {
-      if (uploadGuardRef.current.complete(request)) setUploadingVideo(false);
+      if (uploadGuardRef.current.complete(request)) setVideoAction('idle');
     });
   };
 
   const selectVideo = (file?: File) => {
     if (!file) return;
+    if (file.size > MAX_BROWSER_UPLOAD_BYTES) {
+      onNotice('Video lớn hơn 4 GiB. Hãy dùng “Mở video lớn” để AutoSub đọc trực tiếp mà không upload hoặc sao chép.', 'error');
+      return;
+    }
     const previousAsset = assetRef.current;
     if (previousAsset?.uploadId) {
       storage.removeDubbingJob(previousAsset.uploadId);
@@ -315,15 +329,61 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     setDubAudioMix(undefined);
     setDubbingJob(undefined);
     dubbingTerminalNoticeRef.current = '';
-    uploadVideoAsset({ name: file.name, file, url: URL.createObjectURL(file), type: file.type });
+    uploadVideoAsset({ name: file.name, file, url: URL.createObjectURL(file), type: file.type, size: file.size, sourceMode: 'copied' });
+  };
+
+  const importLocalVideo = async () => {
+    if (pickingLocalVideo) {
+      uploadGuardRef.current.cancel();
+      setVideoAction('idle');
+      return;
+    }
+    uploadGuardRef.current.cancel();
+    const request = uploadGuardRef.current.begin();
+    setVideoAction('picking');
+    try {
+      const result = await api.importLocalMedia('video', request.controller.signal);
+      if ('cancelled' in result) return;
+      if (!uploadGuardRef.current.isCurrent(request)) {
+        await api.deleteUpload(result.uploadId).catch(() => undefined);
+        return;
+      }
+      const previousAsset = assetRef.current;
+      if (previousAsset?.uploadId) {
+        storage.removeDubbingJob(previousAsset.uploadId);
+        void api.deleteUpload(previousAsset.uploadId).catch(() => undefined);
+      }
+      if (previousAsset?.url.startsWith('blob:')) URL.revokeObjectURL(previousAsset.url);
+      const linkedAsset: VideoAsset = {
+        name: result.filename,
+        type: result.contentType,
+        url: `/api/uploads/${encodeURIComponent(result.uploadId)}/media`,
+        uploadId: result.uploadId,
+        storedPath: result.storedPath,
+        path: result.storedPath,
+        size: result.size,
+        sourceMode: 'linked',
+      };
+      assetRef.current = linkedAsset;
+      setDubAudioUrl(undefined);
+      setDubAudioMix(undefined);
+      setDubbingJob(undefined);
+      dubbingTerminalNoticeRef.current = '';
+      onAssetChange(linkedAsset);
+      onNotice(`Đã liên kết ${result.filename} mà không sao chép video.`, 'success');
+    } catch (error) {
+      if (uploadGuardRef.current.isCurrent(request) && !(error instanceof DOMException && error.name === 'AbortError')) onNotice(friendlyErrorMessage(error, 'Không thể mở video local.'), 'error');
+    } finally {
+      if (uploadGuardRef.current.complete(request)) setVideoAction('idle');
+    }
   };
 
   useEffect(() => {
-    if (!asset || asset.uploadId || uploadingVideo) return;
+    if (!asset || asset.uploadId || videoAction !== 'idle') return;
     uploadVideoAsset(asset, true);
   // The upload function intentionally owns cancellation/latest-request checks.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asset?.url, asset?.uploadId]);
+  }, [asset?.url, asset?.uploadId, videoAction]);
 
   const clearTranslationProgressTimer = () => {
     if (translationProgressTimerRef.current !== undefined) {
@@ -347,8 +407,7 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     const provider = providers.find((item) => item.id === assignment.providerId);
     if (!provider || !setup.model) { onNotice('Chưa có Translation Provider + Model.', 'error'); return; }
     if (!cues.length) { onNotice('Chưa có cue để dịch.', 'error'); return; }
-    const tested = storage.modelPreferences()[`${provider.id}::translation::${setup.model}`];
-    if (tested?.status === 'failed') { onNotice(`Model ${setup.model} không chạy được Translation.`, 'error'); return; }
+    if (!isCapabilityModelPassed(storage.modelPreferences(), provider.id, 'translation', setup.model)) { onNotice(`Model ${setup.model} chưa test Translation thành công.`, 'error'); return; }
     const configuredTranslations = capabilityAssignments(settings, 'translation');
     onSettingsChange(updateCapabilityAssignments(settings, 'translation', [assignment, ...configuredTranslations.filter((item) => item.providerId !== assignment.providerId || item.model !== assignment.model)]));
     setTranslationSetup(setup);
@@ -484,7 +543,7 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
   const closeLogoEditor = () => { if (logoPreview?.url && logoPreview.url !== logo?.url && logoPreview.url.startsWith('blob:')) URL.revokeObjectURL(logoPreview.url); setLogoPreview(logo); setLogoOpen(false); };
 
   return <div className="page editor-page">
-    <header className="editor-header"><div><div className="eyebrow">EDITOR / MASTER SEQUENCE</div><h1>Lồng tiếng <span>video</span></h1><p>{cues.length ? `${cues.length} cue đang mở · autosave local` : 'Mở một subtitle sequence để bắt đầu dựng.'}</p></div><div className="editor-header-actions"><label className="button ghost file-button"><Captions size={15} /> Nạp SRT<input type="file" accept=".srt,.vtt,text/vtt,application/x-subrip" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void importSubtitle(file); }} /></label><label className="button ghost file-button"><Upload size={15} /> {uploadingVideo ? 'Đang lưu…' : asset ? 'Thay video' : 'Thêm video'}<input type="file" accept="video/*" onChange={(event) => selectVideo(event.target.files?.[0])} /></label></div></header>
+    <header className="editor-header"><div><div className="eyebrow">EDITOR / MASTER SEQUENCE</div><h1>Lồng tiếng <span>video</span></h1><p>{cues.length ? `${cues.length} cue đang mở · autosave local` : 'Mở một subtitle sequence để bắt đầu dựng.'}</p></div><div className="editor-header-actions"><label className="button ghost file-button"><Captions size={15} /> Nạp SRT<input type="file" accept=".srt,.vtt,text/vtt,application/x-subrip" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void importSubtitle(file); }} /></label><button type="button" className={`button ghost ${pickingLocalVideo ? 'active' : ''}`} title={pickingLocalVideo ? 'Hủy hộp thoại chọn video' : 'Đọc trực tiếp video lớn trên máy, không upload hoặc sao chép'} onClick={() => void importLocalVideo()}><FileVideo size={15} /> {pickingLocalVideo ? 'Hủy chọn video' : 'Mở video lớn'}</button><label className="button ghost file-button"><Upload size={15} /> {uploadingVideo ? 'Đang lưu…' : asset ? 'Thay video' : 'Thêm video'}<input type="file" accept="video/*" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; selectVideo(file); }} /></label></div></header>
     <div className="editor-toolbar"><button onClick={() => setTranslationOpen(true)} disabled={translationWorking}><Languages size={15} /> Dịch bằng AI</button><button className={blurEditMode ? 'active' : ''} onClick={() => { setBlurEditMode(true); setBlurOpen(true); }}><Scissors size={15} /> Làm mờ</button><button className={logoOpen ? 'active' : ''} onClick={() => { if (logoOpen) closeLogoEditor(); else { setPanel('none'); setLogoPreview(logo ? { ...logo } : undefined); setLogoOpen(true); } }}><ImageIcon size={15} /> Logo</button><button className={panel === 'style' ? 'active' : ''} onClick={() => { if (logoOpen) closeLogoEditor(); setPanel(panel === 'style' ? 'none' : 'style'); }}><Captions size={15} /> Phụ đề</button><button onClick={() => setDubbingOpen(true)}><AudioLines size={15} /> Lồng tiếng</button><button className="toolbar-export" onClick={() => setExportOpen(true)}><Download size={15} /> Xuất file</button></div>
     <div className="subtitle-download-bar"><span><Download size={14} /> Tải phụ đề</span><div className="subtitle-download-control" ref={subtitleDownloadRef}><button type="button" className="button small ghost" onClick={() => { if (!subtitleDownloadOpen) announceDropdownOpen(subtitleDownloadId.current); setSubtitleDownloadOpen((value) => !value); }}><span>Chọn định dạng</span><ChevronDown size={14} className={subtitleDownloadOpen ? 'rotated' : ''} /></button>{subtitleDownloadOpen && <div className="subtitle-download-menu"><button type="button" onClick={() => downloadSubtitle('translated')}><span>SRT bản dịch</span><small>.srt</small></button><button type="button" onClick={() => downloadSubtitle('original')}><span>SRT bản gốc</span><small>.srt</small></button><button type="button" onClick={() => downloadSubtitle('ass')}><span>ASS styled</span><small>.ass</small></button></div>}</div></div>
     <div className="preview-audio-bar"><div><span>PREVIEW AUDIO</span><small>{dubAudioUrl ? 'Đang phát bản lồng tiếng mới nhất' : 'Chưa có bản lồng tiếng · video nguồn chỉ dùng để dựng'}</small></div>{dubAudioUrl && <strong className="preview-audio-status">DUB MỚI NHẤT</strong>}</div>
@@ -493,7 +552,7 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
     <BlurEditor open={blurOpen} regions={blurRegions} asset={asset} currentTimeMs={currentTime} onClose={() => setBlurOpen(false)} onChange={setBlurRegions} />
     <TranslationSetupModal open={translationOpen} provider={providers.find((item) => item.id === translationSetup.providerId)} providers={providers} assignments={capabilityAssignments(settings, 'translation')} cues={cues} setup={translationSetup} onChange={(patch) => setTranslationSetup((current) => ({ ...current, ...patch }))} onClose={() => setTranslationOpen(false)} onStart={(setup) => void translateAll(setup)} />
     <LogoModal open={logoOpen} logo={logo} externalPosition={logoPreview} onClose={() => setLogoOpen(false)} onPreviewChange={setLogoPreview} onChange={(next) => { if (logo?.url && logo.url !== next.url && logo.url.startsWith('blob:')) URL.revokeObjectURL(logo.url); setLogo(next); setLogoPreview(next); onNotice('Đã cập nhật logo/watermark.', 'success'); }} />
-    <DubbingModal open={dubbingOpen} providers={providers} assignments={assignments} availableAssignments={capabilityAssignments(settings, 'tts')} cues={cues} pronunciation={pronunciation} sourceVideoReady={Boolean(asset?.uploadId)} sourceVideoUploading={uploadingVideo} job={dubbingJob} onJobAction={(action) => void dubbingJobAction(action)} onClose={() => setDubbingOpen(false)} onPronunciationChange={setPronunciation} onNotice={onNotice} onRun={(configs, options) => void runDubbingJob(configs, options)} />
+    <DubbingModal open={dubbingOpen} providers={providers} assignments={assignments} availableAssignments={capabilityAssignments(settings, 'tts')} cues={cues} pronunciation={pronunciation} sourceVideoReady={Boolean(asset?.uploadId)} sourceVideoUploading={videoAction !== 'idle'} job={dubbingJob} onJobAction={(action) => void dubbingJobAction(action)} onClose={() => setDubbingOpen(false)} onPronunciationChange={setPronunciation} onNotice={onNotice} onRun={(configs, options) => void runDubbingJob(configs, options)} />
     <ExportModal open={exportOpen} cues={cues} style={settings.subtitleStyle} asset={asset} videoEdit={videoEdit} logo={logo} fontFile={fontFile} blurRegions={blurRegions} dubTrack={dubTrack} dubbingJobId={dubbingJob?.status === 'completed' ? dubbingJob.id : undefined} dubbingAudioMix={dubbingJob?.config.audioMix} onClose={() => setExportOpen(false)} onNotice={onNotice} />
     <ProgressModal open={working} title="Đang xử lý audio" message="Provider → FFprobe → atempo → dub-track.wav" onCancel={() => { controllerRef.current?.abort(); setWorking(false); }} />
     <ProgressModal open={translationWorking} title="Đang dịch subtitle" message={translationStage} value={translationProgress} onCancel={() => { translationControllerRef.current?.abort(); clearTranslationProgressTimer(); }} />

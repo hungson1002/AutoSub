@@ -1,4 +1,6 @@
 export type VoiceGroup = 'G1' | 'G2' | 'G3';
+/** Safe source-audio choices supported by the dubbing pipeline. */
+export type OriginalAudioMode = 'mute' | 'original' | 'background';
 export type Capability = 'translation' | 'vision' | 'stt' | 'tts';
 export type ProviderCapability = 'chat' | 'vision' | 'stt' | 'tts';
 export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'hiiu-tts' | 'capcut-tts' | 'vbee' | 'custom';
@@ -59,7 +61,7 @@ export interface DubbingJobStatus {
   doneCues: number;
   failedCues: number;
   currentBatch: number;
-  config: { timingMode: 'natural' | 'strict'; batchSize: number; ttsConcurrency: number; llmConcurrency: number; maxRetries: number; audioMix: { keepOriginal: boolean; originalVolume: number; separateVocals?: boolean }; rewriteProviderRef?: string; rewriteModel?: string };
+  config: { timingMode: 'natural' | 'strict'; batchSize: number; ttsConcurrency: number; llmConcurrency: number; maxRetries: number; audioMix: { mode: OriginalAudioMode; keepOriginal: boolean; originalVolume: number; separateVocals?: boolean }; rewriteProviderRef?: string; rewriteModel?: string };
   providerInfo: Array<{ ref: string; providerId: string; name: string; baseUrl: string }>;
   warnings: string[];
   progressPercent: number;
@@ -142,7 +144,7 @@ export interface BlurRegion {
 
 export interface GlossaryEntry { id: string; source: string; target: string; enabled: boolean; }
 export interface PronunciationEntry { id: string; source: string; reading: string; enabled: boolean; }
-export interface VideoAsset { name: string; path?: string; url: string; type: string; file?: File; uploadId?: string; storedPath?: string; durationMs?: number; }
+export interface VideoAsset { name: string; path?: string; url: string; type: string; file?: File; uploadId?: string; storedPath?: string; durationMs?: number; size?: number; sourceMode?: 'copied' | 'linked'; }
 export type VideoAspectRatio = 'original' | '16:9' | '9:16' | '1:1' | '4:5';
 export interface VideoCropRegion { xPercent: number; yPercent: number; widthPercent: number; heightPercent: number; }
 export interface VideoEditState { aspectRatio: VideoAspectRatio; trimStartMs: number; trimEndMs?: number; crop?: VideoCropRegion; }

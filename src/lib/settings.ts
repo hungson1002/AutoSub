@@ -48,12 +48,22 @@ export function normalizeSettings(value: Partial<AppSettings> | undefined): AppS
     assignments[capability] = legacy.providerId || legacy.model ? legacy : choices[0] || emptyAssignment();
   }
 
+  const rawStyle = (value?.subtitleStyle || {}) as Partial<AppSettings['subtitleStyle']>;
+  const subtitleStyle = {
+    ...defaultSettings.subtitleStyle,
+    ...rawStyle,
+    // Older localStorage snapshots could contain "true"/"false" strings.
+    // Keep the preview and ASS/libass export on the same boolean state.
+    bold: rawStyle.bold === true,
+    italic: rawStyle.italic === true,
+  };
+
   return {
     ...defaultSettings,
     ...value,
     assignments,
     providersByCapability,
-    subtitleStyle: { ...defaultSettings.subtitleStyle, ...(value?.subtitleStyle || {}) },
+    subtitleStyle,
   };
 }
 

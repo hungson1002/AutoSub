@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AIProvider, DubbingJobStatus, PronunciationEntry, ProviderAssignment, SubtitleCue, VoiceGroup } from '../types';
+import type { AIProvider, DubbingJobStatus, OriginalAudioMode, PronunciationEntry, ProviderAssignment, SubtitleCue, VoiceGroup } from '../types';
 import { api, friendlyErrorMessage } from '../lib/api';
 import { AssignmentSummary } from '../components/AssignmentSummary';
 import { Modal } from '../components/Modal';
@@ -11,7 +11,7 @@ import { CapabilityAssignmentPicker } from '../components/CapabilityAssignmentPi
 
 const groups: VoiceGroup[] = ['G1', 'G2', 'G3'];
 export type VoiceConfig = { assignment: ProviderAssignment; voice: string; speed: number; volume: number };
-export type DubbingRunOptions = { audioMix: { keepOriginal: boolean; originalVolume: number; separateVocals: boolean } };
+export type DubbingRunOptions = { audioMix: { mode: OriginalAudioMode; keepOriginal: boolean; originalVolume: number; separateVocals: boolean } };
 
 type VoiceItem = { id: string; name?: string; language?: string };
 
@@ -27,8 +27,8 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
     G2: { assignment: assignments.G2, voice: '', speed: 1, volume: 1 },
     G3: { assignment: assignments.G3, voice: '', speed: 1, volume: 1 },
   }));
+  const [sourceAudioMode, setSourceAudioMode] = useState<OriginalAudioMode>('background');
   const [originalVolume, setOriginalVolume] = useState(0.25);
-  const [separateVocals, setSeparateVocals] = useState(false);
   const [demucsAvailable, setDemucsAvailable] = useState<boolean>();
   const voicePickerRef = useRef<HTMLDivElement>(null);
   const voiceDropdownId = useRef<DropdownId>({});
@@ -45,6 +45,8 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const voiceItems = (isHiiuTts ? (currentProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id })) : currentProvider?.voices || []) as VoiceItem[];
   const filteredVoices = voiceItems.filter((voice) => `${voice.name || ''} ${voice.id} ${voice.language || ''}`.toLowerCase().includes(voiceQuery.trim().toLowerCase()));
   const selectedVoice = voiceItems.find((voice) => voice.id === current.voice);
+  const sourceAudioEnabled = sourceAudioMode !== 'mute';
+  const needsStemMix = sourceAudioMode === 'background';
   const notify = (message: string, kind: 'success' | 'error' = 'success') => onNotice?.(message, kind);
   const patchCurrent = (patch: Partial<VoiceConfig>) => setConfigs((value) => ({ ...value, [active]: { ...value[active], ...patch } }));
   const addPronunciation = () => onPronunciationChange([...pronunciation, { id: crypto.randomUUID(), source: '', reading: '', enabled: true }]);
@@ -142,9 +144,24 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
         <div className="two-fields"><div className="field"><span>Tốc độ TTS <b className="value-badge">{current.speed.toFixed(2)}x</b></span><RangeInput min={0.9} max={1.2} step={0.05} value={current.speed} onChange={(event) => patchCurrent({ speed: Number(event.target.value) })} /></div><div className="field"><span>Âm lượng <b className="value-badge">{Math.round(current.volume * 100)}%</b></span><RangeInput min={0} max={1} step={0.05} value={current.volume} onChange={(event) => patchCurrent({ volume: Number(event.target.value) })} /></div></div>
         <button className="button ghost" disabled={testing || Boolean(previewingVoice)} onClick={() => void testVoice()}><CirclePlay size={15} /> {testing ? 'Đang test…' : 'Nghe thử voice'}</button>
       </div>
-      <div className="audio-mix"><div className="section-title"><span>AUDIO MIX</span><small>{separateVocals ? 'Đã loại vocal gốc · giữ nhạc nền' : 'Giữ audio gốc'} · gốc {Math.round(originalVolume * 100)}%</small></div><label className="toggle-row"><span>Giữ âm thanh gốc</span><input type="checkbox" checked={originalVolume > 0} onChange={(event) => { const next = event.target.checked ? 0.25 : 0; setOriginalVolume(next); if (!next) setSeparateVocals(false); }} /><i /></label><div className="field"><span>Âm lượng gốc <b className="value-badge">{Math.round(originalVolume * 100)}%</b></span><RangeInput min={0} max={1} step={0.05} value={originalVolume} onChange={(event) => setOriginalVolume(Number(event.target.value))} /></div><label className={`check-row dubbing-separation-option${demucsAvailable === false || !sourceVideoReady || originalVolume <= 0 ? ' disabled' : ''}`}><input type="checkbox" checked={separateVocals} disabled={demucsAvailable === false || !sourceVideoReady || originalVolume <= 0} onChange={(event) => setSeparateVocals(event.target.checked)} /><span>Tách lời gốc, chỉ giữ nhạc nền</span>{demucsAvailable === false ? <small>· cần cài requirements-audio.txt</small> : sourceVideoUploading ? <small>· đang khôi phục video…</small> : !sourceVideoReady ? <small>· chưa có video nguồn trên server</small> : null}</label><div className="info-note">{separateVocals ? 'Demucs sẽ tách vocal khỏi video nguồn trước khi trộn nhạc nền với dub track.' : 'TTS dùng bản dịch sau pronunciation dictionary, sau đó căn theo start/end bằng FFprobe + atempo.'}</div></div>
+      <div className="audio-mix">
+        <div className="section-title"><span>AUDIO MIX</span><small>{sourceAudioMode === 'mute' ? 'Chỉ dùng giọng lồng tiếng mới' : sourceAudioMode === 'original' ? 'Giữ toàn bộ audio gốc' : 'Giữ nhạc nền và hiệu ứng, bỏ lời gốc'}</small></div>
+        <div className="audio-component-grid" aria-label="Chọn cách dùng audio gốc">
+          {([
+            ['mute', 'Tắt audio gốc', 'Chỉ phát giọng lồng tiếng mới.'],
+            ['original', 'Giữ audio gốc', 'Giữ nguyên lời thoại, nhạc và hiệu ứng.'],
+            ['background', 'Giữ nhạc + hiệu ứng', 'Loại lời thoại gốc; giữ phần nền bằng Demucs.'],
+          ] as const).map(([modeValue, label, description]) => <label className={`audio-component ${sourceAudioMode === modeValue ? 'active' : ''}`} key={modeValue}>
+            <input type="radio" name="source-audio-mode" checked={sourceAudioMode === modeValue} onChange={() => setSourceAudioMode(modeValue)} />
+            <span className="audio-component-check"><Check size={13} /></span>
+            <span><strong>{label}</strong><small>{description}</small></span>
+          </label>)}
+        </div>
+        {sourceAudioEnabled && <div className="field"><span>Âm lượng audio gốc <b className="value-badge">{Math.round(originalVolume * 100)}%</b></span><RangeInput min={0} max={1} step={0.05} value={originalVolume} onChange={(event) => setOriginalVolume(Number(event.target.value))} /></div>}
+        {needsStemMix && <div className="info-note">AutoSub sẽ tách stem trước khi trộn. Cần Demucs và video nguồn đã upload.{demucsAvailable === false ? ' Hiện máy chưa có Demucs.' : sourceVideoUploading ? ' Video đang được khôi phục.' : !sourceVideoReady ? ' Cần video nguồn đã upload.' : ''}</div>}
+      </div>
     </> : <div className="dictionary"><div className="section-title"><span>THAY TEXT ĐẦU VÀO TTS</span><button className="button small ghost" onClick={addPronunciation}><Plus size={14} /> Thêm từ</button></div><p className="muted-copy">Chỉ thay cách đọc khi gửi sang TTS, không sửa bản dịch trong editor.</p>{pronunciation.map((entry, index) => <div className="dictionary-row" key={entry.id}><span>{String(index + 1).padStart(2, '0')}</span><input placeholder="Từ gốc" value={entry.source} onChange={(event) => onPronunciationChange(pronunciation.map((item) => item.id === entry.id ? { ...item, source: event.target.value } : item))} /><span>→</span><input placeholder="Đọc thành" value={entry.reading} onChange={(event) => onPronunciationChange(pronunciation.map((item) => item.id === entry.id ? { ...item, reading: event.target.value } : item))} /><button className="icon-button" onClick={() => onPronunciationChange(pronunciation.filter((item) => item.id !== entry.id))}><Trash2 size={14} /></button></div>)}</div>}
     {job && <div className="dubbing-job-progress"><div className="dubbing-job-head"><div><span>JOB {job.id}</span><strong>{job.status === 'completed' ? 'Đã hoàn tất' : job.status === 'completed_with_errors' ? 'Hoàn tất với cue lỗi' : job.status === 'paused' ? 'Đã tạm dừng' : job.status === 'cancelled' ? 'Đã hủy' : job.status === 'failed' ? 'Thất bại' : 'Đang xử lý'}</strong></div><b>{job.progressPercent}%</b></div><div className="dubbing-job-track"><div style={{ width: `${job.progressPercent}%` }} /></div><div className="dubbing-job-stats"><span>{job.doneCues}/{job.totalCues} cue xong</span><span>{job.failedCues} cue lỗi</span><span>Batch {job.currentBatch}</span></div>{job.warnings.length > 0 && <small className="dubbing-job-warning">{job.warnings.slice(-2).join(' ')}</small>}{job.failedCueErrors?.length > 0 && <div className="dubbing-cue-errors"><strong>{job.failedCueErrors.length} cue cần xử lý</strong><small>CapCut TTS xử lý tuần tự; các lỗi này là những cue đã hoàn tất thử và bị từ chối.</small>{job.failedCueErrors.slice(0, 2).map((failure) => <div className="dubbing-cue-error" key={failure.id}><span>Cue #{failure.index} · bước {failure.stage} · lần thử {failure.attempts}</span><p>{failure.error}</p></div>)}{job.failedCueErrors.length > 2 && <details><summary>Xem thêm {job.failedCueErrors.length - 2} cue lỗi</summary>{job.failedCueErrors.slice(2).map((failure) => <div className="dubbing-cue-error" key={failure.id}><span>Cue #{failure.index} · bước {failure.stage} · lần thử {failure.attempts}</span><p>{failure.error}</p></div>)}</details>}</div>}<div className="dubbing-job-actions">{job.status === 'running' && <button className="button small ghost" onClick={() => onJobAction?.('pause')}><Pause size={14} /> Tạm dừng</button>}{job.status === 'paused' && <button className="button small ghost" onClick={() => onJobAction?.('resume')}><Play size={14} /> Tiếp tục</button>}{['queued', 'running', 'paused'].includes(job.status) && <button className="button small ghost danger" onClick={() => onJobAction?.('cancel')}><X size={14} /> Hủy job</button>}{job.failedCues > 0 && job.status === 'completed_with_errors' && <button className="button small ghost" onClick={() => onJobAction?.('retry-failed')}><RotateCcw size={14} /> Retry cue lỗi</button>}</div></div>}
-    <div className="modal-actions"><button className="button ghost" onClick={onClose}>Đóng</button><button className="button primary" disabled={Boolean(job && ['queued', 'running', 'paused'].includes(job.status))} onClick={() => onRun(configs, { audioMix: { keepOriginal: originalVolume > 0, originalVolume, separateVocals } })}>{job && ['queued', 'running', 'paused'].includes(job.status) ? 'Job đang chạy…' : 'Tạo dub track'} <span>→</span></button></div>
+    <div className="modal-actions"><button className="button ghost" onClick={onClose}>Đóng</button><button className="button primary" disabled={Boolean(job && ['queued', 'running', 'paused'].includes(job.status)) || (needsStemMix && (demucsAvailable === false || !sourceVideoReady))} onClick={() => onRun(configs, { audioMix: { mode: sourceAudioMode, keepOriginal: sourceAudioEnabled, originalVolume: sourceAudioEnabled ? originalVolume : 0, separateVocals: needsStemMix } })}>{job && ['queued', 'running', 'paused'].includes(job.status) ? 'Job đang chạy…' : 'Tạo dub track'} <span>→</span></button></div>
   </Modal>;
 }
