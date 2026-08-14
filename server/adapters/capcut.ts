@@ -1,5 +1,6 @@
 import type { AIModel, AIVoice, AIProvider } from '../types';
 import { runCapCutBridge } from '../services/capcutTtsBridge';
+import { assertPlayableAudio } from './capabilityTestMedia';
 import { ProviderError } from './errors';
 
 export const CAPCUT_TTS_MODEL = 'capcut-tts';
@@ -108,5 +109,6 @@ export async function testModel(provider: AIProvider, model: string) {
   if (!voice) throw new ProviderError('CapCut TTS chưa có voice cache. Hãy tải danh sách voice trước.', 400);
   const startedAt = Date.now();
   const audio = await synthesize(provider, model, voice, 'Xin chào, đây là bản test CapCut TTS của AutoSub.', {});
+  assertPlayableAudio(audio);
   return { ok: true, model, capability: 'tts', latencyMs: Date.now() - startedAt, output: `${audio.length} bytes audio · ${voices[0]?.name || voice}` };
 }

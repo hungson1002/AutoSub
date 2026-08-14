@@ -3,3 +3,5 @@ dist/
 workdir/
 *.log
 .env
+__pycache__/
+*.py[cod]

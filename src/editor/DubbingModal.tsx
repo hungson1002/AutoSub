@@ -22,6 +22,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voiceQuery, setVoiceQuery] = useState('');
   const [previewingVoice, setPreviewingVoice] = useState<string>();
+  const [loadedVoices, setLoadedVoices] = useState<Record<string, VoiceItem[]>>({});
   const [configs, setConfigs] = useState<Record<VoiceGroup, VoiceConfig>>(() => ({
     G1: { assignment: assignments.G1, voice: '', speed: 1, volume: 1 },
     G2: { assignment: assignments.G2, voice: '', speed: 1, volume: 1 },
@@ -34,6 +35,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const voiceDropdownId = useRef<DropdownId>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const previewCacheRef = useRef(new Map<string, Blob>());
   const assignmentOptions = availableAssignments.length ? availableAssignments : [assignments.G1];
   const current = configs[active];
   const currentProvider = providers.find((item) => item.id === current.assignment.providerId);
@@ -42,7 +44,9 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const isElevenLabs = providerType === 'elevenlabs';
   const isHiiuTts = providerType === 'hiiu-tts';
   const isCapCutTts = providerType === 'capcut-tts';
-  const voiceItems = (isHiiuTts ? (currentProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id })) : currentProvider?.voices || []) as VoiceItem[];
+  const isEdgeTts = providerType === 'edge-tts';
+  const isVieneuLocal = providerType === 'vieneu-local';
+  const voiceItems = (isHiiuTts ? (currentProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id })) : currentProvider ? loadedVoices[currentProvider.id] || currentProvider.voices || [] : []) as VoiceItem[];
   const filteredVoices = voiceItems.filter((voice) => `${voice.name || ''} ${voice.id} ${voice.language || ''}`.toLowerCase().includes(voiceQuery.trim().toLowerCase()));
   const selectedVoice = voiceItems.find((voice) => voice.id === current.voice);
   const sourceAudioEnabled = sourceAudioMode !== 'mute';
@@ -78,6 +82,21 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
     void api.system().then((system) => setDemucsAvailable(system.demucs)).catch(() => setDemucsAvailable(false));
   }, [open]);
   useEffect(() => {
+    if (!open || !currentProvider || (!isVieneuLocal && !isEdgeTts)) return;
+    const controller = new AbortController();
+    void api.listVoices(currentProvider, controller.signal).then(({ voices }) => {
+      setLoadedVoices((current) => ({ ...current, [currentProvider.id]: voices }));
+      setConfigs((currentConfigs) => Object.fromEntries(groups.map((group) => {
+        const config = currentConfigs[group];
+        const voice = config.assignment.providerId === currentProvider.id && !voices.some((item) => item.id === config.voice) ? voices[0]?.id || '' : config.voice;
+        return [group, voice === config.voice ? config : { ...config, voice }];
+      })) as Record<VoiceGroup, VoiceConfig>);
+    }).catch((error) => {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) notify(friendlyErrorMessage(error, isEdgeTts ? 'Không thể tải danh sách giọng Edge TTS.' : 'Không thể tải danh sách giọng clone.'), 'error');
+    });
+    return () => controller.abort();
+  }, [open, active, currentProvider?.id, isEdgeTts, isVieneuLocal]);
+  useEffect(() => {
     const close = (event: PointerEvent) => { if (!voicePickerRef.current?.contains(event.target as Node)) setVoiceOpen(false); };
     document.addEventListener('pointerdown', close);
     return () => document.removeEventListener('pointerdown', close);
@@ -90,7 +109,15 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
     stopPreview();
     setPreviewingVoice(voiceId);
     try {
-      const blob = await api.testVoice(currentProvider, current.assignment.model, voiceId, current.speed, isGroq ? 'This is a short Groq voice test.' : undefined);
+      const previewText = isGroq ? 'Hello, this is a voice test.' : 'Xin chào, đây là giọng thử.';
+      const cacheKey = [currentProvider.id, current.assignment.model, voiceId, current.speed.toFixed(2), previewText].join('::');
+      let blob = previewCacheRef.current.get(cacheKey);
+      const cached = Boolean(blob);
+      if (!blob) {
+        blob = await api.testVoice(currentProvider, current.assignment.model, voiceId, current.speed, previewText);
+        previewCacheRef.current.set(cacheKey, blob);
+        while (previewCacheRef.current.size > 24) previewCacheRef.current.delete(previewCacheRef.current.keys().next().value as string);
+      }
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audioRef.current = audio;
@@ -99,7 +126,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
       audio.onended = finish;
       audio.onerror = finish;
       await audio.play();
-      notify(`Đang phát thử giọng ${voiceId}.`);
+      notify(cached ? `Phát ngay bản thử đã lưu của ${voiceId}.` : `Đã lưu bản thử giọng ${voiceId} để nghe lại nhanh.`);
     } catch (error) {
       stopPreview();
       notify(friendlyErrorMessage(error, 'Test voice thất bại.'), 'error');
@@ -120,8 +147,8 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
         <div className="voice-heading"><div className="voice-avatar">{active}</div><div><h3>Voice group {active}</h3><p>Ưu tiên video · giữ nguyên thời lượng gốc</p></div></div>
         <CapabilityAssignmentPicker capability="tts" assignments={assignmentOptions} providers={providers} value={current.assignment} onChange={(assignment) => { const nextProvider = providers.find((item) => item.id === assignment.providerId); patchCurrent({ assignment, voice: nextProvider && resolvedProviderType(nextProvider) === 'hiiu-tts' ? assignment.model : '' }); }} label="TTS Provider + Model" />
         <AssignmentSummary label="TTS Provider đang dùng" assignment={current.assignment} provider={currentProvider} capability="tts" />
-        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
-          {(isElevenLabs || isHiiuTts || isCapCutTts) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
+        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : isEdgeTts ? 'Giọng đọc · Microsoft Edge TTS' : isVieneuLocal ? 'Giọng clone · VieNeu Local' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
+          {(isElevenLabs || isHiiuTts || isCapCutTts || isEdgeTts || isVieneuLocal) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
             <div className="voice-picker-control">
               <button type="button" className={`voice-picker-trigger ${voiceOpen ? 'active' : ''}`} onClick={() => { if (!voiceOpen) announceDropdownOpen(voiceDropdownId.current); setVoiceOpen((value) => !value); }}>
                 <span className="voice-picker-star">★</span><span className="voice-picker-selected"><strong>{selectedVoice?.name || current.voice || 'Chọn giọng đọc'}</strong><small>{selectedVoice?.id || 'Mở danh sách voice'}</small></span><ChevronDown size={15} className={voiceOpen ? 'rotated' : ''} />
@@ -137,7 +164,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
                 {voice.id === current.voice && <Check size={15} className="voice-picker-check" />}
               </div>) : <div className="voice-picker-empty">Không tìm thấy voice phù hợp.</div>}</div>
             </div>}
-          </div> : isHiiuTts || isCapCutTts ? <div className="provider-readonly-value"><span>Chưa có danh sách giọng. Hãy bấm “Lấy models” ở Cài đặt để tải voice {isCapCutTts ? 'CapCut TTS' : 'HiiuTTS'}.</span></div> : <input value={current.voice} onChange={(event) => patchCurrent({ voice: event.target.value })} placeholder={isGroq ? 'Ví dụ: troy, hannah, austin' : 'Nhập Voice ID của provider'} />}
+          </div> : isEdgeTts ? <div className="provider-readonly-value"><span>Đang tải danh sách giọng Việt của Edge TTS.</span></div> : isVieneuLocal ? <div className="provider-readonly-value"><span>Chưa có giọng clone. Hãy tạo một hồ sơ trong mục Clone giọng ở thanh bên.</span></div> : isHiiuTts || isCapCutTts ? <div className="provider-readonly-value"><span>Chưa có danh sách giọng. Hãy bấm “Lấy models” ở Cài đặt để tải voice {isCapCutTts ? 'CapCut TTS' : 'HiiuTTS'}.</span></div> : <input value={current.voice} onChange={(event) => patchCurrent({ voice: event.target.value })} placeholder={isGroq ? 'Ví dụ: troy, hannah, austin' : 'Nhập Voice ID của provider'} />}
           {isGroq && <small className="field-help">Groq Orpheus hiện dành cho giọng English/Arabic; test voice dùng câu tiếng Anh.</small>}
           {isElevenLabs && !voiceItems.length && <small className="field-help">Chưa có voice cache. Hãy lấy voices trong Cài đặt hoặc nhập Voice ID thủ công.</small>}
         </div>

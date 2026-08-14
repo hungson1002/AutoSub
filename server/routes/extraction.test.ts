@@ -51,7 +51,7 @@ test('STT extraction chunks oversized Groq audio after receiving only JSON uploa
       headers: { 'content-type': 'application/json' },
       payload: JSON.stringify({ uploadId, provider, model: 'whisper-large-v3-turbo', language: 'Auto Detect' }),
     });
-    assert.equal(response.statusCode, 200);
+    assert.equal(response.statusCode, 200, response.body);
     assert.equal(calls.length, 2);
     assert.ok(calls.every((size) => size <= GROQ_DIRECT_AUDIO_LIMIT_BYTES));
     const result = response.json() as { cues: Array<{ startMs: number }>; uploadId: string };

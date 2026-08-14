@@ -1,21 +1,11 @@
 import type { AIModel, AIVoice, AIProvider, SubtitleSegment, SubtitleWord } from '../types';
 import { openAsBlob } from 'node:fs';
 import { buildAuthHeaders, endpoint, providerBase, withAuthQuery } from '../providers/base';
+import { assertExpectedTranscript, assertPlayableAudio, capabilityTestSpeech } from './capabilityTestMedia';
 import { providerResponseError, ProviderError } from './errors';
 import { normalizeSttLanguage } from './openaiCompatible';
 
 const headers = buildAuthHeaders;
-
-function tinyWav() {
-  const sampleRate = 8000;
-  const samples = sampleRate / 2;
-  const buffer = Buffer.alloc(44 + samples * 2);
-  buffer.write('RIFF', 0); buffer.writeUInt32LE(buffer.length - 8, 4); buffer.write('WAVE', 8);
-  buffer.write('fmt ', 12); buffer.writeUInt32LE(16, 16); buffer.writeUInt16LE(1, 20); buffer.writeUInt16LE(1, 22);
-  buffer.writeUInt32LE(sampleRate, 24); buffer.writeUInt32LE(sampleRate * 2, 28); buffer.writeUInt16LE(2, 32); buffer.writeUInt16LE(16, 34);
-  buffer.write('data', 36); buffer.writeUInt32LE(samples * 2, 40);
-  return buffer;
-}
 
 async function responseJson(response: Response, provider: AIProvider, fallback: string) {
   if (!response.ok) await providerResponseError(response, provider, fallback);
@@ -60,14 +50,14 @@ export async function testConnection(provider: AIProvider) {
   return { ok: true };
 }
 
-export async function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string) {
+export async function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal) {
   const form = new FormData();
-  const blob = typeof audio === 'string' ? await openAsBlob(audio, { type: 'audio/wav' }) : new Blob([audio]);
+  const blob = typeof audio === 'string' ? await openAsBlob(audio, { type: 'audio/wav' }) : new Blob([audio], { type: /\.ogg$/i.test(filename) ? 'audio/ogg' : /\.mp3$/i.test(filename) ? 'audio/mpeg' : 'audio/wav' });
   form.append('file', blob, filename);
   form.append('model_id', model);
   const languageCode = normalizeSttLanguage(language);
   if (languageCode) form.append('language_code', languageCode);
-  const response = await fetch(withAuthQuery(endpoint(provider, 'stt', '/speech-to-text'), provider), { method: 'POST', headers: headers(provider), body: form });
+  const response = await fetch(withAuthQuery(endpoint(provider, 'stt', '/speech-to-text'), provider), { method: 'POST', headers: headers(provider), body: form, signal });
   const data = await responseJson(response, provider, 'ElevenLabs STT không phản hồi.');
   const text = typeof data.text === 'string' ? data.text : '';
   const rawSegments = (Array.isArray(data.segments) ? data.segments : []) as SubtitleSegment[];
@@ -96,11 +86,14 @@ export async function testModel(provider: AIProvider, model: string, capability:
     if (capability === 'tts') {
       const voices = provider.voices?.length ? provider.voices : await listVoices(provider);
       const audio = await synthesize(provider, model, voices[0]?.id || '', 'This is a short ElevenLabs voice test.', { signal: controller.signal });
+      assertPlayableAudio(audio);
       return { ok: true, model, capability, latencyMs: Date.now() - started, output: `${audio.length} bytes audio` };
     }
     if (capability === 'stt') {
-      const result = await transcribe(provider, model, tinyWav(), 'autosub-test.wav', 'Auto Detect');
-      return { ok: true, model, capability, latencyMs: Date.now() - started, output: result.text || 'STT endpoint đã phản hồi.' };
+      const result = await transcribe(provider, model, capabilityTestSpeech(), 'autosub-test.ogg', 'Auto Detect', controller.signal);
+      const output = result.text || result.segments.map((segment) => segment.text || '').join(' ').trim();
+      assertExpectedTranscript(output);
+      return { ok: true, model, capability, latencyMs: Date.now() - started, output };
     }
     throw new ProviderError('ElevenLabs không cung cấp capability Chat/Vision.', 400);
   } catch (error) {

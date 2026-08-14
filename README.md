@@ -19,7 +19,57 @@ Provider được nhập tại **Cài đặt → AI Providers**. Provider ưu ti
 - Provider manager: test connection, refresh models, model nhập tay khi `/models` không có.
 - OCR video theo ROI, sampling 1–4 FPS, crop frame bằng FFmpeg, nhận dạng Vision, group/deduplicate và lọc watermark lặp lại.
 - STT video/audio: tách audio bằng FFmpeg rồi gọi `/audio/transcriptions`.
+- **Whisper Local**: STT miễn phí, không API key/quota; tự cài `whisper.cpp`, tự tải model lượng tử một lần và chạy CPU theo hàng đợi để giữ RAM ổn định.
+- **Microsoft Edge TTS**: TTS tiếng Việt không cần API key với hai giọng `HoaiMyNeural` và `NamMinhNeural`; các lượt đọc được xếp hàng để hạn chế lỗi dịch vụ.
 - Editor dùng chung `SubtitleCue[]`: video preview, subtitle overlay, list editable, timestamp, CPS, G1/G2/G3, timeline và autosave local.
 - Style subtitle và sinh ASS; modal blur region; modal dubbing/provider workflow; export SRT/ASS.
+- **Review tự động**: chép lời video nguồn, lập hồ sơ nhân vật, tạo kịch bản kể lại cốt truyện dài 5–45 phút, chọn/cắt cảnh theo timestamp, tạo giọng đọc, ghép hình + phụ đề và xuất MP4.
+- Có thể tải bản dựng lên kênh YouTube thử nghiệm ở chế độ **Private**, theo dõi trạng thái xử lý và mở thẳng YouTube Studio để xác nhận Content ID.
 
 Các capability AI không được provider hỗ trợ sẽ trả lỗi rõ ràng thay vì hiển thị dữ liệu giả.
+
+## Review tự động và kiểm tra YouTube
+
+1. Vào **Cài đặt → AI Providers**, cấu hình provider/model có STT, Vision, Chat và TTS.
+2. Mở **Review tự động**, chọn video phim gốc, giọng đọc, thời lượng và tỉ lệ khung hình rồi bấm **Tạo video review**. Tên phim/nhân vật là ô sửa tay tùy chọn; mặc định AI tự suy ra từ lời thoại và các contact sheet lấy mẫu xuyên suốt phim. Kịch bản ưu tiên 95–98% kể lại cốt truyện, chỉ thêm nhận xét ngắn khi cần.
+3. Xem trước hoặc tải MP4 sau khi job hoàn tất.
+
+Trước khi viết kịch bản, pipeline đọc một đoạn mẫu bằng đúng giọng/tốc độ đã chọn để tính số từ theo tốc độ nói thực tế. Thời lượng tiếp tục được kiểm tra bằng chính toàn bộ audio TTS đã tạo; nếu lệch đáng kể so với mốc đã chọn, pipeline sẽ viết lại kịch bản và đọc lại một lần. Sai số nhỏ còn lại được chuẩn hóa trước khi render. Mỗi đoạn phim sau đó lấy cửa sổ hình có độ dài khớp audio và phát ở tốc độ gốc, còn phụ đề được chia theo từ và dấu câu để bám giọng đọc hơn.
+
+Để gửi bản thử lên YouTube:
+
+1. Trong Google Cloud Console, bật **YouTube Data API v3**, cấu hình OAuth consent screen và thêm tài khoản thử nghiệm nếu ứng dụng còn ở chế độ Testing.
+2. Tạo OAuth client loại **Desktop app**, tải file JSON xuống.
+3. Trong khu vực YouTube của trang **Review tự động**, chọn JSON đó và kết nối kênh phụ.
+4. Bấm **Tải lên Private**. Khi YouTube xử lý xong, mở liên kết Studio và đánh dấu thủ công **Có claim** hoặc **Không thấy claim**.
+
+Token YouTube được lưu cục bộ tại `workdir/secrets/youtube-oauth.json`. YouTube Data API thông thường không trả đầy đủ kết quả Content ID trong Studio, nên ứng dụng không tự tuyên bố video “sạch bản quyền”. Kết quả kiểm tra chỉ phản ánh thời điểm hiện tại, không phải giấy phép sử dụng và claim vẫn có thể xuất hiện sau.
+
+Pipeline review mặc định giới hạn encoder ở 4 luồng và video giữ tỉ lệ được giới hạn tối đa 1080p để tránh chiếm toàn bộ CPU/RAM. Có thể đổi số luồng bằng biến môi trường `AUTOSUB_REVIEW_THREADS` (1–16); đặt `2` nếu máy vẫn bị lag.
+
+## Whisper Local
+
+Provider **Whisper Local** được thêm tự động trong **Cài đặt → AI Providers**. Chọn nó cho STT rồi test model cần dùng:
+
+- `small-q5_1`: tải khoảng 181 MiB, nhanh hơn và là lựa chọn mặc định phù hợp đa số video.
+- `medium-q5_0`: tải khoảng 514 MiB, nhận lời thoại/tên riêng tốt hơn nhưng chạy chậm hơn.
+
+Runtime và model nằm trong `workdir/whisper/`, được giữ lại khi dọn file tạm. Mặc định Whisper chạy tuần tự, CPU tối đa 4 luồng và priority thấp để máy vẫn phản hồi. Có thể đặt `AUTOSUB_WHISPER_THREADS=2` nếu muốn giảm tải thêm, hoặc `AUTOSUB_WHISPER_CPP_PATH` để dùng một `whisper-cli` đã cài sẵn.
+
+## Microsoft Edge TTS
+
+Provider **Microsoft Edge TTS** cũng được thêm tự động trong **Cài đặt → AI Providers**. Cài bridge Python một lần rồi chọn provider này ở mục TTS:
+
+```powershell
+py -3 -m pip install -r requirements-edge-tts.txt
+```
+
+Edge TTS sử dụng dịch vụ đọc trực tuyến của Microsoft Edge, không phải API Azure có SLA. Nó cần Internet và endpoint có thể thay đổi; nếu dịch vụ tạm lỗi, ứng dụng thử lại tối đa ba lần rồi hiện nguyên nhân cụ thể. Khi dựng review, tối đa 24 đoạn được đọc chung trong một lượt rồi tách lại theo WordBoundary để giảm mạnh số kết nối mà vẫn giữ timestamp từng cảnh.
+
+## VieNeu Local Clone
+
+Provider **VieNeu Local Clone** được thêm tự động và chạy trên CPU bằng VieNeu-TTS v3 Turbo/ONNX. Mở mục **Clone giọng** ở thanh bên, tải một mẫu giọng sạch khoảng 3–8 giây, đặt tên và xác nhận bạn sở hữu giọng hoặc đã được người nói cho phép. Sau khi tạo hồ sơ, bạn có thể nghe thử ngay hoặc dùng cùng giọng đó trong cả **Review tự động** và **Lồng tiếng video** bằng cách chọn TTS Provider **VieNeu Local Clone**.
+
+AutoSub tự tạo môi trường Python 3.12 trong `workdir/vieneu/runtime/` bằng `uv`, cài VieNeu ONNX cùng `kaldi-native-fbank` và tải model ở lần tổng hợp đầu tiên. Nhánh local không cài PyTorch/torchaudio nhiều gigabyte. Giọng đã tạo nằm trong `workdir/voice-clones/vieneu/` và không bị xóa bởi nút dọn file tạm. Mặc định worker dùng 2 luồng CPU, xếp hàng các lượt tổng hợp và tự tắt toàn bộ cây tiến trình sau 45 giây rảnh để trả RAM; có thể đặt `AUTOSUB_VIENEU_THREADS=1` nếu máy yếu.
+
+VieNeu-TTS được phát hành theo Apache-2.0, nhưng người dùng vẫn phải có quyền đối với mẫu giọng và nội dung đầu ra. Nếu clone giọng của người khác đã cho phép, hãy thực hiện khai báo nội dung tổng hợp theo quy định của nền tảng. Clone giọng chỉ thay phần thuyết minh; nó không loại bỏ hoặc né Content ID đối với hình ảnh/âm thanh phim.

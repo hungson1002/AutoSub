@@ -13,6 +13,18 @@ const isLocalOrigin = (origin?: string) => {
   catch { return false; }
 };
 
+// Node's HTTP implementation rejects Unicode characters in raw header values.
+// Keep an ASCII fallback and carry the real UTF-8 name through RFC 5987.
+export const inlineContentDisposition = (filename: string) => {
+  const fallback = filename
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\x20-\x7e]/g, '_')
+    .replace(/["\\]/g, '_') || 'media';
+  const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `inline; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+};
+
 export async function uploadRoutes(app: FastifyInstance, options: UploadRouteOptions = {}) {
   app.post('/api/uploads', async (request, reply) => {
     let stored: Awaited<ReturnType<typeof storeUpload>> | undefined;
@@ -87,7 +99,7 @@ export async function uploadRoutes(app: FastifyInstance, options: UploadRouteOpt
       reply.header('Content-Type', upload.contentType || 'application/octet-stream');
       reply.header('Content-Length', String(end - start + 1));
       reply.header('Accept-Ranges', 'bytes');
-      reply.header('Content-Disposition', `inline; filename="${upload.filename.replace(/["\r\n]/g, '_')}"`);
+      reply.header('Content-Disposition', inlineContentDisposition(upload.filename));
       return reply.send(createReadStream(upload.absolutePath, { start, end }));
     } catch (error) {
       return reply.code(error instanceof UploadReferenceError ? error.statusCode : 404).send({ error: 'Video nguồn không còn tồn tại trên máy.' });

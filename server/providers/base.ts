@@ -16,7 +16,7 @@ export function resolveProviderType(provider: Pick<AIProvider, 'providerType' | 
 export function buildAuthHeaders(provider: AIProvider): Record<string, string> {
   const apiKey = provider.apiKey?.trim();
   const providerType = resolveProviderType(provider);
-  const presetType: ProviderAuthType = providerType === 'elevenlabs' ? 'custom-header' : providerType === 'hiiu-tts' || providerType === 'capcut-tts' ? 'none' : 'bearer';
+  const presetType: ProviderAuthType = providerType === 'elevenlabs' ? 'custom-header' : providerType === 'whisper-local' || providerType === 'edge-tts' || providerType === 'vieneu-local' || providerType === 'hiiu-tts' || providerType === 'capcut-tts' ? 'none' : 'bearer';
   const useOverride = provider.providerType === 'custom' || provider.overrideAuthentication === true;
   const type: ProviderAuthType = useOverride ? provider.authType || presetType : presetType;
   if (!apiKey || type === 'none' || type === 'query-param') return {};

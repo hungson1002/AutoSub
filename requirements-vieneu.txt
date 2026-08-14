@@ -1,0 +1,3 @@
+# AutoSub installs these into workdir/vieneu/runtime/.venv with uv.
+vieneu==3.2.5
+kaldi-native-fbank==1.22.3

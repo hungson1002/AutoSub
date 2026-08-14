@@ -76,7 +76,8 @@ const terminalJobStatuses = new Set(['completed', 'completed_with_errors', 'fail
 
 export async function cleanupTemporaryFiles(root = workdir, minimumAgeMs = 10 * 60_000): Promise<TemporaryCleanupResult> {
   const result: TemporaryCleanupResult = { removedFiles: 0, removedDirectories: 0, freedBytes: 0, skippedActiveJobs: 0, skippedRecentFiles: 0 };
-  const cutoff = Date.now() - Math.max(0, minimumAgeMs);
+  const safeMinimumAgeMs = Math.max(0, minimumAgeMs);
+  const cutoff = Date.now() - safeMinimumAgeMs;
 
   const removePath = async (target: string) => {
     const info = await stat(target).catch(() => undefined);
@@ -96,14 +97,14 @@ export async function cleanupTemporaryFiles(root = workdir, minimumAgeMs = 10 * 
       const target = path.join(directory, item.name);
       const info = await stat(target).catch(() => undefined);
       if (!info) continue;
-      if (info.mtimeMs > cutoff) { result.skippedRecentFiles += 1; continue; }
+      if (safeMinimumAgeMs > 0 && info.mtimeMs > cutoff) { result.skippedRecentFiles += 1; continue; }
       await removePath(target);
     }
   };
 
   // These folders contain regenerable extraction/export caches. Recent paths
   // are retained so clicking cleanup cannot disrupt a request still running.
-  for (const name of ['audio', 'frames', 'subtitles', 'tts', 'exports', 'timestamp-vad-cache', 'text-audio-alignment-cache', 'diagnostics', 'demucs-smoke', 'export-smoke', 'upload-flow-smoke', 'video-compare']) {
+  for (const name of ['audio', 'frames', 'subtitles', 'tts', 'exports', 'timestamp-vad-cache', 'text-audio-alignment-cache', 'diagnostics', 'demucs-smoke', 'export-smoke', 'upload-flow-smoke', 'video-compare', path.join('vieneu', 'tmp'), path.join('vieneu', 'reference-uploads')]) {
     await removeStaleContents(path.join(root, name));
   }
 
@@ -122,6 +123,19 @@ export async function cleanupTemporaryFiles(root = workdir, minimumAgeMs = 10 * 
       if (!leftover.isFile() || !/\.tmp(?:\.|$)/i.test(leftover.name)) continue;
       await removePath(path.join(directory, leftover.name));
     }
+  }
+
+  // Review jobs keep the final MP4, subtitles and editorial metadata, but the
+  // extracted speech chunks and intermediate clips can be rebuilt and often
+  // consume considerably more disk space than the deliverable.
+  const reviewJobsDirectory = path.join(root, 'review-jobs');
+  const reviewJobs = await readdir(reviewJobsDirectory, { withFileTypes: true }).catch(() => []);
+  for (const entry of reviewJobs) {
+    if (!entry.isDirectory()) continue;
+    const directory = path.join(reviewJobsDirectory, entry.name);
+    const stored = await readFile(path.join(directory, 'job.json'), 'utf8').then((value) => JSON.parse(value) as { status?: string }).catch(() => undefined);
+    if (!stored || !terminalJobStatuses.has(String(stored.status))) { result.skippedActiveJobs += 1; continue; }
+    for (const disposable of ['clips', 'narration', 'transcription', 'visual-analysis']) await removePath(path.join(directory, disposable));
   }
 
   await ensureWorkdir();

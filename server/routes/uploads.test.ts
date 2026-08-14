@@ -9,7 +9,7 @@ import { uploadRoutes } from './uploads';
 import { cleanupUploadSession, storeUpload } from '../services/uploads';
 
 test('stored source video can be restored with HTTP range requests', async () => {
-  const stored = await storeUpload(Readable.from(Buffer.from('0123456789')), 'source.mp4', 'video/mp4');
+  const stored = await storeUpload(Readable.from(Buffer.from('0123456789')), 'Minions & Quái Vật (2026).mp4', 'video/mp4');
   const app = Fastify();
   await app.register(uploadRoutes);
   try {
@@ -21,6 +21,9 @@ test('stored source video can be restored with HTTP range requests', async () =>
     assert.equal(response.statusCode, 206);
     assert.equal(response.headers['content-type'], 'video/mp4');
     assert.equal(response.headers['content-range'], 'bytes 2-5/10');
+    const disposition = String(response.headers['content-disposition'] || '');
+    assert.match(disposition, /^inline; filename="Minions___Quai_Vat__2026_\.mp4"; filename\*=UTF-8''/);
+    assert.ok(!/[^\x00-\x7f]/.test(disposition));
     assert.equal(response.body, '2345');
   } finally {
     await app.close();

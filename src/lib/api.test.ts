@@ -70,6 +70,8 @@ test('provider errors are shown as actionable messages instead of raw quota code
   assert.match(friendlyErrorMessage(Object.assign(new Error('rate limit'), { status: 429 })), /giới hạn tần suất/i);
   assert.match(friendlyErrorMessage(Object.assign(new Error('Unauthorized'), { status: 401 })), /API key không hợp lệ/i);
   assert.match(friendlyErrorMessage(Object.assign(new Error('Request Entity Too Large'), { status: 413 })), /quá lớn/i);
+  const edgeSetup = 'Edge TTS chưa được cài. Hãy chạy: py -3 -m pip install -r requirements-edge-tts.txt';
+  assert.equal(friendlyErrorMessage(Object.assign(new Error(edgeSetup), { status: 503 })), edgeSetup);
 });
 
 test('extraction sends only the stored upload reference after the one-time upload', async () => {

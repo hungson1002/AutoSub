@@ -3,7 +3,7 @@ export type VoiceGroup = 'G1' | 'G2' | 'G3';
 export type OriginalAudioMode = 'mute' | 'original' | 'background';
 export type Capability = 'translation' | 'vision' | 'stt' | 'tts';
 export type ProviderCapability = 'chat' | 'vision' | 'stt' | 'tts';
-export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'hiiu-tts' | 'capcut-tts' | 'vbee' | 'custom';
+export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'whisper-local' | 'edge-tts' | 'vieneu-local' | 'hiiu-tts' | 'capcut-tts' | 'vbee' | 'custom';
 export type ProviderAuthType = 'bearer' | 'xi-api-key' | 'x-api-key' | 'api-key' | 'query-param' | 'none' | 'custom-header';
 export type ProviderCapabilities = Partial<Record<ProviderCapability, boolean>>;
 
@@ -17,6 +17,7 @@ export interface ProviderEndpoints {
 }
 
 export interface AIVoice { id: string; name?: string; language?: string; resourceId?: string; }
+export interface VoiceCloneProfile { id: string; name: string; language: 'vi-VN'; durationMs: number; createdAt: string; sourceName: string; authorized: true; }
 
 export interface SubtitleCue {
   id: string;
@@ -150,6 +151,15 @@ export interface VideoCropRegion { xPercent: number; yPercent: number; widthPerc
 export interface VideoEditState { aspectRatio: VideoAspectRatio; trimStartMs: number; trimEndMs?: number; crop?: VideoCropRegion; }
 export type LogoPosition = 'top-left' | 'top-center' | 'top-right' | 'middle-left' | 'center' | 'middle-right' | 'bottom-left' | 'bottom-center' | 'bottom-right' | 'custom';
 export interface LogoOverlay { name: string; url?: string; file?: File; enabled: boolean; kind: 'image' | 'text'; text: string; fontFamily: string; fontSize: number; textColor: string; outlineColor: string; position: LogoPosition; xPercent: number; yPercent: number; widthPercent: number; opacity: number; }
+
+export type ReviewAspectRatio = 'original' | '16:9' | '9:16';
+export type ReviewJobState = 'queued' | 'transcribing' | 'scripting' | 'voicing' | 'rendering' | 'completed' | 'failed' | 'cancelled';
+export type ReviewYouTubeState = 'idle' | 'uploading' | 'processing' | 'manual_check_required' | 'passed' | 'claimed' | 'rejected' | 'failed';
+export interface ReviewPlanSegment { id: string; sourceStartMs: number; sourceEndMs: number; narration: string; }
+export interface ReviewCharacter { name: string; aliases: string[]; role: string; }
+export interface ReviewPlan { title: string; description: string; movieTitle?: string; lesson?: string; characters?: ReviewCharacter[]; segments: ReviewPlanSegment[]; }
+export interface ReviewYouTubeStatus { state: ReviewYouTubeState; videoId?: string; watchUrl?: string; studioUrl?: string; uploadStatus?: string; rejectionReason?: string; blockedRegions?: string[]; lastCheckedAt?: string; error?: string; }
+export interface ReviewJobStatus { id: string; status: ReviewJobState; stage: string; progressPercent: number; createdAt: string; updatedAt: string; sourceName: string; warnings: string[]; error?: string; plan?: ReviewPlan; result?: { videoFile: string; subtitleFile: string; durationMs: number }; youtube: ReviewYouTubeStatus; }
 
 export const defaultStyle: SubtitleStyle = {
   visible: true, content: 'translated', fontFamily: 'Arial', fontSize: 32, outlineWidth: 2, textColor: '#ffffff', outlineColor: '#10141b', background: 'outline', backgroundColor: '#10141b', backgroundOpacity: 0.72, bold: false, italic: false, position: 'bottom', customX: 50, customY: 82,

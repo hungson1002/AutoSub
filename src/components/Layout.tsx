@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
-import { AudioLines, Captions, Clapperboard, PanelLeftClose, PanelLeftOpen, Settings2, Zap } from './Icons';
-export type Page = 'translate' | 'extract' | 'editor' | 'settings';
-const nav = [{ id: 'translate' as const, label: 'Dịch phụ đề', caption: 'SRT / VTT → bản dịch', icon: Captions }, { id: 'extract' as const, label: 'Trích xuất phụ đề', caption: 'OCR / âm thanh', icon: Clapperboard }, { id: 'editor' as const, label: 'Lồng tiếng video', caption: 'Dựng, style, xuất file', icon: AudioLines }, { id: 'settings' as const, label: 'Cài đặt', caption: 'Provider & hệ thống', icon: Settings2 }];
+import { AudioLines, Captions, Clapperboard, Film, PanelLeftClose, PanelLeftOpen, Settings2, Volume2, Zap } from './Icons';
+export type Page = 'translate' | 'extract' | 'editor' | 'review' | 'voice-clone' | 'settings';
+const nav = [{ id: 'translate' as const, label: 'Dịch phụ đề', caption: 'SRT / VTT → bản dịch', icon: Captions }, { id: 'extract' as const, label: 'Trích xuất phụ đề', caption: 'OCR / âm thanh', icon: Clapperboard }, { id: 'editor' as const, label: 'Lồng tiếng video', caption: 'Dựng, style, xuất file', icon: AudioLines }, { id: 'review' as const, label: 'Review tự động', caption: 'Script · voice · YouTube', icon: Film }, { id: 'voice-clone' as const, label: 'Clone giọng', caption: 'Tạo voice TTS cục bộ', icon: Volume2 }, { id: 'settings' as const, label: 'Cài đặt', caption: 'Provider & hệ thống', icon: Settings2 }];
 
 const sidebarStorageKey = 'autosub.sidebar-collapsed';
 

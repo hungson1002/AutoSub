@@ -2,6 +2,7 @@ import { openAsBlob } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import type { AIModel, AIProvider, SubtitleSegment, SubtitleWord, TranslationItem } from '../types';
 import { buildAuthHeaders, endpoint, providerBase, resolveProviderType, withAuthQuery } from '../providers/base';
+import { assertExpectedTranscript, assertPlayableAudio, capabilityTestSpeech } from './capabilityTestMedia';
 import { providerResponseError, ProviderError, TranslationValidationError } from './errors';
 
 export { ProviderError, TranslationValidationError } from './errors';
@@ -9,6 +10,9 @@ const headers = buildAuthHeaders;
 
 const STT_LANGUAGE_ALIASES: Record<string, string | undefined> = {
   'Auto Detect': undefined,
+  auto: undefined,
+  'Tự nhận diện': undefined,
+  automatic: undefined,
   'Tiếng Việt': 'vi',
   '中文': 'zh',
   English: 'en',
@@ -18,6 +22,7 @@ const STT_LANGUAGE_ALIASES: Record<string, string | undefined> = {
 export function normalizeSttLanguage(language?: string) {
   const value = language?.trim() || '';
   if (!value) return undefined;
+  if (/^(?:auto(?:matic)?(?:[\s_-]*detect)?|tự\s*nhận\s*diện)$/i.test(value)) return undefined;
   return Object.prototype.hasOwnProperty.call(STT_LANGUAGE_ALIASES, value) ? STT_LANGUAGE_ALIASES[value] : value;
 }
 
@@ -60,21 +65,10 @@ function responseText(value: unknown): string {
   }).join('');
 }
 
-const tinyPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+const visionTestPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAABAAAAAQBPJcTWAAAAfUlEQVR4nNXOQQkAMAzAwAziX3KZiD5KTsE9GMokTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuIkTuK8Dmx9AL4B/CSASMgAAAAASUVORK5CYII=', 'base64');
 
-function tinyWav() {
-  const sampleRate = 8000;
-  const samples = sampleRate / 2;
-  const buffer = Buffer.alloc(44 + samples * 2);
-  buffer.write('RIFF', 0); buffer.writeUInt32LE(buffer.length - 8, 4); buffer.write('WAVE', 8);
-  buffer.write('fmt ', 12); buffer.writeUInt32LE(16, 16); buffer.writeUInt16LE(1, 20); buffer.writeUInt16LE(1, 22);
-  buffer.writeUInt32LE(sampleRate, 24); buffer.writeUInt32LE(sampleRate * 2, 28); buffer.writeUInt16LE(2, 32); buffer.writeUInt16LE(16, 34);
-  buffer.write('data', 36); buffer.writeUInt32LE(samples * 2, 40);
-  return buffer;
-}
-
-async function testChat(provider: AIProvider, model: string, messages: Array<{ role: 'user'; content: string | Array<Record<string, string>> }>, signal: AbortSignal, endpointKey: 'chat' | 'vision' = 'chat') {
-  const response = await fetch(withAuthQuery(endpoint(provider, endpointKey, '/chat/completions'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, max_tokens: 16 }) });
+async function testChat(provider: AIProvider, model: string, messages: Array<{ role: 'user'; content: string | Array<Record<string, unknown>> }>, signal: AbortSignal, endpointKey: 'chat' | 'vision' = 'chat') {
+  const response = await fetch(withAuthQuery(endpoint(provider, endpointKey, '/chat/completions'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, max_tokens: 128, stream: false }) });
   const data = await responseJson(response, provider, 'Model chat không phản hồi.');
   const choice = (Array.isArray(data.choices) ? data.choices[0] : undefined) as { message?: { content?: unknown }; text?: unknown } | undefined;
   const output = responseText(choice?.message?.content ?? choice?.text).trim();
@@ -86,34 +80,44 @@ export async function testModel(provider: AIProvider, model: string, capability:
   const providerCapability = capability === 'translation' ? 'chat' : capability;
   if (provider.capabilities?.[providerCapability] === false) throw new ProviderError(`Provider ${provider.name} không hỗ trợ capability ${providerCapability}.`, 400);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeoutMs = capability === 'vision' ? 45_000 : 15_000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const started = Date.now();
   try {
     let output = '';
     if (capability === 'stt') {
-      const result = await transcribe(provider, model, tinyWav(), 'autosub-test.wav', 'Auto Detect');
-      output = result.text || (result.segments.length ? `${result.segments.length} segment(s)` : 'STT endpoint phản hồi nhưng không có text.');
+      const result = await transcribe(provider, model, capabilityTestSpeech(), 'autosub-test.ogg', 'Auto Detect', controller.signal);
+      output = result.text || result.segments.map((segment) => segment.text || '').join(' ').trim();
+      assertExpectedTranscript(output);
     } else if (capability === 'vision') {
-      output = await testChat(provider, model, [{ role: 'user', content: [{ type: 'text', text: 'Reply with OK only.' }, { type: 'image_url', image_url: `data:image/png;base64,${tinyPng.toString('base64')}` }] }], controller.signal, 'vision');
+      output = await testChat(provider, model, [{ role: 'user', content: [{ type: 'text', text: 'Reply with OK only.' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${visionTestPng.toString('base64')}`, detail: 'low' } }] }], controller.signal, 'vision');
     } else if (capability === 'tts') {
       const providerType = resolveProviderType(provider);
       const isGroq = providerType === 'groq';
       const audio = await synthesize(provider, model, providerType === 'hiiu-tts' ? model : isGroq ? 'troy' : 'alloy', isGroq ? 'This is a short Groq voice test.' : 'OK', { format: 'wav', signal: controller.signal });
-      if (!audio.length) throw new ProviderError('TTS provider trả về audio rỗng.', 502);
+      assertPlayableAudio(audio);
       output = `${audio.length} bytes audio`;
     } else {
-      output = await testChat(provider, model, [{ role: 'user', content: 'Reply with OK only.' }], controller.signal);
+      const raw = await testChat(provider, model, [{ role: 'user', content: 'Translate the Chinese greeting 你好 into Vietnamese. Return only valid JSON in this exact shape: {"translation":"Xin chào"}.' }], controller.signal);
+      let translation = '';
+      try {
+        const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')) as { translation?: unknown };
+        translation = typeof parsed.translation === 'string' ? parsed.translation : '';
+      } catch { /* validated below */ }
+      const normalized = translation.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^a-z]/g, '');
+      if (!normalized.includes('chao')) throw new ProviderError('Model có phản hồi Chat nhưng không hoàn thành đúng bài test dịch Trung → Việt.', 502);
+      output = translation;
     }
     return { ok: true, model, capability, latencyMs: Date.now() - started, output: output.trim().slice(0, 120) };
   } catch (error) {
-    if (controller.signal.aborted) throw new ProviderError('Test model timeout sau 15 giây.', 504);
+    if (controller.signal.aborted) throw new ProviderError(`Test model timeout sau ${timeoutMs / 1000} giây.`, 504);
     throw error;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-export async function chat(provider: AIProvider, model: string, messages: Array<{ role: 'system' | 'user'; content: string | Array<Record<string, string>> }>, signal?: AbortSignal, maxTokens?: number) { const response = await fetch(withAuthQuery(endpoint(provider, 'chat', '/chat/completions'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, temperature: 0.2, ...(maxTokens ? { max_tokens: maxTokens } : {}) }) }); const data = await responseJson(response, provider, 'Provider chat không phản hồi.'); const choices = Array.isArray(data.choices) ? data.choices : []; const content = (choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content; if (typeof content !== 'string') throw new ProviderError('Provider không trả về message content.'); return content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim(); }
+export async function chat(provider: AIProvider, model: string, messages: Array<{ role: 'system' | 'user'; content: string | Array<Record<string, unknown>> }>, signal?: AbortSignal, maxTokens?: number) { const response = await fetch(withAuthQuery(endpoint(provider, 'chat', '/chat/completions'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, temperature: 0.2, stream: false, ...(maxTokens ? { max_tokens: maxTokens } : {}) }) }); const data = await responseJson(response, provider, 'Provider chat không phản hồi.'); const choices = Array.isArray(data.choices) ? data.choices : []; const content = (choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content; if (typeof content !== 'string') throw new ProviderError('Provider không trả về message content.'); return content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim(); }
 
 function normalizedTranslationText(text: string) {
   return text.normalize('NFKC').toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
@@ -160,12 +164,12 @@ Source language: ${sourceLanguage}. Target language: ${targetLanguage}. Style: $
   return items.map((item) => result.find((candidate) => candidate.id === item.id) as { id: string; translation: string });
 }
 
-export async function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string) {
+export async function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal) {
   const request = async (responseFormat: 'verbose_json' | 'json', includeWordTimestamps = false) => {
     const audioSize = typeof audio === 'string' ? (await stat(audio)).size : audio.byteLength;
     if (process.env.AUTOSUB_DEBUG_UPLOADS === '1') console.info(`[stt] ${JSON.stringify({ audioPath: typeof audio === 'string' ? audio : filename, audioSize, provider: provider.name, responseFormat })}`);
     const form = new FormData();
-    const blob = typeof audio === 'string' ? await openAsBlob(audio, { type: 'audio/wav' }) : new Blob([audio]);
+    const blob = typeof audio === 'string' ? await openAsBlob(audio, { type: 'audio/wav' }) : new Blob([audio], { type: /\.ogg$/i.test(filename) ? 'audio/ogg' : /\.mp3$/i.test(filename) ? 'audio/mpeg' : 'audio/wav' });
     form.append('file', blob, filename);
     form.append('model', model);
     const languageCode = normalizeSttLanguage(language);
@@ -175,7 +179,7 @@ export async function transcribe(provider: AIProvider, model: string, audio: Buf
       form.append('timestamp_granularities[]', 'segment');
       form.append('timestamp_granularities[]', 'word');
     }
-    const response = await fetch(withAuthQuery(endpoint(provider, 'stt', '/audio/transcriptions'), provider), { method: 'POST', headers: headers(provider), body: form });
+    const response = await fetch(withAuthQuery(endpoint(provider, 'stt', '/audio/transcriptions'), provider), { method: 'POST', headers: headers(provider), body: form, signal });
     if (process.env.AUTOSUB_DEBUG_UPLOADS === '1') console.info(`[stt] ${JSON.stringify({ provider: provider.name, status: response.status, audioSize, responseFormat })}`);
     const data = await responseJson(response, provider, 'Provider STT không phản hồi.');
     const rawSegments = (Array.isArray(data.segments) ? data.segments : []) as SubtitleSegment[];
@@ -206,6 +210,23 @@ export async function transcribe(provider: AIProvider, model: string, audio: Buf
   }
 }
 
-export async function recognizeImage(provider: AIProvider, model: string, imagePath: string, prompt: string) { const buffer = await readFile(imagePath); const image = `data:image/jpeg;base64,${buffer.toString('base64')}`; const response = await fetch(withAuthQuery(endpoint(provider, 'vision', '/chat/completions'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, body: JSON.stringify({ model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: image }] }], temperature: 0.1 }) }); const data = await responseJson(response, provider, 'Provider Vision không phản hồi.'); const choices = Array.isArray(data.choices) ? data.choices : []; const content = (choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content; if (typeof content !== 'string') throw new ProviderError('Provider không trả về nội dung Vision.'); return content.replace(/^```(?:text)?\s*/i, '').replace(/\s*```$/, '').trim(); }
+export async function recognizeImage(provider: AIProvider, model: string, imagePath: string, prompt: string, signal?: AbortSignal) {
+  const buffer = await readFile(imagePath);
+  const image = `data:image/jpeg;base64,${buffer.toString('base64')}`;
+  const url = withAuthQuery(endpoint(provider, 'vision', '/chat/completions'), provider);
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: image, detail: 'high' } }] }], temperature: 0.1, stream: false }) });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    const code = error && typeof error === 'object' && 'cause' in error && (error as { cause?: { code?: unknown } }).cause?.code ? String((error as { cause?: { code?: unknown } }).cause?.code) : '';
+    throw new ProviderError(`Không thể kết nối Vision provider “${provider.name}” tại ${provider.baseUrl}.${code ? ` Mã mạng: ${code}.` : ''} Nếu đây là provider local, hãy khởi động dịch vụ đó rồi thử lại.`, 502);
+  }
+  const data = await responseJson(response, provider, 'Provider Vision không phản hồi.');
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  const content = (choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content;
+  if (typeof content !== 'string') throw new ProviderError('Provider không trả về nội dung Vision.');
+  return content.replace(/^```(?:text)?\s*/i, '').replace(/\s*```$/, '').trim();
+}
 
 export async function synthesize(provider: AIProvider, model: string, voice: string, text: string, options: { speed?: number; format?: string; signal?: AbortSignal }) { const isModelVoiceProvider = resolveProviderType(provider) === 'hiiu-tts'; if (!isModelVoiceProvider && !voice?.trim()) throw new ProviderError('Model TTS này yêu cầu chọn Voice.', 400); const body = { model, ...(isModelVoiceProvider ? {} : { voice }), input: text, speed: options.speed || 1, response_format: options.format || 'wav' }; const response = await fetch(withAuthQuery(endpoint(provider, 'tts', '/audio/speech'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal: options.signal, body: JSON.stringify(body) }); if (!response.ok) await providerResponseError(response, provider, 'Provider không hỗ trợ TTS.'); return Buffer.from(await response.arrayBuffer()); }

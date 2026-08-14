@@ -1,6 +1,6 @@
 import type { AIProvider, AppSettings, GlossaryEntry, ModelPreferences, PronunciationEntry, SubtitleCue, VideoAsset, VideoEditState } from '../types';
 import { defaultSettings } from '../types';
-import { createCapCutTtsProvider, normalizeProvider } from './providers';
+import { ensureBuiltInProviders, normalizeProvider } from './providers';
 import { normalizeSettings } from './settings';
 
 export type ExtractionRunStatus = 'idle' | 'uploading' | 'ready' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -25,7 +25,7 @@ const cueDebug = (cues: SubtitleCue[]) => cues.slice(0, 5).map((cue) => ({ text:
 type StoredVideoAsset = Pick<VideoAsset, 'name' | 'type' | 'uploadId' | 'storedPath' | 'durationMs' | 'size' | 'sourceMode'>;
 
 export const storage = {
-  providers: () => { const providers = read<AIProvider[]>(keys.providers, []).map((provider) => normalizeProvider(provider)); return providers.some((provider) => provider.providerType === 'capcut-tts' || provider.id === 'capcut-tts-local') ? providers : [...providers, createCapCutTtsProvider()]; },
+  providers: () => ensureBuiltInProviders(read<AIProvider[]>(keys.providers, []).map((provider) => normalizeProvider(provider))),
   saveProviders: (v: AIProvider[]) => write(keys.providers, v.map((provider) => normalizeProvider(provider))),
   settings: () => normalizeSettings(read<Partial<AppSettings>>(keys.settings, defaultSettings)),
   saveSettings: (v: AppSettings) => write(keys.settings, normalizeSettings(v)),

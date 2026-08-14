@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
 import type { AIProvider } from '../types';
 import { ProviderError, synthesize } from '../adapters';
 import { resolveProviderType } from '../providers/base';
+import { cachedTtsPreview } from '../services/ttsPreviewCache';
 import {
   cancelDubbingJob,
   createDubbingJob,
@@ -40,9 +42,13 @@ export async function dubbingRoutes(app: FastifyInstance) {
     if (!body.provider?.baseUrl || !body.model) return reply.code(400).type('application/json').send({ error: 'Test voice cần Provider và Model ID.' });
     if (!body.voice && resolveProviderType(body.provider) !== 'hiiu-tts') return reply.code(400).type('application/json').send({ error: 'Model TTS này yêu cầu Voice ID.' });
     try {
-      const audio = await synthesize(body.provider, body.model, body.voice || '', body.text || 'This is an AutoSub voice test.', { speed: body.speed || 1, format: 'wav' });
-      reply.header('Content-Type', resolveProviderType(body.provider) === 'elevenlabs' ? 'audio/mpeg' : 'audio/wav');
-      return reply.send(audio);
+      const text = body.text?.trim() || 'This is an AutoSub voice test.';
+      const speed = Math.round((Number(body.speed) || 1) * 100) / 100;
+      const key = createHash('sha256').update(JSON.stringify({ providerId: body.provider.id, providerType: resolveProviderType(body.provider), baseUrl: body.provider.baseUrl, apiKey: body.provider.apiKey || '', model: body.model, voice: body.voice || '', speed, text })).digest('hex');
+      const result = await cachedTtsPreview(key, () => synthesize(body.provider!, body.model!, body.voice || '', text, { speed, format: 'wav' }));
+      reply.header('Content-Type', ['elevenlabs', 'edge-tts'].includes(resolveProviderType(body.provider)) ? 'audio/mpeg' : 'audio/wav');
+      reply.header('X-AutoSub-Preview-Cache', result.cache);
+      return reply.send(result.audio);
     } catch (error) {
       return reply.code(error instanceof ProviderError ? error.status : 502).type('application/json').send(errorPayload(error, 'Không thể test voice.'));
     }

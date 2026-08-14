@@ -9,6 +9,8 @@ import { extractionRoutes } from './routes/extraction';
 import { dubbingRoutes } from './routes/dubbing';
 import { exportRoutes } from './routes/export';
 import { uploadRoutes } from './routes/uploads';
+import { reviewRoutes } from './routes/review';
+import { voiceCloneRoutes } from './routes/voiceClones';
 
 // The multipart plugin enforces the actual per-file limit. Leave a small amount
 // of room here for multipart headers and boundaries so a file exactly at 4 GiB
@@ -36,10 +38,12 @@ app.addHook('onError', async (request, _reply, error) => {
 });
 await app.register(uploadRoutes);
 await app.register(providerRoutes);
+await app.register(voiceCloneRoutes);
 await app.register(translationRoutes);
 await app.register(extractionRoutes);
 await app.register(dubbingRoutes);
 await app.register(exportRoutes);
+await app.register(reviewRoutes);
 app.setErrorHandler((error, _request, reply) => {
   app.log.warn(error instanceof Error ? error.message : String(error));
   const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code) : '';

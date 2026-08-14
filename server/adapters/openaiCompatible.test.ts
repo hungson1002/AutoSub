@@ -1,13 +1,102 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import type { AIProvider } from '../types';
-import { listModels, normalizeSttLanguage, synthesize, transcribe, translateBatch } from './openaiCompatible';
+import { listModels, normalizeSttLanguage, synthesize, testModel, transcribe, translateBatch } from './openaiCompatible';
 
 test('normalizes UI language labels to provider language codes', () => {
   assert.equal(normalizeSttLanguage('中文'), 'zh');
   assert.equal(normalizeSttLanguage('Tiếng Việt'), 'vi');
   assert.equal(normalizeSttLanguage('Auto Detect'), undefined);
+  assert.equal(normalizeSttLanguage('auto'), undefined);
+  assert.equal(normalizeSttLanguage('auto_detect'), undefined);
+  assert.equal(normalizeSttLanguage('Tự nhận diện'), undefined);
   assert.equal(normalizeSttLanguage('en'), 'en');
+});
+
+test('tests Vision with a non-streaming canonical image request', async () => {
+  const originalFetch = globalThis.fetch;
+  const provider: AIProvider = {
+    id: 'vision-provider', name: 'Vision provider', baseUrl: 'http://provider.test/v1', enabled: true,
+    models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { vision: true },
+  };
+  let request: Record<string, unknown> | undefined;
+  globalThis.fetch = (async (_input: string | URL, init?: RequestInit) => {
+    request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const result = await testModel(provider, 'vision-model', 'vision');
+    assert.equal(result.ok, true);
+    assert.equal(request?.stream, false);
+    assert.equal(request?.max_tokens, 128);
+    const messages = request?.messages as Array<{ content: Array<{ type: string; image_url?: { url?: string; detail?: string } }> }>;
+    const image = messages[0]?.content.find((part) => part.type === 'image_url')?.image_url;
+    assert.match(image?.url || '', /^data:image\/png;base64,/);
+    assert.equal(image?.detail, 'low');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('tests Translation with an actual Chinese to Vietnamese result', async () => {
+  const originalFetch = globalThis.fetch;
+  const provider: AIProvider = {
+    id: 'translation-provider', name: 'Translation provider', baseUrl: 'http://provider.test/v1', enabled: true,
+    models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true },
+  };
+  let request: { messages?: Array<{ content?: string }>; stream?: boolean } | undefined;
+  globalThis.fetch = (async (_input: string | URL, init?: RequestInit) => {
+    request = JSON.parse(String(init?.body)) as typeof request;
+    return new Response(JSON.stringify({ choices: [{ message: { content: '```json\n{"translation":"Xin chào"}\n```' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const result = await testModel(provider, 'translation-model', 'translation');
+    assert.equal(result.output, 'Xin chào');
+    assert.equal(request?.stream, false);
+    assert.match(request?.messages?.[0]?.content || '', /你好/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('tests STT with spoken audio and rejects an empty transcript', async () => {
+  const originalFetch = globalThis.fetch;
+  const provider: AIProvider = {
+    id: 'stt-provider', name: 'STT provider', baseUrl: 'http://provider.test/v1', enabled: true,
+    models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { stt: true },
+  };
+  let requestBody: FormData | undefined;
+  let transcript = '';
+  globalThis.fetch = (async (_input: string | URL, init?: RequestInit) => {
+    requestBody = init?.body as FormData;
+    return new Response(JSON.stringify({ text: transcript }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(() => testModel(provider, 'stt-model', 'stt'), /không nhận dạng đúng audio kiểm tra/i);
+    transcript = 'Hello Auto Sub';
+    const result = await testModel(provider, 'stt-model', 'stt');
+    assert.equal(result.output, transcript);
+    const file = requestBody?.get('file') as File | null;
+    assert.equal(file?.name, 'autosub-test.ogg');
+    assert.equal(file?.type, 'audio/ogg');
+    assert.equal(Buffer.from(await file!.arrayBuffer()).subarray(0, 4).toString('ascii'), 'OggS');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('does not pass TTS when a 200 response contains JSON instead of audio', async () => {
+  const originalFetch = globalThis.fetch;
+  const provider: AIProvider = {
+    id: 'tts-provider', name: 'TTS provider', baseUrl: 'http://provider.test/v1', enabled: true,
+    models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { tts: true },
+  };
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'not audio' }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  try {
+    await assert.rejects(() => testModel(provider, 'tts-model', 'tts'), /không phải file audio hợp lệ/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('uses HiiuTTS model catalog and treats each model as a TTS voice', async () => {

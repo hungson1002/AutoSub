@@ -71,7 +71,7 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
     try {
       const result = await api.listModels(normalized);
       let voices = normalized.voices;
-      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts') {
+      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts' || resolvedProviderType(normalized) === 'edge-tts' || resolvedProviderType(normalized) === 'vieneu-local') {
         try { voices = (await api.listVoices(normalized)).voices; } catch (error) { onNotice(providerErrorMessage(error, 'Không thể lấy voices.'), 'error'); }
       }
       const models = result.warning && !result.models.length ? normalized.models : result.models;
@@ -88,7 +88,7 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
       const normalized = { ...provider, baseUrl: normalizeProviderBaseUrl(provider.baseUrl) };
       const result = await api.listModels(normalized);
       let voices = normalized.voices;
-      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts') { try { voices = (await api.listVoices(normalized)).voices; } catch { /* model refresh vẫn dùng được nếu voice endpoint tạm lỗi */ } }
+      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts' || resolvedProviderType(normalized) === 'edge-tts' || resolvedProviderType(normalized) === 'vieneu-local') { try { voices = (await api.listVoices(normalized)).voices; } catch { /* model refresh vẫn dùng được nếu voice endpoint tạm lỗi */ } }
       const models = result.warning && !result.models.length ? normalized.models : result.models;
       updateProvider({ ...normalized, models, voices });
       onNotice(result.warning || `Đã refresh ${models.length} model.`, 'success');

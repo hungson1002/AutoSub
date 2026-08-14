@@ -1,0 +1,4 @@
+# Microsoft Edge online TTS bridge for AutoSub.
+# edge-tts is an unofficial client and can stop working if Microsoft changes
+# the consumer endpoint.
+edge-tts==7.2.8
