@@ -164,7 +164,7 @@ const DEFAULTS = {
 // Do not reuse audio generated before CapCut request serialization and stable
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
-const TTS_CACHE_VERSION = 'tts-v6-natural-cue-boundaries';
+const TTS_CACHE_VERSION = 'tts-v7-vieneu-stable-utterances';
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();

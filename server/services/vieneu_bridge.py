@@ -116,6 +116,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     output.parent.mkdir(parents=True, exist_ok=True)
     voice = enrolled_voice(str(request.get("referencePath", "")))
     tts = get_tts()
+    temperature = max(0.35, min(1.0, float(request.get("temperature", 0.75))))
     with contextlib.redirect_stdout(sys.stderr):
         audio = tts.infer(
             text,
@@ -123,7 +124,9 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
             denoise=False,
             show_progress=False,
             apply_watermark=True,
-            temperature=0.75,
+            temperature=temperature,
+            top_k=25,
+            top_p=0.95,
             repetition_penalty=1.2,
         )
         tts.save(audio, str(output))

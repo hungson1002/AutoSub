@@ -18,6 +18,66 @@ const pythonExecutable = () => process.platform === 'win32'
 
 type BridgeResponse = { requestId?: string; ok?: boolean; error?: string; bytes?: number; sampleRate?: number; [key: string]: unknown };
 type PendingRequest = { resolve: (value: BridgeResponse) => void; reject: (error: Error) => void; cleanup: () => void };
+export type VieneuInternalSilence = { startMs: number; endMs: number; durationMs: number };
+
+const VIENEU_HESITATION_MIN_MS = 160;
+const VIENEU_NATURAL_PAUSE_MS = 95;
+const VIENEU_EDGE_GUARD_MS = 80;
+
+export function parseVieneuInternalSilences(stderr: string, durationMs: number, edgeGuardMs = VIENEU_EDGE_GUARD_MS): VieneuInternalSilence[] {
+  const pauses: VieneuInternalSilence[] = [];
+  let startMs: number | undefined;
+  for (const line of stderr.split(/\r?\n/)) {
+    const start = line.match(/silence_start:\s*([0-9.]+)/);
+    if (start) {
+      startMs = Number(start[1]) * 1000;
+      continue;
+    }
+    const end = line.match(/silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/);
+    if (!end) continue;
+    const endMs = Number(end[1]) * 1000;
+    const measuredDurationMs = Number(end[2]) * 1000;
+    const resolvedStartMs = startMs ?? endMs - measuredDurationMs;
+    startMs = undefined;
+    if (![resolvedStartMs, endMs, measuredDurationMs].every(Number.isFinite)) continue;
+    if (resolvedStartMs <= edgeGuardMs || endMs >= durationMs - edgeGuardMs) continue;
+    pauses.push({ startMs: Math.round(resolvedStartMs), endMs: Math.round(endMs), durationMs: Math.round(measuredDurationMs) });
+  }
+  return pauses;
+}
+
+export function vieneuHesitationScore(pauses: VieneuInternalSilence[]) {
+  return pauses.reduce((score, pause) => score + Math.max(0, pause.durationMs - VIENEU_HESITATION_MIN_MS), 0);
+}
+
+export function buildVieneuPauseRepairFilter(pauses: VieneuInternalSilence[], durationMs: number, keepPauseMs = VIENEU_NATURAL_PAUSE_MS) {
+  const cuts = [...pauses]
+    .filter((pause) => pause.durationMs > VIENEU_HESITATION_MIN_MS)
+    .sort((left, right) => left.startMs - right.startMs)
+    .map((pause) => ({
+      startMs: pause.startMs + keepPauseMs / 2,
+      endMs: pause.endMs - keepPauseMs / 2,
+    }))
+    .filter((cut) => cut.endMs - cut.startMs >= 5);
+  if (!cuts.length) return 'anull';
+  const segments: Array<{ startMs: number; endMs: number }> = [];
+  let cursorMs = 0;
+  for (const cut of cuts) {
+    const startMs = Math.max(cursorMs, Math.min(durationMs, cut.startMs));
+    if (startMs > cursorMs) segments.push({ startMs: cursorMs, endMs: startMs });
+    cursorMs = Math.max(cursorMs, Math.min(durationMs, cut.endMs));
+  }
+  if (cursorMs < durationMs) segments.push({ startMs: cursorMs, endMs: durationMs });
+  if (segments.length < 2) return 'anull';
+  const filters = segments.map((segment, index) => `[0:a]atrim=start=${(segment.startMs / 1000).toFixed(6)}:end=${(segment.endMs / 1000).toFixed(6)},asetpts=PTS-STARTPTS[s${index}]`);
+  filters.push(`${segments.map((_segment, index) => `[s${index}]`).join('')}concat=n=${segments.length}:v=0:a=1[out]`);
+  return filters.join(';');
+}
+
+export function usesShortUtteranceQualityPass(text: string) {
+  const sentenceBreaks = text.match(/[.!?…]+/g)?.length || 0;
+  return text.length <= 220 && sentenceBreaks <= 1;
+}
 
 function terminateProcess(child: { pid?: number; kill: () => boolean }) {
   if (process.platform === 'win32' && child.pid) {
@@ -215,6 +275,14 @@ export async function vieneuRuntimeStatus(signal?: AbortSignal) {
   return { executable, threads: Math.max(1, Math.min(4, Number(process.env.AUTOSUB_VIENEU_THREADS) || 2)) };
 }
 
+async function vieneuAudioQuality(file: string, signal?: AbortSignal) {
+  const probe = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file], signal);
+  const durationMs = Math.max(1, Number(probe.stdout.trim()) * 1000);
+  const detection = await run('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', `silencedetect=noise=-42dB:d=${(VIENEU_HESITATION_MIN_MS / 1000).toFixed(3)}`, '-f', 'null', '-'], signal);
+  const pauses = parseVieneuInternalSilences(detection.stderr, durationMs);
+  return { durationMs, pauses, score: vieneuHesitationScore(pauses) };
+}
+
 export async function synthesizeWithVieneu(text: string, referencePath: string, speed = 1, signal?: AbortSignal) {
   const content = text.trim();
   if (!content) throw new ProviderError('Nội dung VieNeu TTS đang trống.', 400);
@@ -222,16 +290,36 @@ export async function synthesizeWithVieneu(text: string, referencePath: string, 
   await mkdir(TEMP_ROOT, { recursive: true });
   const id = randomUUID();
   const rawOutput = path.join(TEMP_ROOT, `${id}.raw.wav`);
+  const retryOutput = path.join(TEMP_ROOT, `${id}.retry.wav`);
+  const repairedOutput = path.join(TEMP_ROOT, `${id}.repaired.wav`);
   const finalOutput = path.join(TEMP_ROOT, `${id}.wav`);
   try {
-    await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: rawOutput }, signal);
-    const normalizedSpeed = Math.max(0.75, Math.min(1.5, Number(speed) || 1));
-    if (Math.abs(normalizedSpeed - 1) > 0.001) {
-      await run('ffmpeg', ['-y', '-v', 'error', '-i', rawOutput, '-filter:a', `atempo=${normalizedSpeed.toFixed(3)}`, '-ac', '1', '-ar', '48000', '-c:a', 'pcm_s16le', finalOutput], signal);
+    await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: rawOutput, temperature: 0.75 }, signal);
+    let selectedOutput = rawOutput;
+    let selectedQuality = usesShortUtteranceQualityPass(content) ? await vieneuAudioQuality(rawOutput, signal) : undefined;
+    if (selectedQuality?.score) {
+      await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: retryOutput, temperature: 0.52 }, signal);
+      const retryQuality = await vieneuAudioQuality(retryOutput, signal);
+      if (retryQuality.score < selectedQuality.score) {
+        selectedOutput = retryOutput;
+        selectedQuality = retryQuality;
+      }
     }
-    return await readFile(Math.abs(normalizedSpeed - 1) > 0.001 ? finalOutput : rawOutput);
+    if (selectedQuality?.score) {
+      const repairFilter = buildVieneuPauseRepairFilter(selectedQuality.pauses, selectedQuality.durationMs);
+      if (repairFilter !== 'anull') {
+        await run('ffmpeg', ['-y', '-v', 'error', '-i', selectedOutput, '-filter_complex', repairFilter, '-map', '[out]', '-ac', '1', '-ar', '48000', '-c:a', 'pcm_s16le', repairedOutput], signal);
+        selectedOutput = repairedOutput;
+      }
+    }
+    const normalizedSpeed = Math.max(0.75, Math.min(1.5, Number(speed) || 1));
+    const speedChanged = Math.abs(normalizedSpeed - 1) > 0.001;
+    if (speedChanged) {
+      await run('ffmpeg', ['-y', '-v', 'error', '-i', selectedOutput, '-filter:a', `atempo=${normalizedSpeed.toFixed(3)}`, '-ac', '1', '-ar', '48000', '-c:a', 'pcm_s16le', finalOutput], signal);
+    }
+    return await readFile(speedChanged ? finalOutput : selectedOutput);
   } finally {
-    await Promise.all([rm(rawOutput, { force: true }), rm(finalOutput, { force: true })]);
+    await Promise.all([rm(rawOutput, { force: true }), rm(retryOutput, { force: true }), rm(repairedOutput, { force: true }), rm(finalOutput, { force: true })]);
   }
 }
 

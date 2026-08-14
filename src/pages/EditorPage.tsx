@@ -168,10 +168,15 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
   useEffect(() => {
     if (!dubbingJob || !['queued', 'running'].includes(dubbingJob.status)) return;
     let disposed = false;
+    let inFlight = false;
+    let consecutiveFailures = 0;
     const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const next = await api.getDubbingJobStatus(dubbingJob.id);
         if (disposed) return;
+        consecutiveFailures = 0;
         if (['completed', 'completed_with_errors', 'cancelled', 'failed'].includes(next.status) && dubbingTerminalNoticeRef.current !== `${next.id}:${next.status}`) {
           if (next.status === 'completed') {
             const result = await api.getDubbingResult(next.id);
@@ -202,7 +207,12 @@ export function EditorPage({ providers, settings, onSettingsChange, cues, onCues
         } else {
           setDubbingJob(next);
         }
-      } catch (error) { if (!disposed) onNotice(friendlyErrorMessage(error, 'Không thể đọc trạng thái dubbing job.'), 'error'); }
+      } catch {
+        consecutiveFailures += 1;
+        if (!disposed && consecutiveFailures === 3) onNotice('Backend đang khởi động hoặc tạm thời mất kết nối. AutoSub vẫn tiếp tục thử lại job.', 'error');
+      } finally {
+        inFlight = false;
+      }
     };
     void poll();
     const timer = window.setInterval(() => void poll(), 1000);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { AIProvider, AppSettings, SubtitleCue, VideoAsset } from './types';
 import { storage } from './lib/storage';
 import { Layout, type Page } from './components/Layout';
@@ -16,7 +16,7 @@ export default function App() {
   const [page, setPage] = useState<Page>('translate'); const [providers, setProviders] = useState<AIProvider[]>(() => storage.providers()); const [settings, setSettings] = useState<AppSettings>(storage.settings); const [cues, setCues] = useState<SubtitleCue[]>(storage.cues); const [asset, setAsset] = useState<VideoAsset | undefined>(storage.asset); const [toast, setToast] = useState<{ message: string; kind: 'success' | 'error' }>();
   useEffect(() => { storage.saveCues(cues); }, [cues]); useEffect(() => { storage.saveSettings(settings); }, [settings]); useEffect(() => { storage.saveProviders(providers); }, [providers]); useEffect(() => { storage.saveAsset(asset); }, [asset]); useEffect(() => { if (!toast) return; const id = window.setTimeout(() => setToast(undefined), 4300); return () => window.clearTimeout(id); }, [toast]);
   useEffect(() => { setProviders((current) => ensureBuiltInProviders(current)); }, []);
-  const notice = (message: string, kind: 'success' | 'error' = 'success') => setToast({ message, kind });
+  const notice = useCallback((message: string, kind: 'success' | 'error' = 'success') => setToast({ message, kind }), []);
   const openEditor = () => setPage('editor');
   const syncVieneuVoices = (voices: AIProvider['voices']) => setProviders((current) => current.map((provider) => provider.id === 'vieneu-local' || provider.providerType === 'vieneu-local' ? { ...provider, voices } : provider));
   const enableVieneuTts = () => setSettings((current) => {
