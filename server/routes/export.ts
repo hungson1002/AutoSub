@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { run, ensureWorkdir, workdir } from '../services/ffmpeg';
 import { getDubbingResult } from '../services/dubbingJobs';
 import { buildExportAudioFilter } from '../services/exportAudio';
+import { DUB_LOUDNESS_FILTER } from '../services/audioMastering';
 import { cleanupUploadSession, createUploadSession, discardUploadStream, persistUploadStream, resolveUpload, safeUploadName, UploadTooLargeError } from '../services/uploads';
 
 type Fields = Record<string, string>;
@@ -154,16 +155,6 @@ export async function exportRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không tìm thấy audio hiện tại.' });
     }
 
-    // A completed dubbing job is already the exact WAV used by the editor
-    // preview. Avoid a needless FFmpeg pass when the whole timeline is wanted.
-    if (completedDub && trimStartMs === 0 && trimEndMs === undefined) {
-      const file = await stat(input);
-      reply.header('Content-Type', 'audio/wav');
-      reply.header('Content-Length', String(file.size));
-      reply.header('Content-Disposition', 'attachment; filename="autosub-current-audio.wav"');
-      return reply.send(createReadStream(input));
-    }
-
     const job = `audio-export-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const output = path.join(workdir, 'exports', `${job}.wav`);
     const stagedOutput = path.join(workdir, 'exports', `${job}.rendering.wav`);
@@ -176,7 +167,9 @@ export async function exportRoutes(app: FastifyInstance) {
       const args = ['-y', '-i', input];
       if (trimStartMs > 0) args.push('-ss', (trimStartMs / 1000).toFixed(3));
       if (trimEndMs !== undefined) args.push('-t', ((trimEndMs - trimStartMs) / 1000).toFixed(3));
-      args.push('-map', '0:a:0', '-vn', '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', stagedOutput);
+      args.push('-map', '0:a:0', '-vn');
+      if (completedDub) args.push('-af', DUB_LOUDNESS_FILTER);
+      args.push('-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', stagedOutput);
       await run('ffmpeg', args, requestAbort.signal);
       const rendered = await stat(stagedOutput);
       if (rendered.size <= 44) throw new Error('Video hiện tại không có audio hợp lệ để xuất.');

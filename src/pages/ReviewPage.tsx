@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AIProvider, AIVoice, AppSettings, ProviderAssignment, ReviewAspectRatio, ReviewJobStatus, VideoAsset } from '../types';
 import { api, friendlyErrorMessage, MAX_BROWSER_UPLOAD_BYTES, reviewVideoUrl } from '../lib/api';
 import { capabilityAssignments } from '../lib/settings';
@@ -70,6 +70,26 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
   const [youtubeClientSecret, setYoutubeClientSecret] = useState('');
   const [youtubeWorking, setYoutubeWorking] = useState(false);
   const uploadControllerRef = useRef<AbortController | undefined>(undefined);
+  const voicePreviewRef = useRef<HTMLAudioElement | null>(null);
+  const voicePreviewUrlRef = useRef<string | null>(null);
+  const voicePreviewRequestRef = useRef(0);
+
+  const stopVoicePreview = useCallback(() => {
+    voicePreviewRequestRef.current += 1;
+    const audio = voicePreviewRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      voicePreviewRef.current = null;
+    }
+    if (voicePreviewUrlRef.current) {
+      URL.revokeObjectURL(voicePreviewUrlRef.current);
+      voicePreviewUrlRef.current = null;
+    }
+  }, []);
 
   const sttProvider = providers.find((item) => item.id === sttAssignment.providerId);
   const visionProvider = providers.find((item) => item.id === visionAssignment.providerId);
@@ -81,6 +101,14 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
     : ttsProvider?.voices || [], [cloneVoices, ttsProvider, ttsProviderType]);
 
   useEffect(() => { setAsset(initialAsset); }, [initialAsset?.uploadId]);
+  useEffect(() => () => {
+    uploadControllerRef.current?.abort();
+    stopVoicePreview();
+  }, [stopVoicePreview]);
+  useEffect(() => {
+    stopVoicePreview();
+    setTestingVoice(false);
+  }, [stopVoicePreview, ttsAssignment.model, ttsProvider?.id, voice]);
   useEffect(() => {
     const next = ttsProviderType === 'hiiu-tts' ? ttsAssignment.model : voiceItems.some((item) => item.id === voice) ? voice : voiceItems[0]?.id || (ttsProviderType === 'openai-compatible' ? 'alloy' : '');
     if (next !== voice) setVoice(next);
@@ -156,16 +184,34 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
 
   const testVoice = async () => {
     if (!ttsProvider || !ttsAssignment.model || !voice) { onNotice('Hãy chọn đủ TTS Provider, model và voice.', 'error'); return; }
+    stopVoicePreview();
+    const requestId = voicePreviewRequestRef.current;
     setTestingVoice(true);
     try {
       const blob = await api.testVoice(ttsProvider, ttsAssignment.model, voice, voiceSpeed, 'Đây là bản thử giọng cho video review của AutoSub.');
+      if (requestId !== voicePreviewRequestRef.current) return;
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.onended = () => URL.revokeObjectURL(url);
-      audio.onerror = () => URL.revokeObjectURL(url);
+      voicePreviewRef.current = audio;
+      voicePreviewUrlRef.current = url;
+      const release = () => {
+        if (voicePreviewRef.current !== audio) return;
+        voicePreviewRef.current = null;
+        voicePreviewUrlRef.current = null;
+        URL.revokeObjectURL(url);
+      };
+      audio.onended = release;
+      audio.onerror = release;
       await audio.play();
-    } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể thử giọng.'), 'error'); }
-    finally { setTestingVoice(false); }
+    } catch (error) {
+      if (requestId === voicePreviewRequestRef.current) {
+        setTestingVoice(false);
+        stopVoicePreview();
+        onNotice(friendlyErrorMessage(error, 'Không thể thử giọng.'), 'error');
+      }
+    } finally {
+      if (requestId === voicePreviewRequestRef.current) setTestingVoice(false);
+    }
   };
 
   const startJob = async () => {

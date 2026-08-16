@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 export const workdir = path.join(process.cwd(), 'workdir');
-export async function ensureWorkdir() { for (const name of ['uploads', 'audio', 'frames', 'subtitles', 'tts', 'exports']) await mkdir(path.join(workdir, name), { recursive: true }); }
+export async function ensureWorkdir() { for (const name of ['uploads', 'audio', 'audio-mastering', 'frames', 'subtitles', 'tts', 'exports']) await mkdir(path.join(workdir, name), { recursive: true }); }
 const mediaExecutableCache = new Map<string, string>();
 
 async function resolveMediaCommand(command: string) {
@@ -104,7 +104,7 @@ export async function cleanupTemporaryFiles(root = workdir, minimumAgeMs = 10 * 
 
   // These folders contain regenerable extraction/export caches. Recent paths
   // are retained so clicking cleanup cannot disrupt a request still running.
-  for (const name of ['audio', 'frames', 'subtitles', 'tts', 'exports', 'timestamp-vad-cache', 'text-audio-alignment-cache', 'diagnostics', 'demucs-smoke', 'export-smoke', 'upload-flow-smoke', 'video-compare', path.join('vieneu', 'tmp'), path.join('vieneu', 'reference-uploads')]) {
+  for (const name of ['audio', 'audio-mastering', 'frames', 'subtitles', 'tts', 'exports', 'timestamp-vad-cache', 'text-audio-alignment-cache', 'diagnostics', 'demucs-smoke', 'export-smoke', 'upload-flow-smoke', 'video-compare', path.join('vieneu', 'tmp'), path.join('vieneu', 'reference-uploads')]) {
     await removeStaleContents(path.join(root, name));
   }
 

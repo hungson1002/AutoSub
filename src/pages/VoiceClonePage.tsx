@@ -84,7 +84,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
 
   const createClone = async () => {
     if (!name.trim()) { onNotice('Hãy đặt tên cho giọng clone.', 'error'); return; }
-    if (!file) { onNotice('Hãy chọn mẫu giọng sạch dài khoảng 3 đến 8 giây.', 'error'); return; }
+    if (!file) { onNotice('Hãy chọn mẫu giọng sạch, nói liên tục khoảng 6 đến 10 giây.', 'error'); return; }
     if (!consent) { onNotice('Bạn cần xác nhận quyền sử dụng giọng trước khi clone.', 'error'); return; }
     setCreating(true);
     try {
@@ -172,7 +172,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
 
     <div className="voice-clone-workbench">
       <section className="voice-clone-card voice-clone-create-card">
-        <div className="section-title"><span>01 · TẠO HỒ SƠ GIỌNG</span><small>Mẫu sạch 3 đến 8 giây</small></div>
+        <div className="section-title"><span>01 · TẠO HỒ SƠ GIỌNG</span><small>Mẫu sạch 6 đến 10 giây</small></div>
         <div className="field"><span>Tên giọng</span><input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} placeholder="Ví dụ: Giọng kể của tôi" /></div>
         <label className={`voice-clone-dropzone ${file ? 'loaded' : ''}`}>
           <input ref={fileInputRef} type="file" accept="audio/*,video/*" onChange={(event) => setFile(event.currentTarget.files?.[0])} />
@@ -180,7 +180,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
           <span><strong>{file?.name || 'Chọn file mẫu giọng'}</strong><small>{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · sẵn sàng xử lý` : 'Audio hoặc video · tối đa 25 MB'}</small></span>
           <b>{file ? 'Đổi file' : 'Duyệt file'}</b>
         </label>
-        <div className="voice-clone-sample-guide"><span><b>01</b>Một người nói</span><span><b>02</b>Không nhạc nền</span><span><b>03</b>Âm lượng rõ</span></div>
+        <div className="voice-clone-sample-guide"><span><b>01</b>Một người nói</span><span><b>02</b>Nói liên tục</span><span><b>03</b>Không nhạc / tiếng vang</span></div>
         <label className="voice-clone-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span>Tôi sở hữu giọng này hoặc đã được người nói cho phép dùng để tạo giọng tổng hợp.</span></label>
         <button type="button" className="button primary large full" disabled={creating || !name.trim() || !file || !consent} onClick={() => void createClone()}>{creating ? <LoaderCircle size={16} className="spin" /> : <Upload size={16} />} {creating ? 'Đang chuẩn hóa mẫu...' : 'Tạo giọng clone'}</button>
         <div className="voice-clone-warning"><ShieldCheck size={15} /><span>Chỉ clone giọng có sự đồng ý. Nếu dùng giọng của người khác, hãy khai báo nội dung tổng hợp khi nền tảng yêu cầu.</span></div>
@@ -189,7 +189,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
       <section className="voice-clone-card voice-clone-library-card">
         <div className="section-title"><span>02 · THƯ VIỆN GIỌNG</span><button type="button" className="icon-button" title="Tải lại danh sách" disabled={loading} onClick={() => void loadProfiles()}><RefreshCw size={14} className={loading ? 'spin' : ''} /></button></div>
         {loading ? <div className="voice-clone-empty"><LoaderCircle size={25} className="spin" /><strong>Đang tải thư viện giọng</strong></div> : profiles.length ? <div className="voice-clone-profile-list">{profiles.map((profile) => <div key={profile.id} className={`voice-clone-profile ${selectedId === profile.id ? 'selected' : ''}`}>
-          <button type="button" className="voice-clone-profile-main" onClick={() => setSelectedId(profile.id)}><span className="voice-clone-avatar">{profile.name.trim().slice(0, 2).toUpperCase()}</span><span><strong>{profile.name}</strong><small>{formatDuration(profile.durationMs)} · {formatCreatedAt(profile.createdAt)}</small><em>{profile.sourceName}</em></span>{selectedId === profile.id && <Check size={15} />}</button>
+          <button type="button" className="voice-clone-profile-main" onClick={() => setSelectedId(profile.id)}><span className="voice-clone-avatar">{profile.name.trim().slice(0, 2).toUpperCase()}</span><span><strong>{profile.name}</strong><small>{formatDuration(profile.durationMs)} · {formatCreatedAt(profile.createdAt)}</small><em>{profile.sourceName}{(profile.referenceVersion ?? 0) < 2 ? ' · mẫu cũ 24 kHz, nên tạo lại' : ' · mẫu 48 kHz'}</em></span>{selectedId === profile.id && <Check size={15} />}</button>
           <button type="button" className="icon-button danger" aria-label={`Xóa ${profile.name}`} disabled={deletingId === profile.id} onClick={() => void deleteClone(profile)}>{deletingId === profile.id ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />}</button>
         </div>)}</div> : <div className="voice-clone-empty"><Volume2 size={27} /><strong>Chưa có giọng clone</strong><small>Tạo hồ sơ đầu tiên từ mẫu giọng ở bên trái.</small></div>}
       </section>

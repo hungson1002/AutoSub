@@ -15,6 +15,7 @@ test('an already mixed dubbing job is the only audio source during export', () =
   assert.doesNotMatch(filter, /\[0:a\]/);
   assert.doesNotMatch(filter, /amix=/);
   assert.match(filter, /alimiter=limit=0\.891:level=false/);
+  assert.match(filter, /loudnorm=I=-14:LRA=7:TP=-1\.0/);
   assert.match(filter, /aresample=48000/);
   assert.match(filter, /apad\[audioout\]$/);
 });
@@ -30,4 +31,5 @@ test('a voice-only dub can still be mixed with original audio once', () => {
   assert.match(filter, /\[0:a\]volume=0\.250\[original\]/);
   assert.match(filter, /amix=inputs=2:duration=longest/);
   assert.match(filter, /alimiter=limit=0\.891:level=false/);
+  assert.match(filter, /loudnorm=I=-14:LRA=7:TP=-1\.0/);
 });

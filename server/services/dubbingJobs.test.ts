@@ -5,7 +5,7 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFades, cueDeclickFilter, dubbingRewriteWordLimit, effectiveTtsConcurrency, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, planAdaptiveCueTempos, planDubbingTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter } from './dubbingJobs';
+import { ADAPTIVE_FIT_VERSION, buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFades, cueDeclickFilter, dubbingRewriteWordLimit, effectiveTtsConcurrency, fallbackTempoFilter, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, parseAudioIntegrity, planAdaptiveCueTempos, planDubbingTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, speechTrimFilter, startDubbingJob, tempoFilter, timeStretchIntroducedArtifacts } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
@@ -67,9 +67,14 @@ test('CapCut jobs are serialized and narration is sped up without padding or tri
   assert.equal(effectiveTtsConcurrency([capcutCue], 3), 1);
   assert.equal(effectiveTtsConcurrency(cues(1), 3), 3);
   assert.match(tempoFilter(1.25), /rubberband=tempo=1\.250/);
+  assert.match(tempoFilter(1.25), /smoothing=off/);
+  assert.doesNotMatch(tempoFilter(1.25), /smoothing=on/);
   assert.doesNotMatch(tempoFilter(1.25), /apad|atrim/);
   assert.doesNotMatch(tempoFilter(1.25), /alimiter/);
   assert.equal(tempoFilter(1), 'anull');
+  assert.equal(fallbackTempoFilter(1.25), 'atempo=1.250');
+  assert.equal(fallbackTempoFilter(1), 'anull');
+  assert.equal(ADAPTIVE_FIT_VERSION, 2);
   assert.equal(fittingTempo(0.65), 1);
   assert.equal(fittingTempo(0.90), 1);
   assert.equal(fittingTempo(1.08), 1.08);
@@ -80,6 +85,15 @@ test('CapCut jobs are serialized and narration is sped up without padding or tri
 
   const job = await createDubbingJob({ cues: [capcutCue], ttsConcurrency: 3 });
   try { assert.equal(job.config.ttsConcurrency, 1); } finally { await cleanup(job.id); }
+});
+
+test('time-stretch integrity guard rejects new full-scale impulses', () => {
+  const source = parseAudioIntegrity('[Parsed_astats] Peak level dB: -7.62\n[Parsed_astats] Max difference: 4503');
+  const damaged = parseAudioIntegrity('[Parsed_astats] Peak level dB: 0.000265\n[Parsed_astats] Max difference: 65535');
+  const clean = parseAudioIntegrity('[Parsed_astats] Peak level dB: -8.10\n[Parsed_astats] Max difference: 6200');
+  assert.deepEqual(source, { peakLevelDb: -7.62, maxDifference: 4503 });
+  assert.equal(timeStretchIntroducedArtifacts(source, damaged), true);
+  assert.equal(timeStretchIntroducedArtifacts(source, clean), false);
 });
 
 test('timeline planner preserves natural gaps and shifts later cues after an overrun', () => {

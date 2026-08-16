@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AIProvider } from '../types';
 import { chat, ProviderError, synthesize } from '../adapters';
 import { run, workdir } from './ffmpeg';
 import { resolveUpload } from './uploads';
+import { DUB_MASTERING_VERSION, masterDubFile } from './audioMastering';
 
 export type TimingMode = 'natural' | 'strict';
 export type CueStatus = 'pending' | 'translating' | 'rewriting' | 'tts' | 'fitting' | 'done' | 'failed';
@@ -59,7 +60,7 @@ export interface DubbingJob {
   config: DubbingJobConfig;
   providerInfo: ProviderInfoReference[];
   warnings: string[];
-  result?: { audioFile: string; metadataFile: string; durationMs: number };
+  result?: { audioFile: string; metadataFile: string; durationMs: number; masteringVersion?: number };
 }
 
 export interface DubbingMetadata {
@@ -164,7 +165,8 @@ const DEFAULTS = {
 // Do not reuse audio generated before CapCut request serialization and stable
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
-const TTS_CACHE_VERSION = 'tts-v7-vieneu-stable-utterances';
+const TTS_CACHE_VERSION = 'tts-v8-vieneu-reference-fidelity';
+export const ADAPTIVE_FIT_VERSION = 2;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
@@ -384,6 +386,17 @@ async function writeBufferAtomic(file: string, value: Buffer) {
   }
 }
 
+async function replacePreparedFile(temporary: string, destination: string) {
+  try {
+    await rename(temporary, destination);
+  } catch (error) {
+    // Windows cannot atomically replace an existing destination on every
+    // filesystem. Remove only after the replacement file is fully written.
+    await rm(destination, { force: true });
+    await rename(temporary, destination).catch(() => { throw error; });
+  }
+}
+
 async function readJson<T>(file: string) {
   return JSON.parse(await readFile(file, 'utf8')) as T;
 }
@@ -393,6 +406,15 @@ async function probeDuration(file: string) {
   const seconds = Number(probe.stdout.trim());
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('FFprobe không đọc được thời lượng audio đã tạo.');
   return Math.round(seconds * 1000);
+}
+
+async function probeAudioIntegrity(file: string, signal?: AbortSignal) {
+  const result = await run('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', 'astats=metadata=0:reset=0', '-f', 'null', '-'], signal);
+  const integrity = parseAudioIntegrity(result.stderr);
+  if (integrity.peakLevelDb === Number.NEGATIVE_INFINITY && integrity.maxDifference === 0) {
+    throw new Error(`FFmpeg không thể đo tính toàn vẹn của audio ${path.basename(file)}.`);
+  }
+  return integrity;
 }
 
 function nextCueStart(cues: StoredCue[], cue: StoredCue) {
@@ -468,10 +490,35 @@ async function rewriteTranslation(cue: StoredCue, provider: AIProvider, model: s
 
 export function tempoFilter(tempo: number) {
   const filters: string[] = [];
-  if (Math.abs(tempo - 1) > 0.005) filters.push(`rubberband=tempo=${tempo.toFixed(3)}:pitch=1.000:transients=mixed:detector=compound:phase=laminar:window=standard:smoothing=on:formant=preserved`);
+  // Rubber Band's smoothing mode can emit isolated full-scale polarity jumps
+  // while time-stretching otherwise clean PCM speech. Those impulses survive
+  // mastering as audible crackle. Keep smoothing explicitly disabled.
+  if (Math.abs(tempo - 1) > 0.005) filters.push(`rubberband=tempo=${tempo.toFixed(3)}:pitch=1.000:transients=mixed:detector=compound:phase=laminar:window=standard:smoothing=off:formant=preserved`);
   // Limiting belongs to the completed timeline, not every individual cue.
   // Applying it here and again after mixing caused avoidable pumping/distortion.
   return filters.join(',') || 'anull';
+}
+
+export function fallbackTempoFilter(tempo: number) {
+  return Math.abs(tempo - 1) > 0.005 ? `atempo=${clamp(tempo, 0.5, 2).toFixed(3)}` : 'anull';
+}
+
+export type AudioIntegrity = { peakLevelDb: number; maxDifference: number };
+
+export function parseAudioIntegrity(stderr: string): AudioIntegrity {
+  const values = (label: string) => [...stderr.matchAll(new RegExp(`${label}:\\s*(-?inf|[-+]?\\d+(?:\\.\\d+)?)`, 'gi'))]
+    .map((match) => match[1].toLowerCase() === '-inf' ? Number.NEGATIVE_INFINITY : Number(match[1]))
+    .filter((value) => !Number.isNaN(value));
+  return {
+    peakLevelDb: Math.max(...values('Peak level dB'), Number.NEGATIVE_INFINITY),
+    maxDifference: Math.max(...values('Max difference'), 0),
+  };
+}
+
+export function timeStretchIntroducedArtifacts(source: AudioIntegrity, output: AudioIntegrity) {
+  const newFullScalePeak = output.peakLevelDb >= -0.001 && source.peakLevelDb < -0.05;
+  const newImpulse = output.maxDifference >= 16_384 && output.maxDifference > Math.max(source.maxDifference * 1.5, source.maxDifference + 2_048);
+  return newFullScalePeak || newImpulse;
 }
 
 export function canFitSpeechWithoutCut(ttsDurationMs: number, targetDurationMs: number, maxSpeed = DEFAULTS.hardSpeedMax) {
@@ -586,6 +633,16 @@ async function loadCues(jobId: string) {
 
 async function loadProvider(jobId: string, ref: string) {
   return readJson<AIProvider>(path.join(providerDir(jobId), `${safeName(ref)}.json`));
+}
+
+function ttsCacheFiles(jobId: string, provider: AIProvider, input: StoredCue['input'], text: string) {
+  const speed = clamp(Number(input.speed) || 1, DEFAULTS.minSpeed, DEFAULTS.hardSpeedMax);
+  const cacheKey = createHash('sha256').update(JSON.stringify([TTS_CACHE_VERSION, provider.id, provider.baseUrl, input.model, input.voice, text, speed, 'wav'])).digest('hex');
+  return {
+    speed,
+    rawPath: path.join(cacheDir(jobId), `${cacheKey}.wav`),
+    speechPath: path.join(cacheDir(jobId), `${cacheKey}.speech.wav`),
+  };
 }
 
 export async function createDubbingJob(input: CreateJobInput) {
@@ -748,10 +805,10 @@ class DubbingRunner {
     const rejectedRewrites: string[] = [];
 
     for (let attempt = 0; attempt <= DEFAULTS.maxRewriteAttempts; attempt += 1) {
-      const ttsSpeed = clamp(Number(cue.input.speed) || 1, DEFAULTS.minSpeed, DEFAULTS.hardSpeedMax);
-      const cacheKey = createHash('sha256').update(JSON.stringify([TTS_CACHE_VERSION, provider.id, provider.baseUrl, cue.input.model, cue.input.voice, finalText, ttsSpeed, 'wav'])).digest('hex');
-      rawPath = path.join(cacheDir(this.job.id), `${cacheKey}.wav`);
-      speechPath = path.join(cacheDir(this.job.id), `${cacheKey}.speech.wav`);
+      const cached = ttsCacheFiles(this.job.id, provider, cue.input, finalText);
+      const ttsSpeed = cached.speed;
+      rawPath = cached.rawPath;
+      speechPath = cached.speechPath;
       try {
         await stat(rawPath);
       } catch {
@@ -808,7 +865,7 @@ class DubbingRunner {
     // Preserve a clean, un-stretched speech master. Group-aware fitting runs
     // after all neighboring cue durations are available.
     await run('ffmpeg', ['-y', '-i', speechPath, '-filter:a', tempoFilter(1), '-ar', '48000', '-ac', '2', temporary], this.controller.signal);
-    await rename(temporary, finalPath).catch(async (error) => { await rm(finalPath, { force: true }); await rename(temporary, finalPath).catch(() => { throw error; }); });
+    await replacePreparedFile(temporary, finalPath);
     const finalAudioDurationMs = await probeDuration(finalPath);
     const metadata = metadataFor(cue, timing, finalText, ttsDurationMs, finalAudioDurationMs, rewriteAttempts, 1, warning);
     await this.setCueStatus(cue, 'done', { audioFile: path.relative(jobDir(this.job.id), finalPath), metadata, error: undefined });
@@ -844,21 +901,59 @@ class DubbingRunner {
       audioDurationMs: cue.metadata?.ttsDurationMs || cue.input.endMs - cue.input.startMs,
       targetDurationMs: cue.metadata?.targetDurationMs || cue.input.endMs - cue.input.startMs,
     }))).map((item) => [item.cueId, item.tempo]));
+    const providers = new Map<string, AIProvider>();
     for (const cue of completed) {
-      if (!cue.audioFile || !cue.metadata || cue.metadata.adaptiveFitVersion !== 0) continue;
+      if (!cue.audioFile || !cue.metadata || cue.metadata.adaptiveFitVersion === ADAPTIVE_FIT_VERSION) continue;
       const tempo = adaptiveTempoById.get(cue.id) || 1;
       const sourcePath = path.join(jobDir(this.job.id), cue.audioFile);
+      let provider = providers.get(cue.providerRef);
+      if (!provider) {
+        provider = await loadProvider(this.job.id, cue.providerRef);
+        providers.set(cue.providerRef, provider);
+      }
+      const cleanSpeechPath = ttsCacheFiles(this.job.id, provider, cue.input, cue.metadata.finalDubbingText).speechPath;
+      const cleanSpeech = await stat(cleanSpeechPath).catch(() => undefined);
+      if (cleanSpeech?.isFile()) {
+        const restore = `${sourcePath}.${process.pid}.${Date.now()}.restore.wav`;
+        try {
+          await copyFile(cleanSpeechPath, restore);
+          await replacePreparedFile(restore, sourcePath);
+        } finally {
+          await rm(restore, { force: true });
+        }
+      } else if ((cue.metadata.adaptiveFitVersion ?? 0) > 0) {
+        throw new Error(`Cue ${cue.index} cần bản speech sạch để sửa bản co giãn cũ. Hãy tạo lại voice của cue này.`);
+      }
       if (Math.abs(tempo - 1) > 0.005) {
         const temporary = `${sourcePath}.${process.pid}.${Date.now()}.fit.wav`;
-        await run('ffmpeg', ['-y', '-i', sourcePath, '-filter:a', tempoFilter(tempo), '-ar', '48000', '-ac', '2', temporary], this.controller.signal);
-        await rm(sourcePath, { force: true });
-        await rename(temporary, sourcePath);
+        try {
+          const sourceIntegrity = await probeAudioIntegrity(sourcePath, this.controller.signal);
+          let needsFallback = false;
+          try {
+            await run('ffmpeg', ['-y', '-i', sourcePath, '-filter:a', tempoFilter(tempo), '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', temporary], this.controller.signal);
+            needsFallback = timeStretchIntroducedArtifacts(sourceIntegrity, await probeAudioIntegrity(temporary, this.controller.signal));
+          } catch (error) {
+            if (this.controller.signal.aborted) throw error;
+            needsFallback = true;
+          }
+          if (needsFallback) {
+            await rm(temporary, { force: true });
+            await run('ffmpeg', ['-y', '-i', sourcePath, '-filter:a', fallbackTempoFilter(tempo), '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', temporary], this.controller.signal);
+            const fallbackIntegrity = await probeAudioIntegrity(temporary, this.controller.signal);
+            if (timeStretchIntroducedArtifacts(sourceIntegrity, fallbackIntegrity)) {
+              throw new Error(`Cue ${cue.index} bị biến dạng sau cả hai bộ co giãn audio; AutoSub đã dừng lại thay vì lưu file lỗi.`);
+            }
+          }
+          await replacePreparedFile(temporary, sourcePath);
+        } finally {
+          await rm(temporary, { force: true });
+        }
       }
       cue.metadata = {
         ...cue.metadata,
         speedApplied: tempo,
         finalAudioDurationMs: await probeDuration(sourcePath),
-        adaptiveFitVersion: 1,
+        adaptiveFitVersion: ADAPTIVE_FIT_VERSION,
       };
       await saveCue(this.job.id, cue);
     }
@@ -907,8 +1002,17 @@ class DubbingRunner {
     }
     const listFile = path.join(timelineDir(this.job.id), 'concat.txt');
     await writeFile(listFile, segments.map((file) => `file '${file.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'), 'utf8');
+    const rawFinalPath = path.join(resultDir(this.job.id), 'dub-track-raw.wav');
     const finalPath = path.join(resultDir(this.job.id), 'dub-track.wav');
-    await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', finalPath], this.controller.signal);
+    const masteredTemporary = `${finalPath}.${process.pid}.${Date.now()}.master.wav`;
+    await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', rawFinalPath], this.controller.signal);
+    try {
+      await masterDubFile(rawFinalPath, masteredTemporary, this.controller.signal);
+      await replacePreparedFile(masteredTemporary, finalPath);
+    } finally {
+      await rm(rawFinalPath, { force: true });
+      await rm(masteredTemporary, { force: true });
+    }
     let outputPath = finalPath;
     if (this.job.config.audioMix.separateVocals) {
       if (!this.job.videoId) throw new Error('Tách lời gốc cần video nguồn đã được upload trong Editor.');
@@ -938,7 +1042,7 @@ class DubbingRunner {
     const durationMs = await probeDuration(outputPath);
     const metadata = completed.map((cue) => cue.metadata);
     await writeJsonAtomic(path.join(resultDir(this.job.id), 'metadata.json'), metadata);
-    return { audioFile: path.relative(jobDir(this.job.id), outputPath), metadataFile: path.relative(jobDir(this.job.id), path.join(resultDir(this.job.id), 'metadata.json')), durationMs };
+    return { audioFile: path.relative(jobDir(this.job.id), outputPath), metadataFile: path.relative(jobDir(this.job.id), path.join(resultDir(this.job.id), 'metadata.json')), durationMs, masteringVersion: DUB_MASTERING_VERSION };
   }
 
   private async run() {
@@ -999,6 +1103,20 @@ export async function startDubbingJob(id: string) { const runner = await runnerF
 export async function pauseDubbingJob(id: string) { const runner = runners.get(id); if (runner) runner.pause(); else { const job = await readDubbingJob(id); job.status = 'paused'; await writeJsonAtomic(jobFile(id), job); } return getDubbingJobStatus(id); }
 export async function resumeDubbingJob(id: string) { const runner = await runnerFor(id); runner.resume(); return getDubbingJobStatus(id); }
 export async function cancelDubbingJob(id: string) { const runner = runners.get(id); if (runner) runner.cancel(); else { const job = await readDubbingJob(id); job.status = 'cancelled'; await writeJsonAtomic(jobFile(id), job); } return getDubbingJobStatus(id); }
+export async function rebuildDubbingJobResult(id: string) {
+  if (runners.has(id)) throw new Error('Dubbing job đang chạy, không thể dựng lại kết quả cùng lúc.');
+  const job = await readDubbingJob(id);
+  const cues = await loadCues(id);
+  if (cues.length !== job.totalCues || cues.some((cue) => cue.status !== 'done' || !cue.audioFile || !cue.metadata)) {
+    throw new Error('Chỉ có thể dựng lại kết quả khi toàn bộ cue đã hoàn tất.');
+  }
+  job.status = 'queued';
+  job.currentBatch = 0;
+  job.warnings = [];
+  job.updatedAt = now();
+  await writeJsonAtomic(jobFile(id), job);
+  return startDubbingJob(id);
+}
 export async function retryFailedDubbingJob(id: string) {
   const cues = await loadCues(id);
   for (const cue of cues) if (cue.status === 'failed') {
@@ -1051,11 +1169,48 @@ export async function regenerateDubbingCue(id: string, cueId: string, patch: Par
   return startDubbingJob(id);
 }
 
+const resultMastering = new Map<string, Promise<DubbingJob>>();
+
+async function ensureMasteredDubbingResult(job: DubbingJob) {
+  if (!job.result || (job.result.masteringVersion ?? 0) >= DUB_MASTERING_VERSION) return job;
+  const active = resultMastering.get(job.id);
+  if (active) return active;
+  const task = (async () => {
+    const current = await readDubbingJob(job.id);
+    if (!current.result || (current.result.masteringVersion ?? 0) >= DUB_MASTERING_VERSION) return current;
+    const source = path.join(jobDir(current.id), current.result.audioFile);
+    const masteredName = `dub-track-mastered-v${DUB_MASTERING_VERSION}.wav`;
+    const mastered = path.join(resultDir(current.id), masteredName);
+    const temporary = `${mastered}.${process.pid}.${Date.now()}.tmp.wav`;
+    try {
+      if (!(await stat(mastered).catch(() => undefined))?.isFile()) {
+        await masterDubFile(source, temporary);
+        await rename(temporary, mastered);
+      }
+      current.result = {
+        ...current.result,
+        audioFile: path.relative(jobDir(current.id), mastered),
+        masteringVersion: DUB_MASTERING_VERSION,
+      };
+      current.updatedAt = now();
+      await writeJsonAtomic(jobFile(current.id), current);
+      return current;
+    } finally {
+      await rm(temporary, { force: true });
+    }
+  })().finally(() => resultMastering.delete(job.id));
+  resultMastering.set(job.id, task);
+  return task;
+}
+
 export async function getDubbingResult(id: string) {
-  const job = await readDubbingJob(id);
+  let job = await readDubbingJob(id);
   if (job.status !== 'completed' || !job.result) throw new Error('Dubbing job chưa hoàn tất.');
-  const metadata = await readJson<DubbingMetadata[]>(path.join(jobDir(id), job.result.metadataFile));
-  return { job, metadata, audioFile: path.join(jobDir(id), job.result.audioFile) };
+  job = await ensureMasteredDubbingResult(job);
+  const result = job.result;
+  if (!result) throw new Error('Dubbing job chưa có file kết quả.');
+  const metadata = await readJson<DubbingMetadata[]>(path.join(jobDir(id), result.metadataFile));
+  return { job, metadata, audioFile: path.join(jobDir(id), result.audioFile) };
 }
 
 export async function initializeDubbingJobs() {

@@ -1,3 +1,5 @@
+import { DUB_LOUDNESS_FILTER } from './audioMastering';
+
 export type ExportAudioFilterOptions = {
   hasDub: boolean;
   dubInputIndex?: number;
@@ -9,7 +11,7 @@ export type ExportAudioFilterOptions = {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 const safeLimiter = 'alimiter=limit=0.891:level=false,aresample=48000';
-const normalizeDub = 'loudnorm=I=-16:LRA=11:TP=-1.5';
+const normalizeDub = DUB_LOUDNESS_FILTER;
 
 /**
  * Builds the final export audio graph.

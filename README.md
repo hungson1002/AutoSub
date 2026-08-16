@@ -68,7 +68,7 @@ Edge TTS sử dụng dịch vụ đọc trực tuyến của Microsoft Edge, kh�
 
 ## VieNeu Local Clone
 
-Provider **VieNeu Local Clone** được thêm tự động và chạy trên CPU bằng VieNeu-TTS v3 Turbo/ONNX. Mở mục **Clone giọng** ở thanh bên, tải một mẫu giọng sạch khoảng 3–8 giây, đặt tên và xác nhận bạn sở hữu giọng hoặc đã được người nói cho phép. Sau khi tạo hồ sơ, bạn có thể nghe thử ngay hoặc dùng cùng giọng đó trong cả **Review tự động** và **Lồng tiếng video** bằng cách chọn TTS Provider **VieNeu Local Clone**.
+Provider **VieNeu Local Clone** được thêm tự động và chạy trên CPU bằng VieNeu-TTS v3 Turbo/ONNX. Mở mục **Clone giọng** ở thanh bên, tải một mẫu giọng sạch với một người nói liên tục khoảng 6–10 giây, không nhạc nền hoặc tiếng vang, đặt tên và xác nhận bạn sở hữu giọng hoặc đã được người nói cho phép. Mẫu được giữ ở 48 kHz, cắt im lặng hai đầu và khử nhiễu khi enrollment để giữ màu giọng tốt hơn. Sau khi tạo hồ sơ, bạn có thể nghe thử ngay hoặc dùng cùng giọng đó trong cả **Review tự động** và **Lồng tiếng video** bằng cách chọn TTS Provider **VieNeu Local Clone**.
 
 AutoSub tự tạo môi trường Python 3.12 trong `workdir/vieneu/runtime/` bằng `uv`, cài VieNeu ONNX cùng `kaldi-native-fbank` và tải model ở lần tổng hợp đầu tiên. Nhánh local không cài PyTorch/torchaudio nhiều gigabyte. Giọng đã tạo nằm trong `workdir/voice-clones/vieneu/` và không bị xóa bởi nút dọn file tạm. Mặc định worker dùng 2 luồng CPU, xếp hàng các lượt tổng hợp và tự tắt toàn bộ cây tiến trình sau 45 giây rảnh để trả RAM; có thể đặt `AUTOSUB_VIENEU_THREADS=1` nếu máy yếu.
 

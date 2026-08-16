@@ -17,7 +17,7 @@ export interface ProviderEndpoints {
 }
 
 export interface AIVoice { id: string; name?: string; language?: string; resourceId?: string; }
-export interface VoiceCloneProfile { id: string; name: string; language: 'vi-VN'; durationMs: number; createdAt: string; sourceName: string; authorized: true; }
+export interface VoiceCloneProfile { id: string; name: string; language: 'vi-VN'; durationMs: number; createdAt: string; sourceName: string; authorized: true; referenceVersion?: number; }
 
 export interface SubtitleCue {
   id: string;
@@ -68,7 +68,7 @@ export interface DubbingJobStatus {
   progressPercent: number;
   failedCueIds: string[];
   failedCueErrors: Array<{ id: string; index: number; stage: 'pending' | 'translating' | 'rewriting' | 'tts' | 'fitting' | 'done' | 'failed'; attempts: number; error: string }>;
-  result?: { audioFile: string; metadataFile: string; durationMs: number };
+  result?: { audioFile: string; metadataFile: string; durationMs: number; masteringVersion?: number };
 }
 
 export interface AIModel { id: string; name?: string; capabilities?: ProviderCapabilities; raw?: unknown; }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent, PointerEvent } from 'react';
 import type { BlurRegion, LogoOverlay, SubtitleCue, SubtitleStyle, VideoAspectRatio, VideoAsset, VideoEditState } from '../types';
 import { defaultStyle } from '../types';
@@ -121,17 +121,20 @@ export function VideoPlayer({ asset, cues, style = defaultStyle, blurRegions = [
   const cueIndex = useMemo(() => buildActiveCueIndex(cues), [cues]);
   const [activeCueId, setActiveCueId] = useState<string>();
   const activeCue = useMemo(() => activeCueId ? cues.find((cue) => cue.id === activeCueId) : undefined, [activeCueId, cues]);
+  const originalMixVolume = dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals ? dubAudioMix.originalVolume : 0;
+  const playingDub = audioMode === 'dubbed' && Boolean(dubAudioUrl);
+  const muteOriginal = playingDub && originalMixVolume <= 0;
   const syncActiveCue = useCallback((nextTimeMs: number) => {
     const nextId = findActiveCue(cueIndex, nextTimeMs)?.id;
     setActiveCueId((current) => current === nextId ? current : nextId);
   }, [cueIndex]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const originalMixVolume = dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals ? dubAudioMix.originalVolume : 0;
-    video.volume = audioMode === 'dubbed' && dubAudioUrl ? Math.min(1, volume * originalMixVolume) : volume;
-  }, [volume, audioMode, dubAudioUrl, dubAudioMix]);
+    video.muted = muteOriginal;
+    video.volume = playingDub && originalMixVolume > 0 ? Math.min(1, volume * originalMixVolume) : volume;
+  }, [volume, playingDub, muteOriginal, originalMixVolume]);
   useEffect(() => {
     const video = videoRef.current;
     const audio = dubAudioRef.current;

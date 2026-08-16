@@ -5,6 +5,7 @@ import type { AIProvider } from '../types';
 import { ProviderError, synthesize } from '../adapters';
 import { resolveProviderType } from '../providers/base';
 import { cachedTtsPreview } from '../services/ttsPreviewCache';
+import { DUB_MASTERING_VERSION, masterDubBuffer } from '../services/audioMastering';
 import {
   cancelDubbingJob,
   createDubbingJob,
@@ -44,9 +45,9 @@ export async function dubbingRoutes(app: FastifyInstance) {
     try {
       const text = body.text?.trim() || 'This is an AutoSub voice test.';
       const speed = Math.round((Number(body.speed) || 1) * 100) / 100;
-      const key = createHash('sha256').update(JSON.stringify({ providerId: body.provider.id, providerType: resolveProviderType(body.provider), baseUrl: body.provider.baseUrl, apiKey: body.provider.apiKey || '', model: body.model, voice: body.voice || '', speed, text })).digest('hex');
-      const result = await cachedTtsPreview(key, () => synthesize(body.provider!, body.model!, body.voice || '', text, { speed, format: 'wav' }));
-      reply.header('Content-Type', ['elevenlabs', 'edge-tts'].includes(resolveProviderType(body.provider)) ? 'audio/mpeg' : 'audio/wav');
+      const key = createHash('sha256').update(JSON.stringify({ masteringVersion: DUB_MASTERING_VERSION, providerId: body.provider.id, providerType: resolveProviderType(body.provider), baseUrl: body.provider.baseUrl, apiKey: body.provider.apiKey || '', model: body.model, voice: body.voice || '', speed, text })).digest('hex');
+      const result = await cachedTtsPreview(key, async () => masterDubBuffer(await synthesize(body.provider!, body.model!, body.voice || '', text, { speed, format: 'wav' })));
+      reply.header('Content-Type', 'audio/wav');
       reply.header('X-AutoSub-Preview-Cache', result.cache);
       return reply.send(result.audio);
     } catch (error) {

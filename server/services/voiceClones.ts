@@ -10,6 +10,9 @@ export const MAX_VOICE_REFERENCE_BYTES = 25 * 1024 * 1024;
 export const MIN_VOICE_REFERENCE_SECONDS = 3;
 export const MAX_VOICE_REFERENCE_SECONDS = 15;
 const NORMALIZED_REFERENCE_SECONDS = 8;
+export const VOICE_REFERENCE_VERSION = 2;
+export const VOICE_REFERENCE_SAMPLE_RATE = 48_000;
+export const VOICE_REFERENCE_FILTER = 'silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.10:start_threshold=-45dB,areverse,loudnorm=I=-20:LRA=7:TP=-3';
 
 export interface VoiceCloneProfile {
   id: string;
@@ -19,6 +22,7 @@ export interface VoiceCloneProfile {
   createdAt: string;
   sourceName: string;
   authorized: true;
+  referenceVersion?: number;
 }
 
 const validProfileId = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
@@ -90,7 +94,8 @@ export async function createVoiceCloneProfile(input: { name: string; sourcePath:
   try {
     await run('ffmpeg', [
       '-y', '-v', 'error', '-i', input.sourcePath,
-      '-vn', '-t', String(NORMALIZED_REFERENCE_SECONDS), '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', referencePath,
+      '-vn', '-filter:a', VOICE_REFERENCE_FILTER, '-t', String(NORMALIZED_REFERENCE_SECONDS),
+      '-ac', '1', '-ar', String(VOICE_REFERENCE_SAMPLE_RATE), '-c:a', 'pcm_s16le', referencePath,
     ]);
     const normalizedDuration = await probeDurationSeconds(referencePath);
     if (normalizedDuration < MIN_VOICE_REFERENCE_SECONDS) throw new ProviderError('Sau khi chuẩn hóa, mẫu giọng còn quá ngắn.', 400);
@@ -102,6 +107,7 @@ export async function createVoiceCloneProfile(input: { name: string; sourcePath:
       createdAt: new Date().toISOString(),
       sourceName: path.basename(input.sourceName || 'voice-reference'),
       authorized: true,
+      referenceVersion: VOICE_REFERENCE_VERSION,
     };
     await writeFile(path.join(staging, 'profile.json'), JSON.stringify(profile, null, 2), 'utf8');
     await rename(staging, destination);

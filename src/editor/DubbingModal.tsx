@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AIProvider, DubbingJobStatus, OriginalAudioMode, PronunciationEntry, ProviderAssignment, SubtitleCue, VoiceGroup } from '../types';
 import { api, friendlyErrorMessage } from '../lib/api';
 import { AssignmentSummary } from '../components/AssignmentSummary';
@@ -35,6 +35,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const voiceDropdownId = useRef<DropdownId>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const previewRequestRef = useRef(0);
   const previewCacheRef = useRef(new Map<string, Blob>());
   const assignmentOptions = availableAssignments.length ? availableAssignments : [assignments.G1];
   const current = configs[active];
@@ -55,15 +56,19 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const patchCurrent = (patch: Partial<VoiceConfig>) => setConfigs((value) => ({ ...value, [active]: { ...value[active], ...patch } }));
   const addPronunciation = () => onPronunciationChange([...pronunciation, { id: crypto.randomUUID(), source: '', reading: '', enabled: true }]);
 
-  const stopPreview = () => {
+  const stopPreview = useCallback(() => {
+    previewRequestRef.current += 1;
     audioRef.current?.pause();
     audioRef.current = null;
     if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
     audioUrlRef.current = null;
     setPreviewingVoice(undefined);
-  };
+  }, []);
 
-  useEffect(() => () => stopPreview(), []);
+  useEffect(() => {
+    if (!open) stopPreview();
+  }, [open, stopPreview]);
+  useEffect(() => () => stopPreview(), [stopPreview]);
   useEffect(() => {
     if (!open) return;
     setConfigs((currentConfigs) => Object.fromEntries(groups.map((group) => {
@@ -107,6 +112,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
     if (!current.assignment.providerId || !current.assignment.model) { notify('Cấu hình TTS còn thiếu provider hoặc model.', 'error'); return; }
     if (!voiceId || !currentProvider) { notify('Hãy chọn Voice ID trước khi nghe thử.', 'error'); return; }
     stopPreview();
+    const previewRequest = previewRequestRef.current;
     setPreviewingVoice(voiceId);
     try {
       const previewText = isGroq ? 'Hello, this is a voice test.' : 'Xin chào, đây là giọng thử.';
@@ -118,6 +124,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
         previewCacheRef.current.set(cacheKey, blob);
         while (previewCacheRef.current.size > 24) previewCacheRef.current.delete(previewCacheRef.current.keys().next().value as string);
       }
+      if (previewRequestRef.current !== previewRequest) return;
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audioRef.current = audio;
@@ -126,8 +133,10 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
       audio.onended = finish;
       audio.onerror = finish;
       await audio.play();
+      if (previewRequestRef.current !== previewRequest) return;
       notify(cached ? `Phát ngay bản thử đã lưu của ${voiceId}.` : `Đã lưu bản thử giọng ${voiceId} để nghe lại nhanh.`);
     } catch (error) {
+      if (previewRequestRef.current !== previewRequest) return;
       stopPreview();
       notify(friendlyErrorMessage(error, 'Test voice thất bại.'), 'error');
     }
@@ -168,7 +177,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
           {isGroq && <small className="field-help">Groq Orpheus hiện dành cho giọng English/Arabic; test voice dùng câu tiếng Anh.</small>}
           {isElevenLabs && !voiceItems.length && <small className="field-help">Chưa có voice cache. Hãy lấy voices trong Cài đặt hoặc nhập Voice ID thủ công.</small>}
         </div>
-        <div className="two-fields"><div className="field"><span>Tốc độ TTS <b className="value-badge">{current.speed.toFixed(2)}x</b></span><RangeInput min={0.9} max={1.2} step={0.05} value={current.speed} onChange={(event) => patchCurrent({ speed: Number(event.target.value) })} /></div><div className="field"><span>Âm lượng <b className="value-badge">{Math.round(current.volume * 100)}%</b></span><RangeInput min={0} max={1} step={0.05} value={current.volume} onChange={(event) => patchCurrent({ volume: Number(event.target.value) })} /></div></div>
+        <div className="two-fields"><div className="field"><span>Tốc độ TTS <b className="value-badge">{current.speed.toFixed(2)}x</b></span><RangeInput min={0.9} max={1.2} step={0.05} value={current.speed} onChange={(event) => patchCurrent({ speed: Number(event.target.value) })} /></div><div className="field"><span>Âm lượng <b className="value-badge">{Math.round(current.volume * 100)}%</b></span><RangeInput min={0} max={2} step={0.05} value={current.volume} onChange={(event) => patchCurrent({ volume: Number(event.target.value) })} /><small className="field-help">100% là mức chuẩn hóa; có thể tăng đến 200% cho riêng nhóm giọng này.</small></div></div>
         <button className="button ghost" disabled={testing || Boolean(previewingVoice)} onClick={() => void testVoice()}><CirclePlay size={15} /> {testing ? 'Đang test…' : 'Nghe thử voice'}</button>
       </div>
       <div className="audio-mix">

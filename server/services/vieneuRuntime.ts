@@ -294,11 +294,11 @@ export async function synthesizeWithVieneu(text: string, referencePath: string, 
   const repairedOutput = path.join(TEMP_ROOT, `${id}.repaired.wav`);
   const finalOutput = path.join(TEMP_ROOT, `${id}.wav`);
   try {
-    await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: rawOutput, temperature: 0.75 }, signal);
+    await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: rawOutput, temperature: 0.55 }, signal);
     let selectedOutput = rawOutput;
     let selectedQuality = usesShortUtteranceQualityPass(content) ? await vieneuAudioQuality(rawOutput, signal) : undefined;
     if (selectedQuality?.score) {
-      await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: retryOutput, temperature: 0.52 }, signal);
+      await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: retryOutput, temperature: 0.42 }, signal);
       const retryQuality = await vieneuAudioQuality(retryOutput, signal);
       if (retryQuality.score < selectedQuality.score) {
         selectedOutput = retryOutput;

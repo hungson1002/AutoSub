@@ -41,6 +41,7 @@ const jobFile = (id: string) => path.join(jobDirectory(id), 'job.json');
 const resultFile = (id: string) => path.join(jobDirectory(id), 'result', 'review.mp4');
 const subtitleFile = (id: string) => path.join(jobDirectory(id), 'result', 'review.srt');
 const reviewThreads = String(Math.round(clamp(Number(process.env.AUTOSUB_REVIEW_THREADS || 4), 1, 16)));
+const maxPlanGenerationAttempts = 4;
 
 async function writeJsonAtomic(file: string, value: unknown) {
   await mkdir(path.dirname(file), { recursive: true });
@@ -110,6 +111,39 @@ export function targetWordsFromMeasuredPace(targetDurationSeconds: number, sampl
 
 function narrationWordCount(plan: ReviewPlan) {
   return plan.segments.reduce((total, segment) => total + segment.narration.split(/\s+/).filter(Boolean).length, 0);
+}
+
+export function reviewPlanLengthStats(plan: ReviewPlan, targetDurationSeconds: number, expectedWords = targetNarrationWords(targetDurationSeconds)) {
+  const expectedSegments = Math.round(targetDurationSeconds / 8.5);
+  return {
+    words: narrationWordCount(plan),
+    expectedWords,
+    minimumWords: Math.round(expectedWords * 0.92),
+    maximumWords: Math.round(expectedWords * 1.12),
+    segments: plan.segments.length,
+    expectedSegments,
+    minimumSegments: Math.round(expectedSegments * 0.78),
+  };
+}
+
+export function buildReviewPlanRepairInstruction(plan: ReviewPlan | undefined, targetDurationSeconds: number, expectedWords: number, validationError: string) {
+  if (!plan) {
+    return `JSON trước không đọc được hoặc không có segment hợp lệ: ${validationError}. Hãy tạo lại toàn bộ JSON đúng schema, dùng đúng các trường sourceStartMs, sourceEndMs và narration.`;
+  }
+  const stats = reviewPlanLengthStats(plan, targetDurationSeconds, expectedWords);
+  const instructions = [`Bản trước có ${stats.words} từ/${stats.expectedWords} từ mục tiêu và ${stats.segments}/${stats.expectedSegments} cảnh.`];
+  if (stats.words > stats.maximumWords) {
+    const removeWords = stats.words - stats.expectedWords;
+    const reductionPercent = Math.max(1, Math.round((removeWords / Math.max(stats.words, 1)) * 100));
+    instructions.push(`Hãy rút bớt khoảng ${removeWords} từ (${reductionPercent}%), đưa tổng lời kể về sát ${stats.expectedWords} từ; rút gọn câu và chi tiết phụ nhưng phải giữ mở đầu, cao trào, kết cục và thứ tự cốt truyện.`);
+  } else if (stats.words < stats.minimumWords) {
+    instructions.push(`Hãy bổ sung khoảng ${stats.expectedWords - stats.words} từ bằng các diễn biến có thật trong nguồn, đưa tổng lời kể về sát ${stats.expectedWords} từ; không lặp ý và không bịa cảnh.`);
+  }
+  if (stats.segments < stats.minimumSegments) {
+    instructions.push(`Hãy tăng lên ít nhất ${stats.minimumSegments} cảnh bằng cách tách các hành động có thật thành segment riêng với timestamp không trùng.`);
+  }
+  instructions.push(`Kết quả mới phải nằm trong ${stats.minimumWords}–${stats.maximumWords} từ, có tối thiểu ${stats.minimumSegments} cảnh và là một JSON hoàn chỉnh. Lỗi validate trước: ${validationError}`);
+  return instructions.join(' ');
 }
 
 export function buildReviewPrompt(input: Pick<CreateReviewJobInput, 'targetDurationSeconds' | 'tone' | 'customPrompt' | 'movieTitle' | 'characterGuide'>, sourceDurationMs: number, transcript: string, bible?: CharacterBible, visualStory = '', requestedTargetWords?: number) {
@@ -254,13 +288,9 @@ export function parseReviewPlan(value: string | unknown, sourceDurationMs: numbe
 }
 
 export function validateReviewPlanLength(plan: ReviewPlan, targetDurationSeconds: number, expectedWords = targetNarrationWords(targetDurationSeconds)) {
-  const words = narrationWordCount(plan);
-  const expectedSegments = Math.round(targetDurationSeconds / 8.5);
-  const minimumWords = Math.round(expectedWords * 0.92);
-  const maximumWords = Math.round(expectedWords * 1.12);
-  const minimumSegments = Math.round(expectedSegments * 0.78);
-  if (words < minimumWords || words > maximumWords || plan.segments.length < minimumSegments) {
-    throw new Error(`Kịch bản sai độ dài: ${words}/${expectedWords} từ và ${plan.segments.length}/${expectedSegments} cảnh. Cần ${minimumWords}–${maximumWords} từ và tối thiểu ${minimumSegments} cảnh để bám thời lượng đã chọn.`);
+  const stats = reviewPlanLengthStats(plan, targetDurationSeconds, expectedWords);
+  if (stats.words < stats.minimumWords || stats.words > stats.maximumWords || stats.segments < stats.minimumSegments) {
+    throw new Error(`Kịch bản sai độ dài: ${stats.words}/${stats.expectedWords} từ và ${stats.segments}/${stats.expectedSegments} cảnh. Cần ${stats.minimumWords}–${stats.maximumWords} từ và tối thiểu ${stats.minimumSegments} cảnh để bám thời lượng đã chọn.`);
   }
   return plan;
 }
@@ -311,33 +341,63 @@ async function measureNarrationTargetWords(input: CreateReviewJobInput, director
   }
 }
 
-async function generatePlan(input: CreateReviewJobInput, sourceDurationMs: number, transcript: string, visualStory: string, targetWords: number, signal: AbortSignal) {
-  const bible = await generateCharacterBible(input, transcript, visualStory, signal);
-  const prompt = buildReviewPrompt(input, sourceDurationMs, transcript, bible, visualStory, targetWords);
+async function requestValidPlan(input: CreateReviewJobInput, jobId: string, sourceDurationMs: number, targetWords: number, bible: CharacterBible, prompt: ReturnType<typeof buildReviewPrompt>, signal: AbortSignal, options: { progressPercent: number; filePrefix: string; stageLabel: string; userSuffix?: string }) {
   const maxTokens = Math.round(clamp(input.targetDurationSeconds * 10, 4_096, 16_384));
-  const first = await chat(input.script.provider, input.script.model, [{ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user }], signal, maxTokens);
-  try {
-    return { ...validateReviewPlanLength(parseReviewPlan(first, sourceDurationMs), input.targetDurationSeconds, targetWords), movieTitle: bible.movieTitle, characters: bible.characters };
-  } catch (error) {
-    const repair = await chat(input.script.provider, input.script.model, [
-      { role: 'system', content: `${prompt.system}\nKết quả trước không hợp lệ. Hãy viết lại toàn bộ JSON, đạt đúng số từ/cảnh đã yêu cầu, không giải thích thêm.` },
-      { role: 'user', content: `Lỗi validate: ${error instanceof Error ? error.message : String(error)}\n\nKết quả cần sửa:\n${first.slice(0, 30_000)}` },
+  const attemptsDirectory = path.join(jobDirectory(jobId), 'script-attempts');
+  await mkdir(attemptsDirectory, { recursive: true });
+  let previousResponse = '';
+  let repairInstruction = '';
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxPlanGenerationAttempts; attempt += 1) {
+    throwIfCancelled(signal);
+    if (attempt > 1) {
+      await patchJob(jobId, {
+        stage: `AI đang tự chỉnh ${options.stageLabel} (${attempt}/${maxPlanGenerationAttempts})`,
+        progressPercent: options.progressPercent,
+      });
+    }
+    const correction = attempt > 1
+      ? `\n\nYÊU CẦU SỬA BẮT BUỘC:\n${repairInstruction}\nKhông giải thích; trả về lại toàn bộ JSON đã sửa.`
+      : '';
+    const previousDraft = attempt > 1
+      ? `\n\nBẢN JSON TRƯỚC CẦN SỬA:\n${previousResponse}`
+      : '';
+    const response = await chat(input.script.provider, input.script.model, [
+      { role: 'system', content: `${prompt.system}${correction}` },
+      { role: 'user', content: `${prompt.user}${options.userSuffix || ''}${previousDraft}${correction}` },
     ], signal, maxTokens);
-    return { ...validateReviewPlanLength(parseReviewPlan(repair, sourceDurationMs), input.targetDurationSeconds, targetWords), movieTitle: bible.movieTitle, characters: bible.characters };
+    previousResponse = response;
+    await writeFile(path.join(attemptsDirectory, `${options.filePrefix}-${String(attempt).padStart(2, '0')}.response.txt`), response, 'utf8');
+
+    let parsed: ReviewPlan | undefined;
+    try {
+      parsed = parseReviewPlan(response, sourceDurationMs);
+      validateReviewPlanLength(parsed, input.targetDurationSeconds, targetWords);
+      return { ...parsed, movieTitle: bible.movieTitle, characters: bible.characters };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      repairInstruction = buildReviewPlanRepairInstruction(parsed, input.targetDurationSeconds, targetWords, lastError.message);
+      await writeFile(path.join(attemptsDirectory, `${options.filePrefix}-${String(attempt).padStart(2, '0')}.error.txt`), repairInstruction, 'utf8');
+    }
   }
+
+  throw new Error(`${lastError?.message || 'AI không tạo được kịch bản hợp lệ.'} AI đã tự chỉnh ${maxPlanGenerationAttempts - 1} lần nhưng vẫn chưa đạt; các bản nháp đã được lưu để chẩn đoán.`);
 }
 
-async function revisePlanForMeasuredDuration(input: CreateReviewJobInput, sourceDurationMs: number, transcript: string, visualStory: string, plan: ReviewPlan, measuredDurationMs: number, signal: AbortSignal) {
+async function generatePlan(input: CreateReviewJobInput, jobId: string, sourceDurationMs: number, transcript: string, visualStory: string, targetWords: number, signal: AbortSignal) {
+  const bible = await generateCharacterBible(input, transcript, visualStory, signal);
+  const prompt = buildReviewPrompt(input, sourceDurationMs, transcript, bible, visualStory, targetWords);
+  return requestValidPlan(input, jobId, sourceDurationMs, targetWords, bible, prompt, signal, { progressPercent: 41, filePrefix: 'initial', stageLabel: 'kịch bản' });
+}
+
+async function revisePlanForMeasuredDuration(input: CreateReviewJobInput, jobId: string, sourceDurationMs: number, transcript: string, visualStory: string, plan: ReviewPlan, measuredDurationMs: number, signal: AbortSignal) {
   const measuredWordsPerSecond = narrationWordCount(plan) / Math.max(measuredDurationMs / 1000, 1);
   const targetWords = Math.round(clamp(measuredWordsPerSecond * input.targetDurationSeconds, input.targetDurationSeconds * 0.9, input.targetDurationSeconds * 4.4));
   const bible: CharacterBible = { movieTitle: plan.movieTitle || input.movieTitle || 'Chưa xác định', characters: plan.characters || [] };
   const prompt = buildReviewPrompt(input, sourceDurationMs, transcript, bible, visualStory, targetWords);
-  const maxTokens = Math.round(clamp(input.targetDurationSeconds * 10, 4_096, 16_384));
-  const response = await chat(input.script.provider, input.script.model, [
-    { role: 'system', content: `${prompt.system}\nBản trước đã được TTS đo thực tế và sai thời lượng. Hãy viết lại JSON với ${targetWords} từ, thêm/bớt sự kiện có thật thay vì kéo dài câu hoặc lặp ý.` },
-    { role: 'user', content: `${prompt.user}\n\nBẢN TRƯỚC DÀI ${(measuredDurationMs / 60_000).toFixed(1)} PHÚT, MỤC TIÊU ${(input.targetDurationSeconds / 60).toFixed(1)} PHÚT:\n${JSON.stringify(plan).slice(0, 45_000)}` },
-  ], signal, maxTokens);
-  return { ...validateReviewPlanLength(parseReviewPlan(response, sourceDurationMs), input.targetDurationSeconds, targetWords), movieTitle: bible.movieTitle, characters: bible.characters };
+  const userSuffix = `\n\nBẢN TRƯỚC ĐÃ ĐƯỢC TTS ĐO DÀI ${(measuredDurationMs / 60_000).toFixed(1)} PHÚT, MỤC TIÊU ${(input.targetDurationSeconds / 60).toFixed(1)} PHÚT. Hãy viết lại với ${targetWords} từ, thêm/bớt sự kiện có thật thay vì kéo dài câu hoặc lặp ý:\n${JSON.stringify(plan)}`;
+  return requestValidPlan(input, jobId, sourceDurationMs, targetWords, bible, prompt, signal, { progressPercent: 61, filePrefix: 'measured', stageLabel: 'kịch bản theo thời lượng giọng đọc', userSuffix });
 }
 
 async function synthesizeNarration(input: CreateReviewJobInput, jobId: string, plan: ReviewPlan, signal: AbortSignal, progressStart = 42, progressEnd = 65) {
@@ -555,7 +615,7 @@ async function executeReviewJob(id: string, input: CreateReviewJobInput, signal:
     await patchJob(id, { status: 'scripting', stage: 'Đang đo tốc độ thật của giọng đọc', progressPercent: 40 });
     const measuredTargetWords = await measureNarrationTargetWords(input, jobDirectory(id), signal);
     await patchJob(id, { status: 'scripting', stage: 'Đang ghép hình ảnh, lời thoại và hồ sơ nhân vật', progressPercent: 41 });
-    let plan = await generatePlan(input, sourceDurationMs, transcript, visualStory, measuredTargetWords, signal);
+    let plan = await generatePlan(input, id, sourceDurationMs, transcript, visualStory, measuredTargetWords, signal);
     await writeJsonAtomic(path.join(jobDirectory(id), 'plan.json'), plan);
     await patchJob(id, { plan, progressPercent: 42 });
     throwIfCancelled(signal);
@@ -565,7 +625,7 @@ async function executeReviewJob(id: string, input: CreateReviewJobInput, signal:
     let measuredRatio = narrationDurationRatio(narrated, input.targetDurationSeconds);
     if (measuredRatio < 0.94 || measuredRatio > 1.08) {
       await patchJob(id, { status: 'scripting', stage: `Đang sửa kịch bản theo thời lượng giọng thật (${Math.round(measuredRatio * 100)}%)`, progressPercent: 61 });
-      plan = await revisePlanForMeasuredDuration(input, sourceDurationMs, transcript, visualStory, plan, narrated.reduce((sum, item) => sum + item.audioDurationMs, 0), signal);
+      plan = await revisePlanForMeasuredDuration(input, id, sourceDurationMs, transcript, visualStory, plan, narrated.reduce((sum, item) => sum + item.audioDurationMs, 0), signal);
       await writeJsonAtomic(path.join(jobDirectory(id), 'plan.json'), plan);
       await patchJob(id, { status: 'voicing', stage: 'Đang tạo lại giọng đọc theo kịch bản đã căn thời lượng', plan, progressPercent: 62 });
       narrated = await synthesizeNarration(input, id, plan, signal, 62, 66);

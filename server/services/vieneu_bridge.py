@@ -95,7 +95,10 @@ def enrolled_voice(reference_path: str) -> dict[str, Any]:
         return cached[1]
     tts = get_tts()
     with contextlib.redirect_stdout(sys.stderr):
-        speaker_emb, codes = tts.encode_reference(reference, denoise=False)
+        # Reference profiles are levelled and edge-trimmed on upload, while the
+        # model denoiser removes steady room noise before both the speaker
+        # embedding and reference codes are extracted.
+        speaker_emb, codes = tts.encode_reference(reference, denoise=True)
     voice = {"speaker_emb": speaker_emb, "codes": codes}
     _voice_cache.clear()
     _voice_cache[key] = (modified, voice)
@@ -125,8 +128,8 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
             show_progress=False,
             apply_watermark=True,
             temperature=temperature,
-            top_k=25,
-            top_p=0.95,
+            top_k=20,
+            top_p=0.90,
             repetition_penalty=1.2,
         )
         tts.save(audio, str(output))

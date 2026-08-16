@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { ProviderError } from '../adapters/errors';
 import { run } from './ffmpeg';
-import { createVoiceCloneProfile, deleteVoiceCloneProfile, listVoiceCloneProfiles, resolveVoiceCloneReference } from './voiceClones';
+import { createVoiceCloneProfile, deleteVoiceCloneProfile, listVoiceCloneProfiles, resolveVoiceCloneReference, VOICE_REFERENCE_SAMPLE_RATE, VOICE_REFERENCE_VERSION } from './voiceClones';
 
 test('voice clone profile requires explicit authorization', async () => {
   await assert.rejects(
@@ -24,11 +24,14 @@ test('voice clone profile normalizes, lists, resolves and deletes a reference', 
     profileId = profile.id;
     assert.equal(profile.name, 'Test Voice');
     assert.equal(profile.authorized, true);
+    assert.equal(profile.referenceVersion, VOICE_REFERENCE_VERSION);
     assert.ok(profile.durationMs >= 3_000);
     assert.ok((await listVoiceCloneProfiles()).some((item) => item.id === profile.id));
     const resolved = await resolveVoiceCloneReference(profile.id);
     assert.equal(resolved.profile.id, profile.id);
     assert.equal(path.basename(resolved.referencePath), 'reference.wav');
+    const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=sample_rate', '-of', 'default=nw=1:nk=1', resolved.referencePath]);
+    assert.equal(Number(probe.stdout.trim()), VOICE_REFERENCE_SAMPLE_RATE);
     await deleteVoiceCloneProfile(profile.id);
     profileId = '';
     await assert.rejects(() => resolveVoiceCloneReference(profile.id || profile.id), (error: unknown) => error instanceof ProviderError && error.status === 404);

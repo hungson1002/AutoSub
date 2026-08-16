@@ -41,7 +41,7 @@ test('dubbing result streams from disk and supports HTTP Range 206', async () =>
     const persisted = JSON.parse(await readFile(jobPath, 'utf8')) as Record<string, unknown>;
     persisted.status = 'completed';
     persisted.doneCues = 1;
-    persisted.result = { audioFile: 'result/track.wav', metadataFile: 'result/metadata.json', durationMs: 1000 };
+    persisted.result = { audioFile: 'result/track.wav', metadataFile: 'result/metadata.json', durationMs: 1000, masteringVersion: 1 };
     await writeFile(jobPath, JSON.stringify(persisted), 'utf8');
 
     await dubbingRoutes(app);
