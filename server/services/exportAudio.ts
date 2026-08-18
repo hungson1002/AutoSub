@@ -1,4 +1,4 @@
-import { DUB_LOUDNESS_FILTER } from './audioMastering';
+import { DUB_LOUDNESS_FILTER } from "./audioMastering";
 
 export type ExportAudioFilterOptions = {
   hasDub: boolean;
@@ -9,8 +9,9 @@ export type ExportAudioFilterOptions = {
   jobDubIncludesBackground?: boolean;
 };
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
-const safeLimiter = 'alimiter=limit=0.891:level=false,aresample=48000';
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+const safeLimiter = "alimiter=limit=0.891:level=false,aresample=48000";
 const normalizeDub = DUB_LOUDNESS_FILTER;
 
 /**
@@ -30,21 +31,31 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
   } = options;
 
   if (hasDub) {
-    if (dubInputIndex === undefined) throw new Error('Thiếu audio input của dub track.');
+    if (dubInputIndex === undefined)
+      throw new Error("Thiếu audio input của dub track.");
     if (jobDubIncludesBackground) {
       return `[${dubInputIndex}:a]${normalizeDub},${safeLimiter},apad[audioout]`;
     }
     if (backgroundInputIndex !== undefined) {
-      const volume = clamp(Number(options.originalVolume ?? 0.35), 0, 1).toFixed(3);
+      const volume = clamp(
+        Number(options.originalVolume ?? 0.35),
+        0,
+        1,
+      ).toFixed(3);
       return `[${backgroundInputIndex}:a]volume=${volume}[background];[${dubInputIndex}:a]${normalizeDub}[dub];[background][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,${safeLimiter},apad[audioout]`;
     }
     if (keepAudio) {
-      const volume = clamp(Number(options.originalVolume ?? 0.25), 0, 1).toFixed(3);
+      const volume = clamp(
+        Number(options.originalVolume ?? 0.25),
+        0,
+        1,
+      ).toFixed(3);
       return `[0:a]volume=${volume}[original];[${dubInputIndex}:a]${normalizeDub}[dub];[original][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,${safeLimiter},apad[audioout]`;
     }
     return `[${dubInputIndex}:a]${normalizeDub},${safeLimiter},apad[audioout]`;
   }
 
-  if (backgroundInputIndex !== undefined) return `[${backgroundInputIndex}:a]anull[audioout]`;
-  return keepAudio ? '[0:a]anull[audioout]' : '';
+  if (backgroundInputIndex !== undefined)
+    return `[${backgroundInputIndex}:a]anull[audioout]`;
+  return keepAudio ? "[0:a]anull[audioout]" : "";
 }

@@ -1,30 +1,93 @@
-import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import type { FastifyInstance } from 'fastify';
-import { run, ensureWorkdir, workdir } from '../services/ffmpeg';
-import { getDubbingResult } from '../services/dubbingJobs';
-import { buildExportAudioFilter } from '../services/exportAudio';
-import { DUB_LOUDNESS_FILTER } from '../services/audioMastering';
-import { cleanupUploadSession, createUploadSession, discardUploadStream, persistUploadStream, resolveUpload, safeUploadName, UploadTooLargeError } from '../services/uploads';
+import { createReadStream } from "node:fs";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import path from "node:path";
+import type { FastifyInstance } from "fastify";
+import { run, ensureWorkdir, workdir } from "../services/ffmpeg";
+import { getDubbingResult } from "../services/dubbingJobs";
+import { buildExportAudioFilter } from "../services/exportAudio";
+import { DUB_LOUDNESS_FILTER } from "../services/audioMastering";
+import {
+  cleanupUploadSession,
+  createUploadSession,
+  discardUploadStream,
+  persistUploadStream,
+  resolveUpload,
+  safeUploadName,
+  UploadTooLargeError,
+} from "../services/uploads";
 
 type Fields = Record<string, string>;
-type Region = { xPercent: number; yPercent: number; widthPercent: number; heightPercent: number; startMs: number; endMs: number; blurStrength: number; borderRadius?: number; mode?: 'blur' | 'neighbor' };
-type Logo = { xPercent: number; yPercent: number; widthPercent: number; opacity: number };
-type CropRegion = { xPercent: number; yPercent: number; widthPercent: number; heightPercent: number };
-type VideoEdit = { aspectRatio?: 'original' | '16:9' | '9:16' | '1:1' | '4:5'; trimStartMs?: number; trimEndMs?: number; crop?: CropRegion };
-type ExportProgress = { percent: number; stage: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; error?: string; updatedAt: number };
+type Region = {
+  xPercent: number;
+  yPercent: number;
+  widthPercent: number;
+  heightPercent: number;
+  startMs: number;
+  endMs: number;
+  blurStrength: number;
+  borderRadius?: number;
+  mode?: "blur" | "neighbor";
+};
+type Logo = {
+  xPercent: number;
+  yPercent: number;
+  widthPercent: number;
+  opacity: number;
+};
+type CropRegion = {
+  xPercent: number;
+  yPercent: number;
+  widthPercent: number;
+  heightPercent: number;
+};
+type VideoEdit = {
+  aspectRatio?: "original" | "16:9" | "9:16" | "1:1" | "4:5";
+  trimStartMs?: number;
+  trimEndMs?: number;
+  crop?: CropRegion;
+};
+type ExportProgress = {
+  percent: number;
+  stage: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  error?: string;
+  updatedAt: number;
+};
 
 const exportProgress = new Map<string, ExportProgress>();
-const setExportProgress = (id: string | undefined, patch: Partial<ExportProgress>) => {
+const setExportProgress = (
+  id: string | undefined,
+  patch: Partial<ExportProgress>,
+) => {
   if (!id) return;
-  const current = exportProgress.get(id) || { percent: 1, stage: 'Đang nhận video', status: 'running' as const, updatedAt: Date.now() };
+  const current = exportProgress.get(id) || {
+    percent: 1,
+    stage: "Đang nhận video",
+    status: "running" as const,
+    updatedAt: Date.now(),
+  };
   exportProgress.set(id, { ...current, ...patch, updatedAt: Date.now() });
 };
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
-const uploadError = (error: unknown) => error instanceof UploadTooLargeError || (error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE');
-const ffmpegPath = (file: string) => file.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
-const assField = (value: string) => value.replace(/[\r\n,]/g, ' ').trim();
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+const uploadError = (error: unknown) =>
+  error instanceof UploadTooLargeError ||
+  (error &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: string }).code === "FST_REQ_FILE_TOO_LARGE");
+const ffmpegPath = (file: string) =>
+  file.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+const assField = (value: string) => value.replace(/[\r\n,]/g, " ").trim();
 
 /**
  * The browser can give an uploaded font any CSS family name.  libass cannot:
@@ -35,19 +98,29 @@ const assField = (value: string) => value.replace(/[\r\n,]/g, ' ').trim();
 async function embeddedFontFamily(file: string): Promise<string | undefined> {
   try {
     const data = await readFile(file);
-    if (data.length < 12 || data.toString('ascii', 0, 4) === 'wOFF' || data.toString('ascii', 0, 4) === 'wOF2') return undefined;
+    if (
+      data.length < 12 ||
+      data.toString("ascii", 0, 4) === "wOFF" ||
+      data.toString("ascii", 0, 4) === "wOF2"
+    )
+      return undefined;
     const tableCount = data.readUInt16BE(4);
     let nameOffset = -1;
     let nameLength = 0;
     for (let index = 0; index < tableCount; index += 1) {
       const offset = 12 + index * 16;
       if (offset + 16 > data.length) break;
-      if (data.toString('ascii', offset, offset + 4) !== 'name') continue;
+      if (data.toString("ascii", offset, offset + 4) !== "name") continue;
       nameOffset = data.readUInt32BE(offset + 8);
       nameLength = data.readUInt32BE(offset + 12);
       break;
     }
-    if (nameOffset < 0 || nameOffset + 6 > data.length || nameOffset + nameLength > data.length) return undefined;
+    if (
+      nameOffset < 0 ||
+      nameOffset + 6 > data.length ||
+      nameOffset + nameLength > data.length
+    )
+      return undefined;
     const count = data.readUInt16BE(nameOffset + 2);
     const stringsOffset = data.readUInt16BE(nameOffset + 4);
     const candidates: Array<{ priority: number; value: string }> = [];
@@ -60,17 +133,27 @@ async function embeddedFontFamily(file: string): Promise<string | undefined> {
       const length = data.readUInt16BE(offset + 8);
       const relative = data.readUInt16BE(offset + 10);
       const start = nameOffset + stringsOffset + relative;
-      if ((nameId !== 16 && nameId !== 1) || start < 0 || start + length > data.length) continue;
+      if (
+        (nameId !== 16 && nameId !== 1) ||
+        start < 0 ||
+        start + length > data.length
+      )
+        continue;
       const raw = data.subarray(start, start + length);
-      const value = platform === 3
-        ? Buffer.from(raw).swap16().toString('utf16le')
-        : raw.toString('utf8');
+      const value =
+        platform === 3
+          ? Buffer.from(raw).swap16().toString("utf16le")
+          : raw.toString("utf8");
       const normalized = assField(value);
       if (!normalized) continue;
-      const priority = (nameId === 16 ? 4 : 0) + (platform === 3 ? 2 : 0) + (language === 0x0409 ? 1 : 0);
+      const priority =
+        (nameId === 16 ? 4 : 0) +
+        (platform === 3 ? 2 : 0) +
+        (language === 0x0409 ? 1 : 0);
       candidates.push({ priority, value: normalized });
     }
-    return candidates.sort((left, right) => right.priority - left.priority)[0]?.value;
+    return candidates.sort((left, right) => right.priority - left.priority)[0]
+      ?.value;
   } catch {
     return undefined;
   }
@@ -85,59 +168,99 @@ const replaceAssFontFamily = (ass: string, fontFamily?: string) => {
 // Windows Fonts directory has hundreds of faces and libass can otherwise pick
 // a fallback/synthetic-bold face even when the CSS preview found the right one.
 const windowsFontFile = async (family: string | undefined) => {
-  if (process.platform !== 'win32' || !family) return undefined;
+  if (process.platform !== "win32" || !family) return undefined;
   const names: Record<string, string> = {
-    arial: 'arial.ttf',
-    'arial black': 'ariblk.ttf',
-    'arial narrow': 'arialn.ttf',
-    calibri: 'calibri.ttf',
-    cambria: 'cambria.ttc',
-    'comic sans ms': 'comic.ttf',
-    consolas: 'consola.ttf',
-    'courier new': 'cour.ttf',
-    georgia: 'georgia.ttf',
-    impact: 'impact.ttf',
-    'segoe ui': 'segoeui.ttf',
-    'segoe ui black': 'seguibl.ttf',
-    'segoe ui light': 'segoeuil.ttf',
-    'segoe ui semibold': 'seguisb.ttf',
-    tahoma: 'tahoma.ttf',
-    'times new roman': 'times.ttf',
-    'trebuchet ms': 'trebuc.ttf',
-    verdana: 'verdana.ttf',
+    arial: "arial.ttf",
+    "arial black": "ariblk.ttf",
+    "arial narrow": "arialn.ttf",
+    calibri: "calibri.ttf",
+    cambria: "cambria.ttc",
+    "comic sans ms": "comic.ttf",
+    consolas: "consola.ttf",
+    "courier new": "cour.ttf",
+    georgia: "georgia.ttf",
+    impact: "impact.ttf",
+    "segoe ui": "segoeui.ttf",
+    "segoe ui black": "seguibl.ttf",
+    "segoe ui light": "segoeuil.ttf",
+    "segoe ui semibold": "seguisb.ttf",
+    tahoma: "tahoma.ttf",
+    "times new roman": "times.ttf",
+    "trebuchet ms": "trebuc.ttf",
+    verdana: "verdana.ttf",
   };
   const name = names[family.trim().toLowerCase()];
   if (!name) return undefined;
-  const candidate = path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts', name);
-  try { await stat(candidate); return candidate; } catch { return undefined; }
+  const candidate = path.join(
+    process.env.WINDIR || "C:\\Windows",
+    "Fonts",
+    name,
+  );
+  try {
+    await stat(candidate);
+    return candidate;
+  } catch {
+    return undefined;
+  }
 };
 
-const fontFamilyFromAss = (ass: string) => /^Style:\s*[^,]+,([^,]*)/m.exec(ass)?.[1]?.trim();
-const outputSize = (resolution: string, aspectRatio?: VideoEdit['aspectRatio']) => {
-  const shortEdge = resolution === '1440' ? 1440 : resolution === '1080' ? 1080 : resolution === '720' ? 720 : undefined;
+const fontFamilyFromAss = (ass: string) =>
+  /^Style:\s*[^,]+,([^,]*)/m.exec(ass)?.[1]?.trim();
+const outputSize = (
+  resolution: string,
+  aspectRatio?: VideoEdit["aspectRatio"],
+) => {
+  const shortEdge =
+    resolution === "1440"
+      ? 1440
+      : resolution === "1080"
+        ? 1080
+        : resolution === "720"
+          ? 720
+          : undefined;
   if (!shortEdge) return undefined;
-  if (aspectRatio === '9:16') return `${shortEdge}x${Math.round(shortEdge * 16 / 9)}`;
-  if (aspectRatio === '1:1') return `${shortEdge}x${shortEdge}`;
-  if (aspectRatio === '4:5') return `${shortEdge}x${Math.round(shortEdge * 5 / 4)}`;
-  return `${Math.round(shortEdge * 16 / 9)}x${shortEdge}`;
+  if (aspectRatio === "9:16")
+    return `${shortEdge}x${Math.round((shortEdge * 16) / 9)}`;
+  if (aspectRatio === "1:1") return `${shortEdge}x${shortEdge}`;
+  if (aspectRatio === "4:5")
+    return `${shortEdge}x${Math.round((shortEdge * 5) / 4)}`;
+  return `${Math.round((shortEdge * 16) / 9)}x${shortEdge}`;
 };
 
 export async function exportRoutes(app: FastifyInstance) {
-  app.get('/api/export/progress/:id', async (request, reply) => {
-    const id = String((request.params as { id?: string }).id || '');
-    return reply.send(exportProgress.get(id) || { percent: 1, stage: 'Đang tải video lên máy', status: 'running' });
+  app.get("/api/export/progress/:id", async (request, reply) => {
+    const id = String((request.params as { id?: string }).id || "");
+    return reply.send(
+      exportProgress.get(id) || {
+        percent: 1,
+        stage: "Đang tải video lên máy",
+        status: "running",
+      },
+    );
   });
 
-  app.post('/api/export/audio', async (request, reply) => {
+  app.post("/api/export/audio", async (request, reply) => {
     await ensureWorkdir();
-    const body = (request.body || {}) as { uploadId?: string; dubbingJobId?: string; trimStartMs?: number; trimEndMs?: number };
-    const uploadId = typeof body.uploadId === 'string' ? body.uploadId.trim() : '';
-    const dubbingJobId = typeof body.dubbingJobId === 'string' ? body.dubbingJobId.trim() : '';
+    const body = (request.body || {}) as {
+      uploadId?: string;
+      dubbingJobId?: string;
+      trimStartMs?: number;
+      trimEndMs?: number;
+    };
+    const uploadId =
+      typeof body.uploadId === "string" ? body.uploadId.trim() : "";
+    const dubbingJobId =
+      typeof body.dubbingJobId === "string" ? body.dubbingJobId.trim() : "";
     const trimStartMs = Math.max(0, Math.round(Number(body.trimStartMs) || 0));
     const trimEndValue = Number(body.trimEndMs);
-    const trimEndMs = Number.isFinite(trimEndValue) && trimEndValue > 0 ? Math.round(trimEndValue) : undefined;
+    const trimEndMs =
+      Number.isFinite(trimEndValue) && trimEndValue > 0
+        ? Math.round(trimEndValue)
+        : undefined;
     if (trimEndMs !== undefined && trimEndMs <= trimStartMs) {
-      return reply.code(400).send({ error: 'Điểm kết thúc phải nằm sau điểm bắt đầu.' });
+      return reply
+        .code(400)
+        .send({ error: "Điểm kết thúc phải nằm sau điểm bắt đầu." });
     }
 
     let input: string;
@@ -149,55 +272,77 @@ export async function exportRoutes(app: FastifyInstance) {
       } else if (uploadId) {
         input = (await resolveUpload(uploadId)).absolutePath;
       } else {
-        return reply.code(400).send({ error: 'Thiếu video hoặc bản lồng tiếng để xuất audio.' });
+        return reply
+          .code(400)
+          .send({ error: "Thiếu video hoặc bản lồng tiếng để xuất audio." });
       }
     } catch (error) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không tìm thấy audio hiện tại.' });
+      return reply.code(400).send({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Không tìm thấy audio hiện tại.",
+      });
     }
 
     const job = `audio-export-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    const output = path.join(workdir, 'exports', `${job}.wav`);
-    const stagedOutput = path.join(workdir, 'exports', `${job}.rendering.wav`);
+    const output = path.join(workdir, "exports", `${job}.wav`);
+    const stagedOutput = path.join(workdir, "exports", `${job}.rendering.wav`);
     const requestAbort = new AbortController();
     const abortOnClientClose = () => requestAbort.abort();
-    request.raw.once('aborted', abortOnClientClose);
+    request.raw.once("aborted", abortOnClientClose);
     let responseSent = false;
 
     try {
-      const args = ['-y', '-i', input];
-      if (trimStartMs > 0) args.push('-ss', (trimStartMs / 1000).toFixed(3));
-      if (trimEndMs !== undefined) args.push('-t', ((trimEndMs - trimStartMs) / 1000).toFixed(3));
-      args.push('-map', '0:a:0', '-vn');
-      if (completedDub) args.push('-af', DUB_LOUDNESS_FILTER);
-      args.push('-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', stagedOutput);
-      await run('ffmpeg', args, requestAbort.signal);
+      const args = ["-y", "-i", input];
+      if (trimStartMs > 0) args.push("-ss", (trimStartMs / 1000).toFixed(3));
+      if (trimEndMs !== undefined)
+        args.push("-t", ((trimEndMs - trimStartMs) / 1000).toFixed(3));
+      args.push("-map", "0:a:0", "-vn");
+      if (completedDub) args.push("-af", DUB_LOUDNESS_FILTER);
+      args.push("-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", stagedOutput);
+      await run("ffmpeg", args, requestAbort.signal);
       const rendered = await stat(stagedOutput);
-      if (rendered.size <= 44) throw new Error('Video hiện tại không có audio hợp lệ để xuất.');
+      if (rendered.size <= 44)
+        throw new Error("Video hiện tại không có audio hợp lệ để xuất.");
       await rename(stagedOutput, output);
       const outputStat = await stat(output);
-      reply.header('Content-Type', 'audio/wav');
-      reply.header('Content-Length', String(outputStat.size));
-      reply.header('Content-Disposition', 'attachment; filename="autosub-current-audio.wav"');
+      reply.header("Content-Type", "audio/wav");
+      reply.header("Content-Length", String(outputStat.size));
+      reply.header(
+        "Content-Disposition",
+        'attachment; filename="autosub-current-audio.wav"',
+      );
       const stream = createReadStream(output);
-      const cleanupOutput = () => { void unlink(output).catch(() => undefined); };
-      stream.once('close', cleanupOutput);
-      stream.once('error', cleanupOutput);
+      const cleanupOutput = () => {
+        void unlink(output).catch(() => undefined);
+      };
+      stream.once("close", cleanupOutput);
+      stream.once("error", cleanupOutput);
       responseSent = true;
       return reply.send(stream);
     } catch (error) {
       if (requestAbort.signal.aborted) return;
-      const message = error instanceof Error ? error.message : 'FFmpeg không thể xuất audio.';
-      const friendly = /matches no streams|stream map.*matches no streams|does not contain any stream/i.test(message)
-        ? 'Video hiện tại không có audio để xuất.'
-        : message;
+      const message =
+        error instanceof Error ? error.message : "FFmpeg không thể xuất audio.";
+      const friendly =
+        /matches no streams|stream map.*matches no streams|does not contain any stream/i.test(
+          message,
+        )
+          ? "Video hiện tại không có audio để xuất."
+          : message;
       return reply.code(500).send({ error: friendly });
     } finally {
-      request.raw.off('aborted', abortOnClientClose);
-      await Promise.all([stagedOutput, responseSent ? undefined : output].filter((file): file is string => Boolean(file)).map((file) => unlink(file).catch(() => undefined)));
+      request.raw.off("aborted", abortOnClientClose);
+      await Promise.all(
+        [stagedOutput, responseSent ? undefined : output]
+          .filter((file): file is string => Boolean(file))
+          .map((file) => unlink(file).catch(() => undefined)),
+      );
     }
   });
 
-  app.post('/api/export/video', async (request, reply) => {
+  app.post("/api/export/video", async (request, reply) => {
     await ensureWorkdir();
     const uploadDir = await createUploadSession();
     const fields: Fields = {};
@@ -205,145 +350,263 @@ export async function exportRoutes(app: FastifyInstance) {
     let dubFile: string | undefined;
     let fontFile: string | undefined;
     let logoFile: string | undefined;
-    let videoName = 'input.mp4';
-    let fontName = 'uploaded-font.ttf';
-    let logoName = 'logo.png';
+    let videoName = "input.mp4";
+    let fontName = "uploaded-font.ttf";
+    let logoName = "logo.png";
 
     try {
       for await (const part of request.parts()) {
-        if (part.type === 'file') {
-          if (part.fieldname === 'file') {
+        if (part.type === "file") {
+          if (part.fieldname === "file") {
             videoName = safeUploadName(part.filename || videoName);
-            input = (await persistUploadStream(part.file, path.join(uploadDir, `source-${videoName}`))).path;
-          } else if (part.fieldname === 'dubTrack') {
-            dubFile = (await persistUploadStream(part.file, path.join(uploadDir, 'dub-track.wav'))).path;
-          } else if (part.fieldname === 'fontFile') {
+            input = (
+              await persistUploadStream(
+                part.file,
+                path.join(uploadDir, `source-${videoName}`),
+              )
+            ).path;
+          } else if (part.fieldname === "dubTrack") {
+            dubFile = (
+              await persistUploadStream(
+                part.file,
+                path.join(uploadDir, "dub-track.wav"),
+              )
+            ).path;
+          } else if (part.fieldname === "fontFile") {
             fontName = safeUploadName(part.filename || fontName);
-            fontFile = (await persistUploadStream(part.file, path.join(uploadDir, `font-${fontName}`))).path;
-          } else if (part.fieldname === 'logoFile') {
+            fontFile = (
+              await persistUploadStream(
+                part.file,
+                path.join(uploadDir, `font-${fontName}`),
+              )
+            ).path;
+          } else if (part.fieldname === "logoFile") {
             logoName = safeUploadName(part.filename || logoName);
-            logoFile = (await persistUploadStream(part.file, path.join(uploadDir, `logo-${logoName}`))).path;
+            logoFile = (
+              await persistUploadStream(
+                part.file,
+                path.join(uploadDir, `logo-${logoName}`),
+              )
+            ).path;
           } else await discardUploadStream(part.file);
         } else {
           fields[part.fieldname] = String(part.value);
-          if (part.fieldname === 'exportId') setExportProgress(fields.exportId, { percent: 3, stage: 'Đã nhận yêu cầu render', status: 'running' });
+          if (part.fieldname === "exportId")
+            setExportProgress(fields.exportId, {
+              percent: 3,
+              stage: "Đã nhận yêu cầu render",
+              status: "running",
+            });
         }
       }
     } catch (error) {
       await cleanupUploadSession(uploadDir);
-      if (uploadError(error)) return reply.code(413).send({ error: 'File vượt quá giới hạn 4 GiB.' });
+      if (uploadError(error))
+        return reply.code(413).send({ error: "File vượt quá giới hạn 4 GiB." });
       throw error;
     }
 
     if (!input && fields.uploadId) {
-      try { input = (await resolveUpload(fields.uploadId)).absolutePath; }
-      catch { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: 'Upload video không còn tồn tại. Hãy chọn lại video.' }); }
+      try {
+        input = (await resolveUpload(fields.uploadId)).absolutePath;
+      } catch {
+        await cleanupUploadSession(uploadDir);
+        return reply.code(400).send({
+          error: "Upload video không còn tồn tại. Hãy chọn lại video.",
+        });
+      }
     }
-    if (!input) { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: 'Thiếu video để xuất.' }); }
+    if (!input) {
+      await cleanupUploadSession(uploadDir);
+      return reply.code(400).send({ error: "Thiếu video để xuất." });
+    }
 
-    let options: { resolution: 'original' | '1440' | '1080' | '720'; crf?: number; keepAudio: boolean; originalVolume?: number; burnSubtitles?: boolean; separateVocals?: boolean; blurRegions?: Region[]; logo?: Logo; dubbingJobId?: string; videoEdit?: VideoEdit };
+    let options: {
+      resolution: "original" | "1440" | "1080" | "720";
+      crf?: number;
+      keepAudio: boolean;
+      originalVolume?: number;
+      burnSubtitles?: boolean;
+      separateVocals?: boolean;
+      blurRegions?: Region[];
+      logo?: Logo;
+      dubbingJobId?: string;
+      videoEdit?: VideoEdit;
+    };
     try {
-      options = JSON.parse(fields.options || '{"resolution":"original","crf":20,"keepAudio":true,"blurRegions":[]}');
+      options = JSON.parse(
+        fields.options ||
+          '{"resolution":"original","crf":20,"keepAudio":true,"blurRegions":[]}',
+      );
     } catch {
       await cleanupUploadSession(uploadDir);
-      return reply.code(400).send({ error: 'Tùy chọn export không hợp lệ.' });
+      return reply.code(400).send({ error: "Tùy chọn export không hợp lệ." });
     }
 
     const ass = fields.ass;
-    if (options.burnSubtitles !== false && !ass) { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: 'Thiếu ASS subtitle.' }); }
+    if (options.burnSubtitles !== false && !ass) {
+      await cleanupUploadSession(uploadDir);
+      return reply.code(400).send({ error: "Thiếu ASS subtitle." });
+    }
     const exportId = fields.exportId;
-    const trimStartMs = Math.max(0, Number(options.videoEdit?.trimStartMs) || 0);
+    const trimStartMs = Math.max(
+      0,
+      Number(options.videoEdit?.trimStartMs) || 0,
+    );
     const trimEndMs = Number(options.videoEdit?.trimEndMs) || undefined;
-    if (trimEndMs !== undefined && trimEndMs <= trimStartMs) { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: 'Điểm kết thúc phải nằm sau điểm bắt đầu.' }); }
+    if (trimEndMs !== undefined && trimEndMs <= trimStartMs) {
+      await cleanupUploadSession(uploadDir);
+      return reply
+        .code(400)
+        .send({ error: "Điểm kết thúc phải nằm sau điểm bắt đầu." });
+    }
     const trimStartSeconds = trimStartMs / 1000;
-    const trimDurationSeconds = trimEndMs === undefined ? undefined : (trimEndMs - trimStartMs) / 1000;
-    setExportProgress(exportId, { percent: 6, stage: 'Đang chuẩn bị media', status: 'running' });
+    const trimDurationSeconds =
+      trimEndMs === undefined ? undefined : (trimEndMs - trimStartMs) / 1000;
+    setExportProgress(exportId, {
+      percent: 6,
+      stage: "Đang chuẩn bị media",
+      status: "running",
+    });
     let jobDubPath: string | undefined;
     let jobDubIncludesBackground = false;
     if (options.dubbingJobId) {
       try {
         const result = await getDubbingResult(options.dubbingJobId);
         jobDubPath = result.audioFile;
-        jobDubIncludesBackground = Boolean(result.job.config.audioMix.keepOriginal && result.job.config.audioMix.separateVocals);
+        jobDubIncludesBackground = Boolean(
+          result.job.config.audioMix.keepOriginal &&
+            result.job.config.audioMix.separateVocals,
+        );
+      } catch (error) {
+        await cleanupUploadSession(uploadDir);
+        return reply.code(400).send({
+          error:
+            error instanceof Error ? error.message : "Dub job chưa hoàn tất.",
+        });
       }
-      catch (error) { await cleanupUploadSession(uploadDir); return reply.code(400).send({ error: error instanceof Error ? error.message : 'Dub job chưa hoàn tất.' }); }
     }
 
     const job = `export-${Date.now()}`;
-    const assFile = path.join(workdir, 'subtitles', `${job}.ass`);
-    const output = path.join(workdir, 'exports', `${job}.mp4`);
+    const assFile = path.join(workdir, "subtitles", `${job}.ass`);
+    const output = path.join(workdir, "exports", `${job}.mp4`);
     // Never expose FFmpeg's in-progress file as a download.  An interrupted
     // MP4 does not contain its final `moov` atom, which Windows Media Player
     // correctly reports as an unsupported/corrupt encoding.
-    const stagedOutput = path.join(workdir, 'exports', `${job}.rendering.mp4`);
-    const separationDir = path.join(workdir, 'audio', `${job}-stems`);
+    const stagedOutput = path.join(workdir, "exports", `${job}.rendering.mp4`);
+    const separationDir = path.join(workdir, "audio", `${job}-stems`);
     const requestAbort = new AbortController();
     const abortOnClientClose = () => requestAbort.abort();
-    request.raw.once('aborted', abortOnClientClose);
+    request.raw.once("aborted", abortOnClientClose);
     let responseStream: ReturnType<typeof createReadStream> | undefined;
     let responseSent = false;
 
     try {
-      const requestedFamily = fontFamilyFromAss(ass || '');
-      const resolvedFontFile = fontFile || await windowsFontFile(requestedFamily);
-      const fontFamily = resolvedFontFile ? await embeddedFontFamily(resolvedFontFile) : undefined;
-      const renderedAss = replaceAssFontFamily(ass || '', fontFamily);
+      const requestedFamily = fontFamilyFromAss(ass || "");
+      const resolvedFontFile =
+        fontFile || (await windowsFontFile(requestedFamily));
+      const fontFamily = resolvedFontFile
+        ? await embeddedFontFamily(resolvedFontFile)
+        : undefined;
+      const renderedAss = replaceAssFontFamily(ass || "", fontFamily);
       // Keep the selected font isolated for this one render.  This avoids
       // libass substituting a bold/incorrect face from the full system font
       // collection, which made the exported subtitle visibly heavier than the
       // browser preview.
       let isolatedFontDir: string | undefined;
       if (resolvedFontFile) {
-        isolatedFontDir = path.join(uploadDir, 'subtitle-font');
+        isolatedFontDir = path.join(uploadDir, "subtitle-font");
         await mkdir(isolatedFontDir, { recursive: true });
-        await copyFile(resolvedFontFile, path.join(isolatedFontDir, path.basename(resolvedFontFile)));
+        await copyFile(
+          resolvedFontFile,
+          path.join(isolatedFontDir, path.basename(resolvedFontFile)),
+        );
       }
-      await writeFile(assFile, renderedAss, 'utf8');
-      setExportProgress(exportId, { percent: 10, stage: 'Đã lưu video nguồn', status: 'running' });
+      await writeFile(assFile, renderedAss, "utf8");
+      setExportProgress(exportId, {
+        percent: 10,
+        stage: "Đã lưu video nguồn",
+        status: "running",
+      });
       const regions = options.blurRegions || [];
       const filters: string[] = [];
-      let current = '0:v';
+      let current = "0:v";
 
       const requestedCrop = options.videoEdit?.crop;
       if (requestedCrop) {
         const xPercent = clamp(Number(requestedCrop.xPercent), 0, 99);
         const yPercent = clamp(Number(requestedCrop.yPercent), 0, 99);
-        const widthPercent = clamp(Number(requestedCrop.widthPercent), 1, 100 - xPercent);
-        const heightPercent = clamp(Number(requestedCrop.heightPercent), 1, 100 - yPercent);
+        const widthPercent = clamp(
+          Number(requestedCrop.widthPercent),
+          1,
+          100 - xPercent,
+        );
+        const heightPercent = clamp(
+          Number(requestedCrop.heightPercent),
+          1,
+          100 - yPercent,
+        );
         const cropX = `trunc(iw*${xPercent / 100}/2)*2`;
         const cropY = `trunc(ih*${yPercent / 100}/2)*2`;
         const cropW = `max(2,trunc(iw*${widthPercent / 100}/2)*2)`;
         const cropH = `max(2,trunc(ih*${heightPercent / 100}/2)*2)`;
-        filters.push(`[${current}]crop=w='${cropW}':h='${cropH}':x='${cropX}':y='${cropY}'[cropOut]`);
-        current = 'cropOut';
+        filters.push(
+          `[${current}]crop=w='${cropW}':h='${cropH}':x='${cropX}':y='${cropY}'[cropOut]`,
+        );
+        current = "cropOut";
       } else {
-        const canvasRatio = options.videoEdit?.aspectRatio && options.videoEdit.aspectRatio !== 'original'
-          ? ({ '16:9': 16 / 9, '9:16': 9 / 16, '1:1': 1, '4:5': 4 / 5 } as const)[options.videoEdit.aspectRatio]
-          : undefined;
+        const canvasRatio =
+          options.videoEdit?.aspectRatio &&
+          options.videoEdit.aspectRatio !== "original"
+            ? (
+                {
+                  "16:9": 16 / 9,
+                  "9:16": 9 / 16,
+                  "1:1": 1,
+                  "4:5": 4 / 5,
+                } as const
+              )[options.videoEdit.aspectRatio]
+            : undefined;
         if (canvasRatio) {
           // The aspect-ratio picker changes the output canvas, not the source
           // crop. Fit the full source and letterbox/pillarbox surplus space.
           // Cropping remains an explicit Crop-modal action.
           const ratio = canvasRatio.toFixed(8);
-          filters.push(`[${current}]scale=w='if(gt(a,${ratio}),round(ih*${ratio}/2)*2,iw)':h='if(gt(a,${ratio}),-2,round(iw/${ratio}/2)*2)',pad=w='max(iw,round(ih*${ratio}/2)*2)':h='max(ih,round(iw/${ratio}/2)*2)':x='(ow-iw)/2':y='(oh-ih)/2':color=black,setsar=1[aspectOut]`);
-          current = 'aspectOut';
+          filters.push(
+            `[${current}]scale=w='if(gt(a,${ratio}),round(ih*${ratio}/2)*2,iw)':h='if(gt(a,${ratio}),-2,round(iw/${ratio}/2)*2)',pad=w='max(iw,round(ih*${ratio}/2)*2)':h='max(ih,round(iw/${ratio}/2)*2)':x='(ow-iw)/2':y='(oh-ih)/2':color=black,setsar=1[aspectOut]`,
+          );
+          current = "aspectOut";
         }
       }
 
       regions.forEach((region, index) => {
         const xPercent = clamp(Number(region.xPercent), 0, 99);
         const yPercent = clamp(Number(region.yPercent), 0, 99);
-        const widthPercent = clamp(Number(region.widthPercent), 1, 100 - xPercent);
-        const heightPercent = clamp(Number(region.heightPercent), 1, 100 - yPercent);
+        const widthPercent = clamp(
+          Number(region.widthPercent),
+          1,
+          100 - xPercent,
+        );
+        const heightPercent = clamp(
+          Number(region.heightPercent),
+          1,
+          100 - yPercent,
+        );
         const start = Math.max(0, Number(region.startMs) || 0) / 1000;
         const end = Math.max(start, Number(region.endMs) || 0) / 1000;
-        const radius = Math.max(3, Math.min(60, Math.round(Number(region.blurStrength) || 24)));
+        const radius = Math.max(
+          3,
+          Math.min(60, Math.round(Number(region.blurStrength) || 24)),
+        );
         const borderRadius = clamp(Number(region.borderRadius ?? 0), 0, 24);
         // Treat the control as a real corner radius. CSS percentage radii on a
         // wide subtitle strip become an exaggerated capsule and do not match
         // the exported frame.
         const cornerRadius = `min(${Math.round(borderRadius)},min(W,H)/2)`;
-        const roundedMask = borderRadius > 0 ? `if(gt(between(X,${cornerRadius},W-${cornerRadius})+between(Y,${cornerRadius},H-${cornerRadius})+lte(hypot(X-${cornerRadius},Y-${cornerRadius}),${cornerRadius})+lte(hypot(X-(W-${cornerRadius}),Y-${cornerRadius}),${cornerRadius})+lte(hypot(X-${cornerRadius},Y-(H-${cornerRadius})),${cornerRadius})+lte(hypot(X-(W-${cornerRadius}),Y-(H-${cornerRadius})),${cornerRadius}),0),1,0)` : '1';
+        const roundedMask =
+          borderRadius > 0
+            ? `if(gt(between(X,${cornerRadius},W-${cornerRadius})+between(Y,${cornerRadius},H-${cornerRadius})+lte(hypot(X-${cornerRadius},Y-${cornerRadius}),${cornerRadius})+lte(hypot(X-(W-${cornerRadius}),Y-${cornerRadius}),${cornerRadius})+lte(hypot(X-${cornerRadius},Y-(H-${cornerRadius})),${cornerRadius})+lte(hypot(X-(W-${cornerRadius}),Y-(H-${cornerRadius})),${cornerRadius}),0),1,0)`
+            : "1";
         // Keep the export region identical to the editor selection. The centre
         // stays fully blurred so source subtitles cannot bleed through, while a
         // short edge feather lets the patch merge back into the actual scene
@@ -367,34 +630,84 @@ export async function exportRoutes(app: FastifyInstance) {
         // short video sitting near completion for many minutes). Two passes
         // at this radius still destroy the source glyphs while preserving the
         // selected region and the natural scene colours around it.
-        const sigma = Math.min(48, Math.max(24, Math.round(radius * (region.mode === 'neighbor' ? 1.85 : 1.65))));
+        const sigma = Math.min(
+          48,
+          Math.max(
+            24,
+            Math.round(radius * (region.mode === "neighbor" ? 1.85 : 1.65)),
+          ),
+        );
         const edgeFeather = clamp(Math.round(radius * 0.38), 8, 18);
         const edgeAlpha = `min(1,max(0,min(min(X,W-1-X),min(Y,H-1-Y))/${edgeFeather}))`;
         const alpha = `255*(${roundedMask})*${edgeAlpha}`;
-        filters.push(`[${current}]split=2[${base}][${crop}];[${crop}]crop=w='${cropW}':h='${cropH}':x='${cropX}':y='${cropY}',gblur=sigma=${sigma}:steps=2,eq=brightness=-0.025:saturation=0.92,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alpha}'[${blur}];[${base}][${blur}]overlay=x=${overlayX}:y=${overlayY}:format=auto:enable='between(t,${start},${end})'[${out}]`);
+        filters.push(
+          `[${current}]split=2[${base}][${crop}];[${crop}]crop=w='${cropW}':h='${cropH}':x='${cropX}':y='${cropY}',gblur=sigma=${sigma}:steps=2,eq=brightness=-0.025:saturation=0.92,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alpha}'[${blur}];[${base}][${blur}]overlay=x=${overlayX}:y=${overlayY}:format=auto:enable='between(t,${start},${end})'[${out}]`,
+        );
         current = out;
       });
 
-      const args: string[] = ['-y'];
-      if (trimStartSeconds > 0) args.push('-ss', trimStartSeconds.toFixed(3));
-      args.push('-i', input);
+      const args: string[] = ["-y"];
+      if (trimStartSeconds > 0) args.push("-ss", trimStartSeconds.toFixed(3));
+      args.push("-i", input);
       let nextInputIndex = 1;
       let logoInputIndex: number | undefined;
-      if (logoFile) { logoInputIndex = nextInputIndex; nextInputIndex += 1; args.push('-loop', '1', '-i', logoFile); }
+      if (logoFile) {
+        logoInputIndex = nextInputIndex;
+        nextInputIndex += 1;
+        args.push("-loop", "1", "-i", logoFile);
+      }
       const hasDub = Boolean(dubFile || jobDubPath);
       let dubInputIndex: number | undefined;
-      if (hasDub) { dubInputIndex = nextInputIndex; nextInputIndex += 1; if (trimStartSeconds > 0) args.push('-ss', trimStartSeconds.toFixed(3)); args.push('-i', jobDubPath || dubFile as string); }
+      if (hasDub) {
+        dubInputIndex = nextInputIndex;
+        nextInputIndex += 1;
+        if (trimStartSeconds > 0) args.push("-ss", trimStartSeconds.toFixed(3));
+        args.push("-i", jobDubPath || (dubFile as string));
+      }
 
       let backgroundAudioPath: string | undefined;
       if (options.separateVocals && !jobDubIncludesBackground) {
-        setExportProgress(exportId, { percent: 14, stage: 'Đang tách lời gốc khỏi nhạc nền bằng Demucs', status: 'running' });
+        setExportProgress(exportId, {
+          percent: 14,
+          stage: "Đang tách lời gốc khỏi nhạc nền bằng Demucs",
+          status: "running",
+        });
         await mkdir(separationDir, { recursive: true });
-        await run('py', ['-3.12', '-m', 'demucs', '--two-stems', 'vocals', '-n', 'htdemucs', '--out', separationDir, input], requestAbort.signal);
-        backgroundAudioPath = path.join(separationDir, 'htdemucs', path.parse(input).name, 'no_vocals.wav');
-        setExportProgress(exportId, { percent: 42, stage: 'Đã tách lời, đang dựng video', status: 'running' });
+        await run(
+          "py",
+          [
+            "-3.12",
+            "-m",
+            "demucs",
+            "--two-stems",
+            "vocals",
+            "-n",
+            "htdemucs",
+            "--out",
+            separationDir,
+            input,
+          ],
+          requestAbort.signal,
+        );
+        backgroundAudioPath = path.join(
+          separationDir,
+          "htdemucs",
+          path.parse(input).name,
+          "no_vocals.wav",
+        );
+        setExportProgress(exportId, {
+          percent: 42,
+          stage: "Đã tách lời, đang dựng video",
+          status: "running",
+        });
       }
       let backgroundInputIndex: number | undefined;
-      if (backgroundAudioPath) { backgroundInputIndex = nextInputIndex; nextInputIndex += 1; if (trimStartSeconds > 0) args.push('-ss', trimStartSeconds.toFixed(3)); args.push('-i', backgroundAudioPath); }
+      if (backgroundAudioPath) {
+        backgroundInputIndex = nextInputIndex;
+        nextInputIndex += 1;
+        if (trimStartSeconds > 0) args.push("-ss", trimStartSeconds.toFixed(3));
+        args.push("-i", backgroundAudioPath);
+      }
 
       if (logoInputIndex !== undefined && options.logo) {
         const xPercent = clamp(Number(options.logo.xPercent), 0, 99);
@@ -409,8 +722,10 @@ export async function exportRoutes(app: FastifyInstance) {
         // a second expression involving `iw`/`ih` can use the reference-video
         // dimensions in some FFmpeg builds and stretch PNG/JPG logos.
         const logoWidth = `trunc(main_w*${widthPercent / 100}/2)*2`;
-        filters.push(`[${logoInputIndex}:v]format=rgba,setsar=1[logoRaw];[logoRaw][${current}]scale2ref=w='${logoWidth}':h=-2[logoScaled][logoBase];[logoScaled]setsar=1,format=rgba,colorchannelmixer=aa=${opacity.toFixed(3)}[logoOpacity];[logoBase]setsar=1[logoVideo];[logoVideo][logoOpacity]overlay=x=${logoX}:y=${logoY}:format=auto:eof_action=repeat[logoOut]`);
-        current = 'logoOut';
+        filters.push(
+          `[${logoInputIndex}:v]format=rgba,setsar=1[logoRaw];[logoRaw][${current}]scale2ref=w='${logoWidth}':h=-2[logoScaled][logoBase];[logoScaled]setsar=1,format=rgba,colorchannelmixer=aa=${opacity.toFixed(3)}[logoOpacity];[logoBase]setsar=1[logoVideo];[logoVideo][logoOpacity]overlay=x=${logoX}:y=${logoY}:format=auto:eof_action=repeat[logoOut]`,
+        );
+        current = "logoOut";
       }
 
       // Browser preview uses Windows' installed fonts. Point libass at the
@@ -418,12 +733,19 @@ export async function exportRoutes(app: FastifyInstance) {
       // substitute a heavier fallback face only in the exported MP4.
       const preferredFontDir = isolatedFontDir
         ? isolatedFontDir
-        : process.platform === 'win32'
-          ? path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts')
-          : '';
-      const fontDir = preferredFontDir.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
-      if (options.burnSubtitles === false) filters.push(`[${current}]null[videoout]`);
-      else filters.push(`[${current}]subtitles='${ffmpegPath(assFile)}'${fontDir ? `:fontsdir='${fontDir}'` : ''}[videoout]`);
+        : process.platform === "win32"
+          ? path.join(process.env.WINDIR || "C:\\Windows", "Fonts")
+          : "";
+      const fontDir = preferredFontDir
+        .replace(/\\/g, "/")
+        .replace(/:/g, "\\:")
+        .replace(/'/g, "\\'");
+      if (options.burnSubtitles === false)
+        filters.push(`[${current}]null[videoout]`);
+      else
+        filters.push(
+          `[${current}]subtitles='${ffmpegPath(assFile)}'${fontDir ? `:fontsdir='${fontDir}'` : ""}[videoout]`,
+        );
 
       const audio = buildExportAudioFilter({
         hasDub,
@@ -435,33 +757,75 @@ export async function exportRoutes(app: FastifyInstance) {
       });
       if (audio) filters.push(audio);
 
-      args.push('-filter_complex', filters.join(';'), '-map', '[videoout]');
-      if (audio) args.push('-map', '[audioout]');
-      const scaledOutput = outputSize(options.resolution, options.videoEdit?.aspectRatio);
-      if (scaledOutput) args.push('-s', scaledOutput);
+      args.push("-filter_complex", filters.join(";"), "-map", "[videoout]");
+      if (audio) args.push("-map", "[audioout]");
+      const scaledOutput = outputSize(
+        options.resolution,
+        options.videoEdit?.aspectRatio,
+      );
+      if (scaledOutput) args.push("-s", scaledOutput);
       // yuv420p + avc1 are the broadly supported H.264-in-MP4 combination
       // for Windows Media Player, mobile devices and browser downloads.
       // Faster x264 preset while retaining the same CRF quality target. This
       // trades a little file size for meaningfully shorter export times.
-      args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-tag:v', 'avc1', '-crf', String(Math.round(clamp(Number(options.crf ?? 20), 16, 35))), '-preset', 'veryfast');
-      if (audio) args.push('-c:a', 'aac', '-shortest');
-      else args.push('-an');
-      if (trimDurationSeconds !== undefined) args.push('-t', trimDurationSeconds.toFixed(3));
+      args.push(
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
+        "-tag:v",
+        "avc1",
+        "-crf",
+        String(Math.round(clamp(Number(options.crf ?? 20), 16, 35))),
+        "-preset",
+        "veryfast",
+      );
+      if (audio) args.push("-c:a", "aac", "-shortest");
+      else args.push("-an");
+      if (trimDurationSeconds !== undefined)
+        args.push("-t", trimDurationSeconds.toFixed(3));
       // The file is downloaded only after a successful encode, so a second
       // full-file faststart relocation is unnecessary. It is especially slow
       // when the workdir is synchronized by OneDrive. The staged file is still
       // validated and atomically renamed before it is sent to the browser.
-      args.push('-progress', 'pipe:2', '-nostats', stagedOutput);
+      args.push("-progress", "pipe:2", "-nostats", stagedOutput);
 
-      const durationProbe = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', input], requestAbort.signal);
-      const sourceDurationMs = Math.max(1, Number(durationProbe.stdout.trim()) * 1000);
-      const durationMs = Math.max(1, Math.min(trimDurationSeconds === undefined ? sourceDurationMs - trimStartMs : trimDurationSeconds * 1000, sourceDurationMs - trimStartMs));
-      let progressBuffer = '';
-      let renderSpeed = '';
+      const durationProbe = await run(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "default=nw=1:nk=1",
+          input,
+        ],
+        requestAbort.signal,
+      );
+      const sourceDurationMs = Math.max(
+        1,
+        Number(durationProbe.stdout.trim()) * 1000,
+      );
+      const durationMs = Math.max(
+        1,
+        Math.min(
+          trimDurationSeconds === undefined
+            ? sourceDurationMs - trimStartMs
+            : trimDurationSeconds * 1000,
+          sourceDurationMs - trimStartMs,
+        ),
+      );
+      let progressBuffer = "";
+      let renderSpeed = "";
       let renderStalled = false;
       const renderAbort = new AbortController();
       const abortRender = () => renderAbort.abort();
-      requestAbort.signal.addEventListener('abort', abortRender, { once: true });
+      requestAbort.signal.addEventListener("abort", abortRender, {
+        once: true,
+      });
       let stallTimer: ReturnType<typeof setTimeout> | undefined;
       const armStallTimer = () => {
         if (stallTimer) clearTimeout(stallTimer);
@@ -470,14 +834,18 @@ export async function exportRoutes(app: FastifyInstance) {
           renderAbort.abort();
         }, 180_000);
       };
-      setExportProgress(exportId, { percent: Math.max(45, exportProgress.get(exportId || '')?.percent || 0), stage: 'FFmpeg đang render video và âm thanh', status: 'running' });
+      setExportProgress(exportId, {
+        percent: Math.max(45, exportProgress.get(exportId || "")?.percent || 0),
+        stage: "FFmpeg đang render video và âm thanh",
+        status: "running",
+      });
       armStallTimer();
       try {
-        await run('ffmpeg', args, renderAbort.signal, (chunk) => {
+        await run("ffmpeg", args, renderAbort.signal, (chunk) => {
           armStallTimer();
           progressBuffer += chunk;
           const lines = progressBuffer.split(/\r?\n/);
-          progressBuffer = lines.pop() || '';
+          progressBuffer = lines.pop() || "";
           for (const line of lines) {
             const trimmed = line.trim();
             const speedMatch = /^speed=([^\s]+)/.exec(trimmed);
@@ -485,64 +853,139 @@ export async function exportRoutes(app: FastifyInstance) {
             const match = /^out_time_(?:us|ms)=(\d+)/.exec(trimmed);
             if (!match) continue;
             const renderedMs = Number(match[1]) / 1000;
-            const stage = renderSpeed ? `FFmpeg đang render video và âm thanh · ${renderSpeed}` : 'FFmpeg đang render video và âm thanh';
-            setExportProgress(exportId, { percent: Math.round(Math.min(96, Math.max(45, 45 + (renderedMs / durationMs) * 51))), stage, status: 'running' });
+            const stage = renderSpeed
+              ? `FFmpeg đang render video và âm thanh · ${renderSpeed}`
+              : "FFmpeg đang render video và âm thanh";
+            setExportProgress(exportId, {
+              percent: Math.round(
+                Math.min(96, Math.max(45, 45 + (renderedMs / durationMs) * 51)),
+              ),
+              stage,
+              status: "running",
+            });
           }
         });
       } catch (error) {
         if (renderStalled) {
-          throw new Error('FFmpeg không tạo thêm dữ liệu trong 3 phút nên AutoSub đã dừng job bị treo. Hãy thử xuất lại; nếu lặp lại, hãy chuyển workdir ra ngoài thư mục OneDrive.');
+          throw new Error(
+            "FFmpeg không tạo thêm dữ liệu trong 3 phút nên AutoSub đã dừng job bị treo. Hãy thử xuất lại; nếu lặp lại, hãy chuyển workdir ra ngoài thư mục OneDrive.",
+          );
         }
         throw error;
       } finally {
         if (stallTimer) clearTimeout(stallTimer);
-        requestAbort.signal.removeEventListener('abort', abortRender);
+        requestAbort.signal.removeEventListener("abort", abortRender);
       }
 
-      setExportProgress(exportId, { percent: 97, stage: 'Đã mã hóa xong, đang kiểm tra file MP4', status: 'running' });
-      const renderProbe = await run('ffprobe', [
-        '-v', 'error',
-        '-show_entries', 'format=format_name,duration:stream=codec_type',
-        '-of', 'json',
-        stagedOutput,
-      ], requestAbort.signal);
-      let renderInfo: { format?: { format_name?: string; duration?: string }; streams?: Array<{ codec_type?: string }> };
+      setExportProgress(exportId, {
+        percent: 97,
+        stage: "Đã mã hóa xong, đang kiểm tra file MP4",
+        status: "running",
+      });
+      const renderProbe = await run(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=format_name,duration:stream=codec_type",
+          "-of",
+          "json",
+          stagedOutput,
+        ],
+        requestAbort.signal,
+      );
+      let renderInfo: {
+        format?: { format_name?: string; duration?: string };
+        streams?: Array<{ codec_type?: string }>;
+      };
       try {
         renderInfo = JSON.parse(renderProbe.stdout) as typeof renderInfo;
       } catch {
-        throw new Error('FFmpeg tạo file MP4 chưa hoàn chỉnh; không thể xác minh trước khi tải.');
+        throw new Error(
+          "FFmpeg tạo file MP4 chưa hoàn chỉnh; không thể xác minh trước khi tải.",
+        );
       }
-      const hasVideo = renderInfo.streams?.some((stream) => stream.codec_type === 'video');
-      const validMp4 = renderInfo.format?.format_name?.split(',').includes('mp4');
+      const hasVideo = renderInfo.streams?.some(
+        (stream) => stream.codec_type === "video",
+      );
+      const validMp4 = renderInfo.format?.format_name
+        ?.split(",")
+        .includes("mp4");
       const renderedDuration = Number(renderInfo.format?.duration);
-      if (!hasVideo || !validMp4 || !Number.isFinite(renderedDuration) || renderedDuration <= 0) {
-        throw new Error('FFmpeg tạo file MP4 chưa hoàn chỉnh; AutoSub đã chặn tải file lỗi. Hãy xuất lại video.');
+      if (
+        !hasVideo ||
+        !validMp4 ||
+        !Number.isFinite(renderedDuration) ||
+        renderedDuration <= 0
+      ) {
+        throw new Error(
+          "FFmpeg tạo file MP4 chưa hoàn chỉnh; AutoSub đã chặn tải file lỗi. Hãy xuất lại video.",
+        );
       }
-      setExportProgress(exportId, { percent: 99, stage: 'File hợp lệ, đang hoàn tất tải xuống', status: 'running' });
+      setExportProgress(exportId, {
+        percent: 99,
+        stage: "File hợp lệ, đang hoàn tất tải xuống",
+        status: "running",
+      });
       await rename(stagedOutput, output);
       const outputStat = await stat(output);
-      setExportProgress(exportId, { percent: 100, stage: 'Đã render xong video', status: 'completed' });
-      reply.header('Content-Type', 'video/mp4');
-      reply.header('Content-Length', String(outputStat.size));
-      reply.header('Content-Disposition', 'attachment; filename="autosub-final.mp4"');
+      setExportProgress(exportId, {
+        percent: 100,
+        stage: "Đã render xong video",
+        status: "completed",
+      });
+      reply.header("Content-Type", "video/mp4");
+      reply.header("Content-Length", String(outputStat.size));
+      reply.header(
+        "Content-Disposition",
+        'attachment; filename="autosub-final.mp4"',
+      );
       responseStream = createReadStream(output);
-      const cleanupOutput = () => { void unlink(output).catch(() => undefined); };
-      responseStream.once('close', cleanupOutput);
-      responseStream.once('error', cleanupOutput);
+      const cleanupOutput = () => {
+        void unlink(output).catch(() => undefined);
+      };
+      responseStream.once("close", cleanupOutput);
+      responseStream.once("error", cleanupOutput);
       responseSent = true;
       return reply.send(responseStream);
     } catch (error) {
-      if (requestAbort.signal.aborted) { setExportProgress(fields.exportId, { status: 'cancelled', stage: 'Đã hủy render' }); return; }
-      const message = error instanceof Error ? error.message : 'FFmpeg không thể render video.';
-      const friendly = /No module named demucs/i.test(message) ? 'Chưa cài Demucs cho Python 3.12. Hãy cài dependency tách lời trước khi dùng chế độ giữ nhạc nền.' : message;
-      setExportProgress(fields.exportId, { status: 'failed', stage: 'Render thất bại', error: friendly });
+      if (requestAbort.signal.aborted) {
+        setExportProgress(fields.exportId, {
+          status: "cancelled",
+          stage: "Đã hủy render",
+        });
+        return;
+      }
+      const message =
+        error instanceof Error
+          ? error.message
+          : "FFmpeg không thể render video.";
+      const friendly = /No module named demucs/i.test(message)
+        ? "Chưa cài Demucs cho Python 3.12. Hãy cài dependency tách lời trước khi dùng chế độ giữ nhạc nền."
+        : message;
+      setExportProgress(fields.exportId, {
+        status: "failed",
+        stage: "Render thất bại",
+        error: friendly,
+      });
       return reply.code(500).send({ error: friendly });
     } finally {
-      request.raw.off('aborted', abortOnClientClose);
-      await Promise.all([assFile, stagedOutput, responseSent ? undefined : output].filter((file): file is string => Boolean(file)).map((file) => unlink(file).catch(() => undefined)));
-      await rm(separationDir, { recursive: true, force: true }).catch(() => undefined);
+      request.raw.off("aborted", abortOnClientClose);
+      await Promise.all(
+        [assFile, stagedOutput, responseSent ? undefined : output]
+          .filter((file): file is string => Boolean(file))
+          .map((file) => unlink(file).catch(() => undefined)),
+      );
+      await rm(separationDir, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
       await cleanupUploadSession(uploadDir);
-      if (fields.exportId) setTimeout(() => exportProgress.delete(fields.exportId), 10 * 60_000).unref?.();
+      if (fields.exportId)
+        setTimeout(
+          () => exportProgress.delete(fields.exportId),
+          10 * 60_000,
+        ).unref?.();
     }
   });
 }
