@@ -19,7 +19,14 @@ export default function App() {
   useEffect(() => { setProviders((current) => ensureBuiltInProviders(current)); }, []);
   const notice = useCallback((message: string, kind: 'success' | 'error' = 'success') => setToast({ message, kind }), []);
   const openEditor = () => setPage('editor');
-  const syncVieneuVoices = (voices: AIProvider['voices']) => setProviders((current) => current.map((provider) => provider.id === 'vieneu-local' || provider.providerType === 'vieneu-local' ? { ...provider, voices } : provider));
+  const syncVieneuVoices = (voices: AIProvider['voices']) => setProviders((current) => current.map((provider) => {
+    if (provider.id !== 'vieneu-local' && provider.providerType !== 'vieneu-local') return provider;
+    const nextVoices = voices || [];
+    const hasPresets = nextVoices.some((voice) => voice.source === 'preset' || voice.id.startsWith('preset:'));
+    const storedPresets = (provider.voices || []).filter((voice) => voice.source === 'preset' || voice.id.startsWith('preset:'));
+    const merged = hasPresets ? nextVoices : [...storedPresets, ...nextVoices];
+    return { ...provider, voices: [...new Map(merged.map((voice) => [voice.id, voice])).values()] };
+  }));
   const enableVieneuTts = () => setSettings((current) => {
     const assignment = { providerId: providers.find((provider) => provider.providerType === 'vieneu-local' || provider.id === 'vieneu-local')?.id || 'vieneu-local', model: 'vieneu-v3-turbo' };
     const choices = capabilityAssignments(current, 'tts');

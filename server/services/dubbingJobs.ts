@@ -165,7 +165,7 @@ const DEFAULTS = {
 // Do not reuse audio generated before CapCut request serialization and stable
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
-const TTS_CACHE_VERSION = 'tts-v8-vieneu-reference-fidelity';
+const TTS_CACHE_VERSION = 'tts-v9-vieneu-preset-fidelity';
 export const ADAPTIVE_FIT_VERSION = 2;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -182,7 +182,7 @@ const normalizeAudioMix = (value?: CreateJobInput['audioMix']) => {
       ? 'mute'
       : value?.separateVocals || (legacy && !legacy.voice && (legacy.music || legacy.effects))
         ? 'background'
-        : 'original');
+      : 'mute');
   const keepOriginal = mode !== 'mute';
   return {
     mode,
@@ -249,7 +249,7 @@ export const buildStemAudioMixFilter = (durationMs: number, originalVolume: numb
     // Demucs can leave faint vocal residue in no_vocals.wav. Duck that stem
     // only while the dub voice is active so it cannot sound like a second,
     // reverberant speaker, while retaining the background between cues.
-    filter: `[0:a]apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB,asplit=2[dub][sidechain];${preparation};${background};[background][sidechain]sidechaincompress=threshold=0.005:ratio=12:attack=5:release=180:makeup=1[ducked];[dub][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891:level=false[audioout]`,
+    filter: `[0:a]apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB,asplit=2[dub][sidechain];${preparation};${background};[background][sidechain]sidechaincompress=threshold=0.002:ratio=20:attack=2:release=240:makeup=1[ducked];[dub][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891:level=false[audioout]`,
   };
 };
 

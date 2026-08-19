@@ -13,7 +13,7 @@ const groups: VoiceGroup[] = ['G1', 'G2', 'G3'];
 export type VoiceConfig = { assignment: ProviderAssignment; voice: string; speed: number; volume: number };
 export type DubbingRunOptions = { audioMix: { mode: OriginalAudioMode; keepOriginal: boolean; originalVolume: number; separateVocals: boolean } };
 
-type VoiceItem = { id: string; name?: string; language?: string };
+type VoiceItem = { id: string; name?: string; language?: string; source?: 'preset' | 'clone'; description?: string };
 
 export function DubbingModal({ open, providers, assignments, availableAssignments, cues, pronunciation, sourceVideoReady = false, sourceVideoUploading = false, onClose, onPronunciationChange, onRun, onNotice, job, onJobAction }: { open: boolean; providers: AIProvider[]; assignments: Record<VoiceGroup, ProviderAssignment>; availableAssignments: ProviderAssignment[]; cues: SubtitleCue[]; pronunciation: PronunciationEntry[]; sourceVideoReady?: boolean; sourceVideoUploading?: boolean; onClose: () => void; onPronunciationChange: (entries: PronunciationEntry[]) => void; onRun: (configs: Record<VoiceGroup, VoiceConfig>, options: DubbingRunOptions) => void; onNotice?: (message: string, kind?: 'success' | 'error') => void; job?: DubbingJobStatus; onJobAction?: (action: 'pause' | 'resume' | 'cancel' | 'retry-failed') => void }) {
   const [active, setActive] = useState<VoiceGroup>('G1');
@@ -28,7 +28,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
     G2: { assignment: assignments.G2, voice: '', speed: 1, volume: 1 },
     G3: { assignment: assignments.G3, voice: '', speed: 1, volume: 1 },
   }));
-  const [sourceAudioMode, setSourceAudioMode] = useState<OriginalAudioMode>('background');
+  const [sourceAudioMode, setSourceAudioMode] = useState<OriginalAudioMode>('mute');
   const [originalVolume, setOriginalVolume] = useState(0.25);
   const [demucsAvailable, setDemucsAvailable] = useState<boolean>();
   const voicePickerRef = useRef<HTMLDivElement>(null);
@@ -48,7 +48,8 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const isEdgeTts = providerType === 'edge-tts';
   const isVieneuLocal = providerType === 'vieneu-local';
   const voiceItems = (isHiiuTts ? (currentProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id })) : currentProvider ? loadedVoices[currentProvider.id] || currentProvider.voices || [] : []) as VoiceItem[];
-  const filteredVoices = voiceItems.filter((voice) => `${voice.name || ''} ${voice.id} ${voice.language || ''}`.toLowerCase().includes(voiceQuery.trim().toLowerCase()));
+  const voiceSource = (voice: VoiceItem) => voice.source || (isVieneuLocal ? (voice.id.startsWith('preset:') ? 'preset' : 'clone') : undefined);
+  const filteredVoices = voiceItems.filter((voice) => `${voice.name || ''} ${voice.id} ${voice.language || ''} ${voice.description || ''}`.toLowerCase().includes(voiceQuery.trim().toLowerCase()));
   const selectedVoice = voiceItems.find((voice) => voice.id === current.voice);
   const sourceAudioEnabled = sourceAudioMode !== 'mute';
   const needsStemMix = sourceAudioMode === 'background';
@@ -156,7 +157,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
         <div className="voice-heading"><div className="voice-avatar">{active}</div><div><h3>Voice group {active}</h3><p>Ưu tiên video · giữ nguyên thời lượng gốc</p></div></div>
         <CapabilityAssignmentPicker capability="tts" assignments={assignmentOptions} providers={providers} value={current.assignment} onChange={(assignment) => { const nextProvider = providers.find((item) => item.id === assignment.providerId); patchCurrent({ assignment, voice: nextProvider && resolvedProviderType(nextProvider) === 'hiiu-tts' ? assignment.model : '' }); }} label="TTS Provider + Model" />
         <AssignmentSummary label="TTS Provider đang dùng" assignment={current.assignment} provider={currentProvider} capability="tts" />
-        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : isEdgeTts ? 'Giọng đọc · Microsoft Edge TTS' : isVieneuLocal ? 'Giọng clone · VieNeu Local' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
+        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : isEdgeTts ? 'Giọng đọc · Microsoft Edge TTS' : isVieneuLocal ? 'Giọng đọc · VieNeu Local' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
           {(isElevenLabs || isHiiuTts || isCapCutTts || isEdgeTts || isVieneuLocal) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
             <div className="voice-picker-control">
               <button type="button" className={`voice-picker-trigger ${voiceOpen ? 'active' : ''}`} onClick={() => { if (!voiceOpen) announceDropdownOpen(voiceDropdownId.current); setVoiceOpen((value) => !value); }}>
@@ -168,7 +169,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
               <label className="voice-picker-search"><Search size={15} /><input autoFocus value={voiceQuery} onChange={(event) => setVoiceQuery(event.target.value)} placeholder="Tìm tên hoặc Voice ID..." /></label>
               <div className="voice-picker-meta">{filteredVoices.length} voice · chọn để dùng, nút play để nghe thử</div>
               <div className="voice-picker-list">{filteredVoices.length ? filteredVoices.map((voice) => <div className={`voice-picker-option ${voice.id === current.voice ? 'selected' : ''}`} key={voice.id} role="option" aria-selected={voice.id === current.voice}>
-                <button type="button" className="voice-picker-option-main" onClick={() => { patchCurrent({ voice: voice.id, ...(isHiiuTts ? { assignment: { ...current.assignment, model: voice.id } } : {}) }); setVoiceOpen(false); }}><span className="voice-picker-star">★</span><span><strong>{voice.name || voice.id}</strong><small>{voice.id}{voice.language ? ` · ${voice.language}` : ''}</small></span></button>
+                <button type="button" className="voice-picker-option-main" onClick={() => { patchCurrent({ voice: voice.id, ...(isHiiuTts ? { assignment: { ...current.assignment, model: voice.id } } : {}) }); setVoiceOpen(false); }}><span className="voice-picker-star">★</span><span><strong>{voice.name || voice.id}</strong><small>{voice.description || `${voice.id}${voice.language ? ` · ${voice.language}` : ''}`}</small></span>{voiceSource(voice) && <em className={`voice-picker-source ${voiceSource(voice)}`}>{voiceSource(voice) === 'preset' ? 'CÓ SẴN' : 'CLONE'}</em>}</button>
                 <button type="button" className="voice-picker-option-play" aria-label={`Nghe thử ${voice.name || voice.id}`} onClick={() => void playVoice(voice.id)}>{previewingVoice === voice.id ? <LoaderCircle size={16} className="spin" /> : <CirclePlay size={17} />}</button>
                 {voice.id === current.voice && <Check size={15} className="voice-picker-check" />}
               </div>) : <div className="voice-picker-empty">Không tìm thấy voice phù hợp.</div>}</div>
@@ -194,6 +195,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
           </label>)}
         </div>
         {sourceAudioEnabled && <div className="field"><span>Âm lượng audio gốc <b className="value-badge">{Math.round(originalVolume * 100)}%</b></span><RangeInput min={0} max={1} step={0.05} value={originalVolume} onChange={(event) => setOriginalVolume(Number(event.target.value))} /></div>}
+        {sourceAudioMode === 'original' && <div className="info-note warning">Audio gốc có lời thoại sẽ phát cùng giọng mới và có thể tạo tiếng vọng. Hãy chọn Tắt audio gốc hoặc Giữ nhạc + hiệu ứng để giọng trong hơn.</div>}
         {needsStemMix && <div className="info-note">AutoSub sẽ tách stem trước khi trộn. Cần Demucs và video nguồn đã upload.{demucsAvailable === false ? ' Hiện máy chưa có Demucs.' : sourceVideoUploading ? ' Video đang được khôi phục.' : !sourceVideoReady ? ' Cần video nguồn đã upload.' : ''}</div>}
       </div>
     </> : <div className="dictionary"><div className="section-title"><span>THAY TEXT ĐẦU VÀO TTS</span><button className="button small ghost" onClick={addPronunciation}><Plus size={14} /> Thêm từ</button></div><p className="muted-copy">Chỉ thay cách đọc khi gửi sang TTS, không sửa bản dịch trong editor.</p>{pronunciation.map((entry, index) => <div className="dictionary-row" key={entry.id}><span>{String(index + 1).padStart(2, '0')}</span><input placeholder="Từ gốc" value={entry.source} onChange={(event) => onPronunciationChange(pronunciation.map((item) => item.id === entry.id ? { ...item, source: event.target.value } : item))} /><span>→</span><input placeholder="Đọc thành" value={entry.reading} onChange={(event) => onPronunciationChange(pronunciation.map((item) => item.id === entry.id ? { ...item, reading: event.target.value } : item))} /><button className="icon-button" onClick={() => onPronunciationChange(pronunciation.filter((item) => item.id !== entry.id))}><Trash2 size={14} /></button></div>)}</div>}

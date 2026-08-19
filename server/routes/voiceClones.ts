@@ -10,6 +10,7 @@ import {
   MAX_VOICE_REFERENCE_BYTES,
   voiceProfileToVoice,
 } from '../services/voiceClones';
+import { listVieneuPresetVoices } from '../adapters/vieneuLocal';
 import { workdir } from '../services/ffmpeg';
 
 const UPLOAD_ROOT = path.join(workdir, 'vieneu', 'reference-uploads');
@@ -48,7 +49,7 @@ export async function voiceCloneRoutes(app: FastifyInstance) {
   app.get('/api/voice-clones/vieneu', async (_request, reply) => {
     try {
       const profiles = await listVoiceCloneProfiles();
-      return reply.send({ profiles, voices: profiles.map(voiceProfileToVoice) });
+      return reply.send({ profiles, voices: [...listVieneuPresetVoices(), ...profiles.map(voiceProfileToVoice)] });
     } catch (error) {
       return routeError(reply, error);
     }

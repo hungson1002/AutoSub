@@ -64,7 +64,7 @@ export async function listVoiceCloneProfiles(): Promise<VoiceCloneProfile[]> {
 }
 
 export function voiceProfileToVoice(profile: VoiceCloneProfile): AIVoice {
-  return { id: profile.id, name: profile.name, language: profile.language };
+  return { id: profile.id, name: profile.name, language: profile.language, source: 'clone' };
 }
 
 export async function resolveVoiceCloneReference(id: string) {

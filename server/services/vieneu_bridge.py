@@ -117,7 +117,8 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Nội dung TTS đang trống.")
     output = Path(str(request.get("outputPath", ""))).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    voice = enrolled_voice(str(request.get("referencePath", "")))
+    preset_name = str(request.get("presetName", "")).strip()
+    voice = preset_name if preset_name else enrolled_voice(str(request.get("referencePath", "")))
     tts = get_tts()
     temperature = max(0.35, min(1.0, float(request.get("temperature", 0.75))))
     with contextlib.redirect_stdout(sys.stderr):

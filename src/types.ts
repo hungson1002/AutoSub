@@ -39,6 +39,8 @@ export interface AIVoice {
   name?: string;
   language?: string;
   resourceId?: string;
+  source?: 'preset' | 'clone';
+  description?: string;
 }
 export interface VoiceCloneProfile {
   id: string;

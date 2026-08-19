@@ -283,8 +283,12 @@ async function vieneuAudioQuality(file: string, signal?: AbortSignal) {
   return { durationMs, pauses, score: vieneuHesitationScore(pauses) };
 }
 
-export async function synthesizeWithVieneu(text: string, referencePath: string, speed = 1, signal?: AbortSignal) {
+export type VieneuVoiceInput = { referencePath?: string; presetName?: string };
+
+export async function synthesizeWithVieneu(text: string, voice: VieneuVoiceInput | string, speed = 1, signal?: AbortSignal) {
   const content = text.trim();
+  const voiceInput: VieneuVoiceInput = typeof voice === 'string' ? { referencePath: voice } : voice;
+  if (!voiceInput.referencePath && !voiceInput.presetName) throw new ProviderError('VieNeu TTS requires a preset voice or reference file.', 400);
   if (!content) throw new ProviderError('Nội dung VieNeu TTS đang trống.', 400);
   if (content.length > 8_000) throw new ProviderError('Mỗi lượt VieNeu TTS tối đa 8.000 ký tự.', 400);
   await mkdir(TEMP_ROOT, { recursive: true });
@@ -294,11 +298,11 @@ export async function synthesizeWithVieneu(text: string, referencePath: string, 
   const repairedOutput = path.join(TEMP_ROOT, `${id}.repaired.wav`);
   const finalOutput = path.join(TEMP_ROOT, `${id}.wav`);
   try {
-    await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: rawOutput, temperature: 0.55 }, signal);
+    await sendBridge({ op: 'synthesize', text: content, ...voiceInput, outputPath: rawOutput, temperature: 0.55 }, signal);
     let selectedOutput = rawOutput;
     let selectedQuality = usesShortUtteranceQualityPass(content) ? await vieneuAudioQuality(rawOutput, signal) : undefined;
     if (selectedQuality?.score) {
-      await sendBridge({ op: 'synthesize', text: content, referencePath, outputPath: retryOutput, temperature: 0.42 }, signal);
+      await sendBridge({ op: 'synthesize', text: content, ...voiceInput, outputPath: retryOutput, temperature: 0.42 }, signal);
       const retryQuality = await vieneuAudioQuality(retryOutput, signal);
       if (retryQuality.score < selectedQuality.score) {
         selectedOutput = retryOutput;

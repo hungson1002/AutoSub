@@ -67,11 +67,6 @@ export function ExportModal({
   const [renderProgress, setRenderProgress] = useState<number | undefined>(0);
   const [renderStage, setRenderStage] = useState("Đang chuẩn bị render");
   const hasDub = Boolean(dubTrack || dubbingJobId);
-  const dubbingJobAlreadyMixed = Boolean(
-    dubbingJobId &&
-      dubbingAudioMix?.keepOriginal &&
-      dubbingAudioMix?.separateVocals,
-  );
   const controllerRef = useRef<AbortController | undefined>(undefined);
 
   const validateBeforeAction = () => {
@@ -161,11 +156,10 @@ export function ExportModal({
           uploadId: asset?.uploadId,
           resolution: "original",
           crf: 20,
-          keepAudio: dubbingJobAlreadyMixed
-            ? false
-            : hasDub
-              ? (dubbingAudioMix?.keepOriginal ?? true)
-              : true,
+          // A dub track is already the selected audio mix. Re-adding the
+          // source video's audio here would bring the original dialogue back
+          // and create the same two-speaker echo as the old preview.
+          keepAudio: hasDub ? false : true,
           originalVolume: dubbingAudioMix?.originalVolume ?? 0.25,
           burnSubtitles: true,
           separateVocals: false,

@@ -40,7 +40,7 @@ test('final separated-audio mix is finite and carries a hard output duration', (
   assert.match(mix.filter, /apad=whole_dur=84\.600,atrim=end=84\.600/);
   assert.match(mix.filter, /volume=0\.250/);
   assert.match(mix.filter, /asplit=2\[dub\]\[sidechain\]/);
-  assert.match(mix.filter, /sidechaincompress=threshold=0\.005:ratio=12/);
+  assert.match(mix.filter, /sidechaincompress=threshold=0\.002:ratio=20/);
   assert.match(mix.filter, /amix=inputs=2:duration=first/);
   assert.doesNotMatch(mix.filter, /,apad,/);
 });
@@ -327,7 +327,7 @@ test('persists synthetic jobs with 100, 1000 and 3000 cues', { timeout: 120_000 
       assert.equal(status.doneCues, 0);
       assert.equal(status.progressPercent, 0);
       assert.equal(status.config.batchSize, 30);
-      assert.deepEqual(status.config.audioMix, { mode: 'original', keepOriginal: true, originalVolume: 0.25, separateVocals: false });
+      assert.deepEqual(status.config.audioMix, { mode: 'mute', keepOriginal: false, originalVolume: 0, separateVocals: false });
       assert.equal(status.providerInfo.length, 1);
     }
   } finally { await Promise.all(ids.map(cleanup)); }

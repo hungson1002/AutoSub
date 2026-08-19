@@ -256,11 +256,15 @@ export function VideoPlayer({
       activeCueId ? cues.find((cue) => cue.id === activeCueId) : undefined,
     [activeCueId, cues],
   );
-  const originalMixVolume =
-    dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals
+  const playingDub = audioMode === "dubbed" && Boolean(dubAudioUrl);
+  // The returned dub track is the single source of truth for preview. Playing
+  // the source video's dialogue underneath it creates the exact two-speaker
+  // echo users hear, especially for older jobs saved with original audio on.
+  const originalMixVolume = playingDub
+    ? 0
+    : dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals
       ? dubAudioMix.originalVolume
       : 0;
-  const playingDub = audioMode === "dubbed" && Boolean(dubAudioUrl);
   const muteOriginal = playingDub && originalMixVolume <= 0;
   const syncActiveCue = useCallback(
     (nextTimeMs: number) => {

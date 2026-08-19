@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { listVieneuPresetVoices, vieneuPresetVoiceName } from '../adapters/vieneuLocal';
 import { buildVieneuPauseRepairFilter, parseVieneuInternalSilences, usesShortUtteranceQualityPass, vieneuHesitationScore } from './vieneuRuntime';
+
+test('VieNeu exposes the built-in preset catalog alongside clone voices', () => {
+  const voices = listVieneuPresetVoices();
+  assert.equal(voices.length, 20);
+  assert.equal(voices[0]?.source, 'preset');
+  assert.equal(voices[0]?.id, 'preset:minh-duc');
+  assert.equal(vieneuPresetVoiceName('preset:ngoc-huyen'), 'Ngọc Huyền');
+  assert.equal(vieneuPresetVoiceName('clone-id'), undefined);
+});
 
 test('VieNeu quality parser keeps only pauses inside an utterance', () => {
   const log = [

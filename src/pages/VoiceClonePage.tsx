@@ -27,6 +27,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
   onNotice: (message: string, kind?: 'success' | 'error') => void;
 }) {
   const [profiles, setProfiles] = useState<VoiceCloneProfile[]>([]);
+  const [presetVoices, setPresetVoices] = useState<AIVoice[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [name, setName] = useState('');
   const [file, setFile] = useState<File>();
@@ -47,11 +48,17 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
   const provider = providers.find((item) => resolvedProviderType(item) === 'vieneu-local');
   const ttsEnabled = capabilityAssignments(settings, 'tts').some((item) => item.providerId === provider?.id && item.model === modelId);
   const selectedProfile = useMemo(() => profiles.find((item) => item.id === selectedId), [profiles, selectedId]);
+  const selectedVoice = useMemo(() => presetVoices.find((item) => item.id === selectedId) || (selectedProfile ? { id: selectedProfile.id, name: selectedProfile.name, language: selectedProfile.language, source: 'clone' as const } : undefined), [presetVoices, selectedProfile, selectedId]);
 
   const replaceProfiles = (nextProfiles: VoiceCloneProfile[], voices: AIVoice[]) => {
+    const nextPresets = voices.filter((voice) => voice.source === 'preset' || voice.id.startsWith('preset:'));
+    if (nextPresets.length) setPresetVoices(nextPresets);
     setProfiles(nextProfiles);
     onVoicesChange(voices);
-    setSelectedId((current) => nextProfiles.some((item) => item.id === current) ? current : nextProfiles[0]?.id || '');
+    setSelectedId((current) => {
+      const available = [...(nextPresets.length ? nextPresets : presetVoices), ...nextProfiles.map((item) => ({ id: item.id }))];
+      return available.some((item) => item.id === current) ? current : available[0]?.id || '';
+    });
   };
 
   const loadProfiles = async (signal?: AbortSignal) => {
@@ -127,7 +134,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
 
   const testVoice = async () => {
     if (!provider) { onNotice('Không tìm thấy provider VieNeu Local.', 'error'); return; }
-    if (!selectedId) { onNotice('Hãy chọn một giọng clone để nghe thử.', 'error'); return; }
+    if (!selectedId) { onNotice('Hãy chọn một giọng để nghe thử.', 'error'); return; }
     if (!previewText.trim()) { onNotice('Hãy nhập câu cần đọc thử.', 'error'); return; }
     setTesting(true);
     try {
@@ -187,6 +194,13 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
       </section>
 
       <section className="voice-clone-card voice-clone-library-card">
+        {presetVoices.length > 0 && <div className="voice-clone-preset-block">
+          <div className="section-title"><span>GIỌNG DÙNG SẴN · VIENEU</span><small>{presetVoices.length} preset</small></div>
+          <div className="voice-clone-preset-list">{presetVoices.map((voice) => <div key={voice.id} className={`voice-clone-profile voice-clone-preset ${selectedId === voice.id ? 'selected' : ''}`}>
+            <button type="button" className="voice-clone-profile-main" onClick={() => setSelectedId(voice.id)}><span className="voice-clone-avatar">{(voice.name || voice.id).trim().slice(0, 2).toUpperCase()}</span><span><strong>{voice.name || voice.id}</strong><small>{voice.description || voice.language || 'VieNeu preset'}</small><em>CÓ SẴN · Không cần file mẫu</em></span>{selectedId === voice.id && <Check size={15} />}</button>
+            <em className="voice-clone-source-badge">PRESET</em>
+          </div>)}</div>
+        </div>}
         <div className="section-title"><span>02 · THƯ VIỆN GIỌNG</span><button type="button" className="icon-button" title="Tải lại danh sách" disabled={loading} onClick={() => void loadProfiles()}><RefreshCw size={14} className={loading ? 'spin' : ''} /></button></div>
         {loading ? <div className="voice-clone-empty"><LoaderCircle size={25} className="spin" /><strong>Đang tải thư viện giọng</strong></div> : profiles.length ? <div className="voice-clone-profile-list">{profiles.map((profile) => <div key={profile.id} className={`voice-clone-profile ${selectedId === profile.id ? 'selected' : ''}`}>
           <button type="button" className="voice-clone-profile-main" onClick={() => setSelectedId(profile.id)}><span className="voice-clone-avatar">{profile.name.trim().slice(0, 2).toUpperCase()}</span><span><strong>{profile.name}</strong><small>{formatDuration(profile.durationMs)} · {formatCreatedAt(profile.createdAt)}</small><em>{profile.sourceName}{(profile.referenceVersion ?? 0) < 2 ? ' · mẫu cũ 24 kHz, nên tạo lại' : ' · mẫu 48 kHz'}</em></span>{selectedId === profile.id && <Check size={15} />}</button>
@@ -195,7 +209,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
       </section>
 
       <section className="voice-clone-card voice-clone-preview-card">
-        <div className="section-title"><span>03 · NGHE THỬ</span><small>{selectedProfile?.name || 'Chưa chọn giọng'}</small></div>
+        <div className="section-title"><span>03 · NGHE THỬ</span><small>{selectedVoice?.name || 'Chưa chọn giọng'}</small></div>
         <div className="field"><span>Nội dung thử</span><textarea rows={4} maxLength={600} value={previewText} onChange={(event) => setPreviewText(event.target.value)} /></div>
         <div className="field"><span>Tốc độ <b className="value-badge">{speed.toFixed(2)}x</b></span><RangeInput min={0.9} max={1.5} step={0.05} value={speed} onChange={(event) => setSpeed(Number(event.target.value))} /></div>
         <button type="button" className="button secondary full" disabled={testing || !selectedId || !previewText.trim()} onClick={() => void testVoice()}>{testing ? <LoaderCircle size={15} className="spin" /> : <CirclePlay size={16} />} {testing ? 'Đang dựng giọng...' : 'Tạo bản nghe thử'}</button>
@@ -203,10 +217,10 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
           <audio ref={previewAudioRef} autoPlay preload="metadata" src={previewUrl} onLoadedMetadata={(event) => setPreviewDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)} onDurationChange={(event) => setPreviewDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)} onTimeUpdate={(event) => setPreviewTime(event.currentTarget.currentTime)} onPlay={() => setPreviewPlaying(true)} onPause={() => setPreviewPlaying(false)} onEnded={() => setPreviewPlaying(false)} />
           <button type="button" className="voice-clone-audio-play" onClick={togglePreviewPlayback} aria-label={previewPlaying ? 'Tạm dừng bản nghe thử' : 'Phát bản nghe thử'}>{previewPlaying ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}</button>
           <div className="voice-clone-audio-track"><div><span>BẢN NGHE THỬ</span><time>{formatPlaybackTime(previewTime)} <i>/</i> {formatPlaybackTime(previewDuration)}</time></div><RangeInput aria-label="Vị trí phát bản nghe thử" min={0} max={previewDuration || 0.01} step={0.01} value={Math.min(previewTime, previewDuration || 0)} onChange={(event) => seekPreview(Number(event.target.value))} /></div>
-          <a className="icon-button voice-clone-audio-download" href={previewUrl} download={`${selectedProfile?.name || 'voice-preview'}.wav`} title="Tải WAV" aria-label="Tải bản nghe thử dạng WAV"><Download size={15} /></a>
+          <a className="icon-button voice-clone-audio-download" href={previewUrl} download={`${selectedVoice?.name || 'voice-preview'}.wav`} title="Tải WAV" aria-label="Tải bản nghe thử dạng WAV"><Download size={15} /></a>
         </div>}
-        <div className="voice-clone-use-card"><AudioLines size={17} /><div><strong>Dùng cho lồng tiếng phim</strong><small>Trong Lồng tiếng video, chọn TTS Provider VieNeu Local Clone rồi chọn tên giọng này.</small></div><button type="button" className={`button small ${ttsEnabled ? 'ghost' : 'primary'}`} disabled={!profiles.length} onClick={enableForDubbing}>{ttsEnabled ? <Check size={14} /> : <Volume2 size={14} />} {ttsEnabled ? 'Đã bật TTS' : 'Bật cho TTS'}</button></div>
-        <button type="button" className="text-button voice-clone-open-editor" disabled={!profiles.length} onClick={onOpenEditor}>Mở trang Lồng tiếng video →</button>
+        <div className="voice-clone-use-card"><AudioLines size={17} /><div><strong>Dùng cho lồng tiếng phim</strong><small>Trong Lồng tiếng video, chọn TTS Provider VieNeu Local rồi chọn preset hoặc clone.</small></div><button type="button" className={`button small ${ttsEnabled ? 'ghost' : 'primary'}`} disabled={!presetVoices.length && !profiles.length} onClick={enableForDubbing}>{ttsEnabled ? <Check size={14} /> : <Volume2 size={14} />} {ttsEnabled ? 'Đã bật TTS' : 'Bật cho TTS'}</button></div>
+        <button type="button" className="text-button voice-clone-open-editor" disabled={!presetVoices.length && !profiles.length} onClick={onOpenEditor}>Mở trang Lồng tiếng video →</button>
       </section>
     </div>
 
