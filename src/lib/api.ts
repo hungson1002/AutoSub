@@ -24,6 +24,20 @@ export interface TranslationMemoryItem {
   source: string;
   translation: string;
 }
+export function buildTranslationMemory(cues: SubtitleCue[], cueId: string, limit = 24): TranslationMemoryItem[] {
+  const cueIndex = cues.findIndex((cue) => cue.id === cueId);
+  const previous = cues
+    .slice(0, cueIndex < 0 ? cues.length : cueIndex)
+    .filter((cue) => cue.translatedText.trim());
+  const anchors = previous.slice(0, Math.min(8, limit));
+  const recent = limit > anchors.length ? previous.slice(-(limit - anchors.length)) : [];
+  const seen = new Set<string>();
+  return [...anchors, ...recent].flatMap((cue) => {
+    if (seen.has(cue.id)) return [];
+    seen.add(cue.id);
+    return [{ source: cue.originalText, translation: cue.translatedText.trim() }];
+  });
+}
 export const reviewVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/review/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
 
@@ -282,6 +296,7 @@ export const api = {
     signal?: AbortSignal,
     contextCues: SubtitleCue[] = cues,
     translationMemory: TranslationMemoryItem[] = [],
+    translationGuide = '',
   ) =>
     request<{ items: Array<{ id: string; translation: string }> }>(
       "/api/translate",
@@ -314,6 +329,35 @@ export const api = {
           customPrompt,
           glossary,
           translationMemory: translationMemory.slice(-24),
+          translationGuide,
+        }),
+        signal,
+      },
+    ),
+  translationGuide: (
+    provider: AIProvider,
+    model: string | undefined,
+    cues: SubtitleCue[],
+    sourceLanguage: string,
+    targetLanguage: string,
+    style: string,
+    customPrompt: string,
+    glossary: GlossaryEntry[],
+    signal?: AbortSignal,
+  ) =>
+    request<{ guide: string }>(
+      "/api/translate/guide",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          provider,
+          model,
+          items: cues.map((cue) => ({ id: cue.id, text: cue.originalText })),
+          sourceLanguage,
+          targetLanguage,
+          style,
+          customPrompt,
+          glossary,
         }),
         signal,
       },

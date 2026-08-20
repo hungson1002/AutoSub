@@ -55,12 +55,20 @@ export function chat(provider: AIProvider, model: string, messages: Array<{ role
   return openai.chat(provider, model, messages, signal, maxTokens);
 }
 
-export function translateBatch(provider: AIProvider, model: string, items: TranslationItem[], sourceLanguage: string, targetLanguage: string, style: string, customPrompt: string, glossary: Array<{ source: string; target: string }>, translationMemory: TranslationMemoryItem[] = []) {
+export function translateBatch(provider: AIProvider, model: string, items: TranslationItem[], sourceLanguage: string, targetLanguage: string, style: string, customPrompt: string, glossary: Array<{ source: string; target: string }>, translationMemory: TranslationMemoryItem[] = [], translationGuide = '') {
   if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
   if (isElevenLabs(provider)) throw new ProviderError('Dịch phụ đề cần provider có capability Chat.', 400);
   if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
   if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
-  return openai.translateBatch(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary, translationMemory);
+  return openai.translateBatch(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary, translationMemory, translationGuide);
+}
+
+export function buildTranslationGuide(provider: AIProvider, model: string, items: TranslationItem[], sourceLanguage: string, targetLanguage: string, style: string, customPrompt: string, glossary: Array<{ source: string; target: string }>) {
+  if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
+  if (isElevenLabs(provider)) throw new ProviderError('Dịch phụ đề cần provider có capability Chat.', 400);
+  if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
+  if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
+  return openai.buildTranslationGuide(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary);
 }
 
 export function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal): Promise<{ text: string; segments: SubtitleSegment[] }> {

@@ -66,9 +66,8 @@ test('CapCut jobs are serialized and narration is sped up without padding or tri
   const capcutCue = { ...cues(1)[0], provider: capcutProvider };
   assert.equal(effectiveTtsConcurrency([capcutCue], 3), 1);
   assert.equal(effectiveTtsConcurrency(cues(1), 3), 3);
-  assert.match(tempoFilter(1.25), /rubberband=tempo=1\.250/);
-  assert.match(tempoFilter(1.25), /smoothing=off/);
-  assert.doesNotMatch(tempoFilter(1.25), /smoothing=on/);
+  assert.match(tempoFilter(1.25), /atempo=1\.250/);
+  assert.doesNotMatch(tempoFilter(1.25), /rubberband|smoothing=/);
   assert.doesNotMatch(tempoFilter(1.25), /apad|atrim/);
   assert.doesNotMatch(tempoFilter(1.25), /alimiter/);
   assert.equal(tempoFilter(1), 'anull');

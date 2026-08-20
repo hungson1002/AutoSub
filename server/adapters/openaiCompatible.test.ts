@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import type { AIProvider } from '../types';
-import { listModels, normalizeSttLanguage, synthesize, testModel, transcribe, translateBatch } from './openaiCompatible';
+import { buildTranslationGuide, listModels, normalizeSttLanguage, synthesize, testModel, transcribe, translateBatch } from './openaiCompatible';
 
 test('normalizes UI language labels to provider language codes', () => {
   assert.equal(normalizeSttLanguage('中文'), 'zh');
@@ -181,7 +181,33 @@ test('keeps translation results in input id order and uses a strict one-to-one p
     assert.match(request?.messages?.[0]?.content || '', /contextBefore/i);
     assert.match(request?.messages?.[0]?.content || '', /translationMemory/i);
     assert.match(request?.messages?.[0]?.content || '', /Review phim mode/i);
+    assert.match(request?.messages?.[0]?.content || '', /pronounRules/i);
+    assert.match(request?.messages?.[0]?.content || '', /speaker\/listener/i);
     assert.match(request?.messages?.[1]?.content || '', /Nhân vật chính/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('builds a compact review translation bible before translating', async () => {
+  const originalFetch = globalThis.fetch;
+  const provider: AIProvider = {
+    id: 'translation-guide-provider', name: 'Translation guide provider', baseUrl: 'http://provider.test/v1',
+    models: [], providerType: 'openai-compatible', authType: 'none', enabled: true, capabilities: { chat: true },
+  };
+  let request: { messages?: Array<{ role: string; content: string }> } | undefined;
+  globalThis.fetch = (async (_input: string | URL, init?: RequestInit) => {
+    request = JSON.parse(String(init?.body)) as typeof request;
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"characters":[],"terms":[],"relationships":[],"style":"review"}' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const guide = await buildTranslationGuide(provider, 'model', [{ id: 'a', text: 'Source A' }], 'Chinese', 'Vietnamese', 'Review phim', '', []);
+    assert.match(guide, /characters/);
+    assert.match(request?.messages?.[0]?.content || '', /translation bible/i);
+    assert.match(request?.messages?.[0]?.content || '', /pronounRules/i);
+    assert.match(request?.messages?.[0]?.content || '', /neutral Vietnamese fallback/i);
+    assert.match(request?.messages?.[1]?.content || '', /Source A/);
+    assert.match(request?.messages?.[1]?.content || '', /cue_id=a/);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -742,8 +742,9 @@ input[type="range"] { width: 100%; accent-color: var(--orange); cursor: pointer;
 .progress-copy span { min-width: 0; line-height: 1.45; }
 .progress-copy strong { flex: 0 0 auto; }
 .progress-track div { transition: width .45s ease; }
-.progress-track div.indeterminate { width: 42% !important; animation: progress-indeterminate 1.2s ease-in-out infinite alternate; }
+.progress-track div.indeterminate { width: 42% !important; animation: progress-indeterminate 1.2s linear infinite; }
 @keyframes progress-indeterminate { from { opacity: .55; transform: translateX(-115%); } to { opacity: 1; transform: translateX(245%); } }
+.batch-progress-track div.indeterminate, .provider-test-track div.indeterminate { animation: batch-progress-indeterminate 1.1s linear infinite; }
 
 .translation-setup-modal { width: min(650px, 100%); max-height: min(820px, calc(100vh - 28px)); }
 .translation-setup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }

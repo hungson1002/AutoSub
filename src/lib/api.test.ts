@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { defaultStyle, type AIProvider } from "../types";
-import { api, buildRequestInit, friendlyErrorMessage } from "./api";
+import { defaultStyle, type AIProvider, type SubtitleCue } from "../types";
+import { api, buildRequestInit, buildTranslationMemory, friendlyErrorMessage } from "./api";
 import { LatestUploadGuard } from "./latestUpload";
 import { videoAssetUploadFile } from "./videoAsset";
 
@@ -428,6 +428,24 @@ test("translation request includes neighboring cue context for each target cue",
     { id: "cue-a", text: "Source A", durationMs: 1000, targetDurationMs: 1000, contextBefore: [], contextAfter: ["Source B"] },
     { id: "cue-b", text: "Source B", durationMs: 1200, targetDurationMs: 1200, contextBefore: ["Source A"], contextAfter: [] },
   ]);
+});
+
+test("translation memory keeps file anchors and entries near the current cue", () => {
+  const cues: SubtitleCue[] = Array.from({ length: 40 }, (_, index) => ({
+    id: `cue-${index + 1}`,
+    index: index + 1,
+    startMs: index * 1000,
+    endMs: (index + 1) * 1000,
+    originalText: `Source ${index + 1}`,
+    translatedText: `Translated ${index + 1}`,
+    voiceGroup: "G1",
+    enabled: true,
+  }));
+  const memory = buildTranslationMemory(cues, "cue-31");
+  assert.equal(memory.length, 24);
+  assert.equal(memory[0]?.source, "Source 1");
+  assert.equal(memory[7]?.source, "Source 8");
+  assert.equal(memory.at(-1)?.source, "Source 30");
 });
 
 test("OCR progress polling stays a small JSON request tied to the upload reference", async () => {

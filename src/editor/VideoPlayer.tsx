@@ -77,6 +77,10 @@ const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 const audioRefTime = (audio: HTMLAudioElement) =>
   Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+const videoDurationMs = (video: HTMLVideoElement) =>
+  Number.isFinite(video.duration) && video.duration > 0
+    ? video.duration * 1000
+    : undefined;
 const nearestGuide = (
   value: number,
   targets: AlignmentGuide[],
@@ -480,6 +484,13 @@ export function VideoPlayer({
     if (audioMode === "dubbed" && dubAudioUrl && dubAudioRef.current)
       dubAudioRef.current.currentTime = next / 1000;
     reportTime(next);
+  };
+  const syncVideoDuration = (video: HTMLVideoElement) => {
+    const nextDuration = videoDurationMs(video);
+    if (nextDuration === undefined) return;
+    setDuration((current) =>
+      Math.abs(current - nextDuration) < 0.5 ? current : nextDuration,
+    );
   };
   const beginRoiDrag = (event: PointerEvent<HTMLElement>, kind: DragKind) => {
     if (!roi || !onRoiChange) return;
@@ -1028,13 +1039,17 @@ export function VideoPlayer({
                       src={asset.url}
                       style={mediaCropStyle}
                       onLoadedMetadata={(event) => {
-                        setDuration(event.currentTarget.duration * 1000);
+                        syncVideoDuration(event.currentTarget);
                         setVideoSize({
                           width: event.currentTarget.videoWidth || 16,
                           height: event.currentTarget.videoHeight || 9,
                         });
                       }}
+                      onDurationChange={(event) =>
+                        syncVideoDuration(event.currentTarget)
+                      }
                       onTimeUpdate={(event) => {
+                        syncVideoDuration(event.currentTarget);
                         const next = event.currentTarget.currentTime * 1000;
                         if (
                           effectiveVideoEdit.trimEndMs &&

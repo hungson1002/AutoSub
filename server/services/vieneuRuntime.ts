@@ -23,6 +23,11 @@ export type VieneuInternalSilence = { startMs: number; endMs: number; durationMs
 const VIENEU_HESITATION_MIN_MS = 160;
 const VIENEU_NATURAL_PAUSE_MS = 95;
 const VIENEU_EDGE_GUARD_MS = 80;
+// Lower sampling keeps short subtitle cues from developing unstable tails or
+// repeated phonemes. A second, colder pass is used when the first pass has a
+// measurable hesitation problem.
+const VIENEU_PRIMARY_TEMPERATURE = 0.42;
+const VIENEU_RETRY_TEMPERATURE = 0.35;
 
 export function parseVieneuInternalSilences(stderr: string, durationMs: number, edgeGuardMs = VIENEU_EDGE_GUARD_MS): VieneuInternalSilence[] {
   const pauses: VieneuInternalSilence[] = [];
@@ -298,11 +303,11 @@ export async function synthesizeWithVieneu(text: string, voice: VieneuVoiceInput
   const repairedOutput = path.join(TEMP_ROOT, `${id}.repaired.wav`);
   const finalOutput = path.join(TEMP_ROOT, `${id}.wav`);
   try {
-    await sendBridge({ op: 'synthesize', text: content, ...voiceInput, outputPath: rawOutput, temperature: 0.55 }, signal);
+    await sendBridge({ op: 'synthesize', text: content, ...voiceInput, outputPath: rawOutput, temperature: VIENEU_PRIMARY_TEMPERATURE }, signal);
     let selectedOutput = rawOutput;
     let selectedQuality = usesShortUtteranceQualityPass(content) ? await vieneuAudioQuality(rawOutput, signal) : undefined;
     if (selectedQuality?.score) {
-      await sendBridge({ op: 'synthesize', text: content, ...voiceInput, outputPath: retryOutput, temperature: 0.42 }, signal);
+      await sendBridge({ op: 'synthesize', text: content, ...voiceInput, outputPath: retryOutput, temperature: VIENEU_RETRY_TEMPERATURE }, signal);
       const retryQuality = await vieneuAudioQuality(retryOutput, signal);
       if (retryQuality.score < selectedQuality.score) {
         selectedOutput = retryOutput;

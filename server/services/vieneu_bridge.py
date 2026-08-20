@@ -127,7 +127,10 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
             voice=voice,
             denoise=False,
             show_progress=False,
-            apply_watermark=True,
+            # The exported track is already rendered locally; the model's
+            # optional watermark adds a low-level modulation that can sound
+            # like a faint doubled/reverberant voice on short cues.
+            apply_watermark=False,
             temperature=temperature,
             top_k=20,
             top_p=0.90,

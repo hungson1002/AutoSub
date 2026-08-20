@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AIProvider, AppSettings, ProviderAssignment, SubtitleCue, VideoAsset } from '../types';
 import { defaultStyle } from '../types';
-import { api, friendlyErrorMessage, MAX_BROWSER_UPLOAD_BYTES } from '../lib/api';
+import { api, buildTranslationMemory, friendlyErrorMessage, MAX_BROWSER_UPLOAD_BYTES } from '../lib/api';
 import { extractionStatusStorage, storage, type ExtractionRunState, type ExtractionRunStatus } from '../lib/storage';
 import { AudioLines, Check, FileAudio, FileVideo, Languages, Upload, Video, WandSparkles } from '../components/Icons';
 import { AssignmentSummary } from '../components/AssignmentSummary';
@@ -199,11 +199,30 @@ export function ExtractPage({ providers, settings, initialAsset, onCuesChange, o
           if (!translationProvider || !translationAssignment.model || !isCapabilityModelPassed(storage.modelPreferences(), translationProvider.id, 'translation', translationAssignment.model)) {
             onNotice('STT đã xong; auto-translation bị bỏ qua vì chưa chọn model Translation đã test thành công.', 'error');
           } else {
-            setProgressStage('Đang dịch các cue vừa nhận');
-            easeProgressTo(92);
-            const translated = await api.translate(translationProvider, translationAssignment.model, result.cues, sourceLanguage, 'Tiếng Việt', 'Tự nhiên', '', storage.glossary().filter((entry) => entry.enabled), controller.signal);
+            setProgressStage('Đang lập translation bible cho nhân vật và thuật ngữ');
+            easeProgressTo(88);
+            let translationGuide = '';
+            try {
+              translationGuide = (await api.translationGuide(translationProvider, translationAssignment.model, result.cues, sourceLanguage, 'Tiếng Việt', 'Review phim', '', storage.glossary().filter((entry) => entry.enabled), controller.signal)).guide;
+            } catch (error) {
+              if (error instanceof DOMException && error.name === 'AbortError') throw error;
+            }
+            const translatedCues = result.cues.map((cue) => ({ ...cue }));
+            const batchSize = 8;
+            const totalBatches = Math.ceil(result.cues.length / batchSize);
+            for (let start = 0; start < result.cues.length; start += batchSize) {
+              const batch = result.cues.slice(start, start + batchSize);
+              const batchNumber = Math.floor(start / batchSize) + 1;
+              setProgressStage(`Đang dịch batch ${batchNumber}/${totalBatches} · cue ${start + 1}–${start + batch.length}`);
+              const translated = await api.translate(translationProvider, translationAssignment.model, batch, sourceLanguage, 'Tiếng Việt', 'Review phim', '', storage.glossary().filter((entry) => entry.enabled), controller.signal, translatedCues, buildTranslationMemory(translatedCues, batch[0]?.id || '', 24), translationGuide);
+              for (const item of translated.items) {
+                const cue = translatedCues.find((candidate) => candidate.id === item.id);
+                if (cue) cue.translatedText = item.translation;
+              }
+              setProgress(Math.min(90, 65 + ((start + batch.length) / Math.max(result.cues.length, 1)) * 25));
+            }
             clearProgressTimers();
-            nextCues = result.cues.map((cue) => ({ ...cue, translatedText: translated.items.find((item) => item.id === cue.id)?.translation || cue.translatedText }));
+            nextCues = translatedCues;
             setProgress(90);
             setProgressStage('Đã dịch xong · đang lưu SubtitleCue[]');
           }

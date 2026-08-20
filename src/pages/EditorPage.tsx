@@ -16,9 +16,9 @@ import type {
 } from "../types";
 import {
   api,
+  buildTranslationMemory,
   friendlyErrorMessage,
   MAX_BROWSER_UPLOAD_BYTES,
-  type TranslationMemoryItem,
 } from "../lib/api";
 import { storage } from "../lib/storage";
 import {
@@ -847,7 +847,27 @@ export function EditorPage({
     setTranslationStage("Đang chuẩn bị dữ liệu dịch");
     try {
       const next = [...cues];
-      const translationMemory: TranslationMemoryItem[] = [];
+      let translationGuide = "";
+      if (setup.style === "Review phim") {
+        setTranslationStage("Đang lập translation bible cho nhân vật và thuật ngữ");
+        try {
+          translationGuide = (
+            await api.translationGuide(
+              provider,
+              setup.model,
+              cues,
+              setup.sourceLanguage,
+              setup.targetLanguage,
+              setup.style,
+              setup.customPrompt,
+              setup.glossary.filter((entry) => entry.enabled),
+              controller.signal,
+            )
+          ).guide;
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") throw error;
+        }
+      }
       const batchSize = setup.mode === "quality" ? 8 : 16;
       const totalBatches = Math.ceil(cues.length / batchSize);
       for (let start = 0; start < cues.length; start += batchSize) {
@@ -872,18 +892,14 @@ export function EditorPage({
           setup.glossary.filter((entry) => entry.enabled),
           controller.signal,
           next,
-          translationMemory,
+          buildTranslationMemory(next, batch[0]?.id || "", 24),
+          translationGuide,
         );
         clearTranslationProgressTimer();
         for (const item of result.items) {
           const cue = next.find((candidate) => candidate.id === item.id);
           if (cue) cue.translatedText = item.translation;
         }
-        translationMemory.push(...batch.flatMap((cue) => {
-          const translation = result.items.find((item) => item.id === cue.id)?.translation?.trim();
-          return translation ? [{ source: cue.originalText, translation }] : [];
-        }));
-        if (translationMemory.length > 24) translationMemory.splice(0, translationMemory.length - 24);
         const completed = Math.min(
           98,
           ((start + batch.length) / cues.length) * 100,

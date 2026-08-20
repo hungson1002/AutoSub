@@ -165,7 +165,7 @@ const DEFAULTS = {
 // Do not reuse audio generated before CapCut request serialization and stable
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
-const TTS_CACHE_VERSION = 'tts-v9-vieneu-preset-fidelity';
+const TTS_CACHE_VERSION = 'tts-v10-clean-speech-fit';
 export const ADAPTIVE_FIT_VERSION = 2;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -490,10 +490,11 @@ async function rewriteTranslation(cue: StoredCue, provider: AIProvider, model: s
 
 export function tempoFilter(tempo: number) {
   const filters: string[] = [];
-  // Rubber Band's smoothing mode can emit isolated full-scale polarity jumps
-  // while time-stretching otherwise clean PCM speech. Those impulses survive
-  // mastering as audible crackle. Keep smoothing explicitly disabled.
-  if (Math.abs(tempo - 1) > 0.005) filters.push(`rubberband=tempo=${tempo.toFixed(3)}:pitch=1.000:transients=mixed:detector=compound:phase=laminar:window=standard:smoothing=off:formant=preserved`);
+  // This filter is used for speech, not music. Rubber Band preserves pitch
+  // well but its phase reconstruction can leave a short chorus/echo on some
+  // stretched syllables. FFmpeg's atempo is cleaner for the bounded speech
+  // range used here (0.90x-1.18x), so keep every cue in one stable voice path.
+  if (Math.abs(tempo - 1) > 0.005) filters.push(`atempo=${clamp(tempo, 0.5, 2).toFixed(3)}`);
   // Limiting belongs to the completed timeline, not every individual cue.
   // Applying it here and again after mixing caused avoidable pumping/distortion.
   return filters.join(',') || 'anull';

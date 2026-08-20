@@ -15,7 +15,7 @@ Provider được nhập tại **Cài đặt → AI Providers**. Provider ưu ti
 
 ## Luồng đã có
 
-- Import và parse `.srt` / `.vtt`, dịch theo batch tối đa 30 cue, validate ID và export SRT.
+- Import và parse `.srt` / `.vtt`, dịch theo batch, validate ID và export SRT.
 - Provider manager: test connection, refresh models, model nhập tay khi `/models` không có.
 - OCR video theo ROI, sampling 1–4 FPS, crop frame bằng FFmpeg, nhận dạng Vision, group/deduplicate và lọc watermark lặp lại.
 - STT video/audio: tách audio bằng FFmpeg rồi gọi `/audio/transcriptions`.
@@ -28,6 +28,26 @@ Provider được nhập tại **Cài đặt → AI Providers**. Provider ưu ti
 - Có thể tải bản dựng lên kênh YouTube thử nghiệm ở chế độ **Private**, theo dõi trạng thái xử lý và mở thẳng YouTube Studio để xác nhận Content ID.
 
 Các capability AI không được provider hỗ trợ sẽ trả lỗi rõ ràng thay vì hiển thị dữ liệu giả.
+
+## Dịch phụ đề theo ngữ cảnh
+
+Luồng dịch subtitle không còn xử lý từng dòng hoàn toàn độc lập:
+
+- Chế độ **Chất lượng** gửi 8 cue mỗi batch; chế độ **Nhanh** gửi 16 cue mỗi batch.
+- Mỗi cue kèm tối đa 2 câu trước và 2 câu sau để model hiểu đại từ, câu bị cắt, chủ thể và mạch hành động.
+- Với phong cách **Review phim**, AI tạo một translation bible trước để ghi nhớ tên nhân vật, vai trò, quan hệ, cách xưng hô và thuật ngữ lặp lại.
+- Cách xưng hô được lưu thành bảng hai chiều giữa từng cặp nhân vật; nếu transcript không đủ dữ kiện xác định người nói, hệ thống ưu tiên cách gọi trung tính thay vì tự suy diễn “mày/tao”.
+- Translation memory được chọn theo vị trí trong phim, giữ cả các mốc đầu và các câu gần batch hiện tại để hạn chế trôi cách gọi ở video dài.
+- Từ điển dịch được gửi như quy tắc bắt buộc; thuật ngữ đã khai báo phải giữ đúng cách viết trong toàn bộ kết quả.
+- Phong cách mặc định là **Review phim**, ưu tiên câu tiếng Việt tự nhiên như lời kể recap nhưng không tự thêm tình tiết ngoài nguồn.
+- Auto-translate sau STT cũng dùng cùng pipeline Review phim theo batch, thay vì gửi toàn bộ transcript trong một request.
+
+Nếu cần chạy lại phần kiểm tra sau khi chỉnh sửa:
+
+```powershell
+npm test
+npm run build
+```
 
 ## Review tự động và kiểm tra YouTube
 
