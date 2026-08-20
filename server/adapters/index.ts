@@ -1,4 +1,4 @@
-import type { AIModel, AIProvider, Capability, SubtitleSegment, TranslationItem } from '../types';
+import type { AIModel, AIProvider, Capability, SubtitleSegment, TranslationItem, TranslationMemoryItem } from '../types';
 import { resolveProviderType } from '../providers/base';
 import * as elevenlabs from './elevenlabs';
 import * as capcut from './capcut';
@@ -55,12 +55,12 @@ export function chat(provider: AIProvider, model: string, messages: Array<{ role
   return openai.chat(provider, model, messages, signal, maxTokens);
 }
 
-export function translateBatch(provider: AIProvider, model: string, items: TranslationItem[], sourceLanguage: string, targetLanguage: string, style: string, customPrompt: string, glossary: Array<{ source: string; target: string }>) {
+export function translateBatch(provider: AIProvider, model: string, items: TranslationItem[], sourceLanguage: string, targetLanguage: string, style: string, customPrompt: string, glossary: Array<{ source: string; target: string }>, translationMemory: TranslationMemoryItem[] = []) {
   if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
   if (isElevenLabs(provider)) throw new ProviderError('Dịch phụ đề cần provider có capability Chat.', 400);
   if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
   if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
-  return openai.translateBatch(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary);
+  return openai.translateBatch(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary, translationMemory);
 }
 
 export function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal): Promise<{ text: string; segments: SubtitleSegment[] }> {

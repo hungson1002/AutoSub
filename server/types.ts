@@ -7,7 +7,17 @@ export interface AIVoice { id: string; name?: string; language?: string; resourc
 export interface AIModel { id: string; name?: string; capabilities?: ProviderCapabilities; raw?: unknown; }
 export interface AIProvider { id: string; name: string; baseUrl: string; apiKey?: string; enabled: boolean; models: AIModel[]; providerType: ProviderType; authType: ProviderAuthType; authHeaderName?: string; authPrefix?: string; queryParamName?: string; overrideAuthentication?: boolean; overrideCapabilities?: boolean; overrideEndpoints?: boolean; capabilities: ProviderCapabilities; endpoints?: ProviderEndpoints; voices?: AIVoice[]; }
 export type Capability = 'translation' | 'vision' | 'stt' | 'tts';
-export interface TranslationItem { id: string; text: string; durationMs?: number; targetDurationMs?: number; previousText?: string; nextText?: string; }
+export interface TranslationItem {
+  id: string;
+  text: string;
+  durationMs?: number;
+  targetDurationMs?: number;
+  previousText?: string;
+  nextText?: string;
+  contextBefore?: string[];
+  contextAfter?: string[];
+}
+export interface TranslationMemoryItem { source: string; translation: string; }
 export interface SubtitleWord { word?: string; text?: string; start?: number; end?: number; startMs?: number; endMs?: number; probability?: number; confidence?: number; }
 export interface SubtitleSegment { id?: string; start?: number; end?: number; text?: string; words?: SubtitleWord[]; }
 

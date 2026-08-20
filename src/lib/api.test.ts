@@ -364,7 +364,7 @@ test("editor can recover an upload file from the video asset preview URL", async
   assert.equal(file.size, 11);
 });
 
-test("translation request sends each cue independently without neighboring cue text", async () => {
+test("translation request includes neighboring cue context for each target cue", async () => {
   const originalFetch = globalThis.fetch;
   let body: { items: Array<Record<string, unknown>> } | undefined;
   globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -425,8 +425,8 @@ test("translation request sends each cue independently without neighboring cue t
     globalThis.fetch = originalFetch;
   }
   assert.deepEqual(body?.items, [
-    { id: "cue-a", text: "Source A", durationMs: 1000, targetDurationMs: 1000 },
-    { id: "cue-b", text: "Source B", durationMs: 1200, targetDurationMs: 1200 },
+    { id: "cue-a", text: "Source A", durationMs: 1000, targetDurationMs: 1000, contextBefore: [], contextAfter: ["Source B"] },
+    { id: "cue-b", text: "Source B", durationMs: 1200, targetDurationMs: 1200, contextBefore: ["Source A"], contextAfter: [] },
   ]);
 });
 

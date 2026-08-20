@@ -173,12 +173,15 @@ test('keeps translation results in input id order and uses a strict one-to-one p
   }) as typeof fetch;
   try {
     const result = await translateBatch(provider, 'model', [
-      { id: 'a', text: 'Source A', targetDurationMs: 1000 },
-      { id: 'b', text: 'Source B', targetDurationMs: 1000 },
-    ], 'Chinese', 'Vietnamese', 'Natural', '', []);
+      { id: 'a', text: 'Source A', targetDurationMs: 1000, contextBefore: ['Earlier source'], contextAfter: ['Source B'] },
+      { id: 'b', text: 'Source B', targetDurationMs: 1000, contextBefore: ['Source A'], contextAfter: ['Later source'] },
+    ], 'Chinese', 'Vietnamese', 'Review phim', '', [], [{ source: 'Hero', translation: 'Nhân vật chính' }]);
     assert.deepEqual(result, [{ id: 'a', translation: 'A' }, { id: 'b', translation: 'B' }]);
     assert.match(request?.messages?.[0]?.content || '', /one-to-one/i);
-    assert.match(request?.messages?.[0]?.content || '', /Never merge/i);
+    assert.match(request?.messages?.[0]?.content || '', /contextBefore/i);
+    assert.match(request?.messages?.[0]?.content || '', /translationMemory/i);
+    assert.match(request?.messages?.[0]?.content || '', /Review phim mode/i);
+    assert.match(request?.messages?.[1]?.content || '', /Nhân vật chính/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

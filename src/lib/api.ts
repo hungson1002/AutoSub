@@ -20,6 +20,10 @@ import { cuesToAss } from "./subtitles";
 // Large media bypasses Vite's development proxy. JSON requests remain relative.
 const MEDIA_BACKEND_ORIGIN = "http://127.0.0.1:8787";
 export const MAX_BROWSER_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
+export interface TranslationMemoryItem {
+  source: string;
+  translation: string;
+}
 export const reviewVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/review/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
 
@@ -276,6 +280,8 @@ export const api = {
     customPrompt: string,
     glossary: GlossaryEntry[],
     signal?: AbortSignal,
+    contextCues: SubtitleCue[] = cues,
+    translationMemory: TranslationMemoryItem[] = [],
   ) =>
     request<{ items: Array<{ id: string; translation: string }> }>(
       "/api/translate",
@@ -286,11 +292,20 @@ export const api = {
           model,
           items: cues.map((cue) => {
             const durationMs = Math.max(cue.endMs - cue.startMs, 50);
+            const contextIndex = contextCues.findIndex((candidate) => candidate.id === cue.id);
+            const contextBefore = contextIndex < 0
+              ? []
+              : contextCues.slice(Math.max(0, contextIndex - 2), contextIndex).map((candidate) => candidate.originalText).filter(Boolean);
+            const contextAfter = contextIndex < 0
+              ? []
+              : contextCues.slice(contextIndex + 1, contextIndex + 3).map((candidate) => candidate.originalText).filter(Boolean);
             return {
               id: cue.id,
               text: cue.originalText,
               durationMs,
               targetDurationMs: durationMs,
+              contextBefore,
+              contextAfter,
             };
           }),
           sourceLanguage,
@@ -298,6 +313,7 @@ export const api = {
           style,
           customPrompt,
           glossary,
+          translationMemory: translationMemory.slice(-24),
         }),
         signal,
       },

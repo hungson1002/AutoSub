@@ -18,6 +18,7 @@ import {
   api,
   friendlyErrorMessage,
   MAX_BROWSER_UPLOAD_BYTES,
+  type TranslationMemoryItem,
 } from "../lib/api";
 import { storage } from "../lib/storage";
 import {
@@ -182,7 +183,7 @@ export function EditorPage({
       providerId: settings.assignments.translation.providerId,
       model: settings.assignments.translation.model,
       mode: "quality",
-      style: "Phổ thông",
+      style: "Review phim",
       customPrompt: "",
       sourceLanguage: "Auto Detect",
       targetLanguage: "Tiếng Việt",
@@ -846,6 +847,7 @@ export function EditorPage({
     setTranslationStage("Đang chuẩn bị dữ liệu dịch");
     try {
       const next = [...cues];
+      const translationMemory: TranslationMemoryItem[] = [];
       const batchSize = setup.mode === "quality" ? 8 : 16;
       const totalBatches = Math.ceil(cues.length / batchSize);
       for (let start = 0; start < cues.length; start += batchSize) {
@@ -869,12 +871,19 @@ export function EditorPage({
           setup.customPrompt,
           setup.glossary.filter((entry) => entry.enabled),
           controller.signal,
+          next,
+          translationMemory,
         );
         clearTranslationProgressTimer();
         for (const item of result.items) {
           const cue = next.find((candidate) => candidate.id === item.id);
           if (cue) cue.translatedText = item.translation;
         }
+        translationMemory.push(...batch.flatMap((cue) => {
+          const translation = result.items.find((item) => item.id === cue.id)?.translation?.trim();
+          return translation ? [{ source: cue.originalText, translation }] : [];
+        }));
+        if (translationMemory.length > 24) translationMemory.splice(0, translationMemory.length - 24);
         const completed = Math.min(
           98,
           ((start + batch.length) / cues.length) * 100,

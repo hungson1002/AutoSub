@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AIProvider, AppSettings, GlossaryEntry, ProviderAssignment, SubtitleCue } from '../types';
-import { api, friendlyErrorMessage } from '../lib/api';
+import { api, friendlyErrorMessage, type TranslationMemoryItem } from '../lib/api';
 import { storage, translationStatusStorage, type TranslationRunState, type TranslationRunStatus } from '../lib/storage';
 import { cuesToSrt, downloadText, formatClock, parseSubtitle } from '../lib/subtitles';
 import { AssignmentSummary } from '../components/AssignmentSummary';
@@ -14,6 +14,8 @@ import { TestedModelSelect } from '../components/TestedModelSelect';
 import { isCapabilityModelPassed } from '../lib/modelTests';
 import { translationLanguages, translationModes, translationStyles, type TranslationMode } from '../lib/translationConfig';
 
+const defaultTranslationStyle = translationStyles.find((item) => item.value === 'Review phim')?.value ?? translationStyles[0]?.value ?? 'Phổ thông';
+
 export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenEditor, onNotice }: { providers: AIProvider[]; settings: AppSettings; cues: SubtitleCue[]; onCuesChange: (cues: SubtitleCue[]) => void; onOpenEditor: () => void; onNotice: (message: string, kind?: 'success' | 'error') => void }) {
   const [runState, setRunState] = useState<TranslationRunState>(() => {
     const saved = translationStatusStorage.load();
@@ -24,7 +26,7 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
   const [sourceLanguage, setSourceLanguage] = useState('Auto Detect');
   const [targetLanguage, setTargetLanguage] = useState('Tiếng Việt');
   const [mode, setMode] = useState<TranslationMode>('quality');
-  const [style, setStyle] = useState(translationStyles[0]?.value ?? 'Phổ thông');
+  const [style, setStyle] = useState(defaultTranslationStyle);
   const [customPrompt, setCustomPrompt] = useState('');
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [glossary, setGlossary] = useState<GlossaryEntry[]>(storage.glossary);
@@ -119,6 +121,9 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
     updateRunState({ status: 'running', fileName, total: cues.length, translated: translatedCount, remaining: queue.length, progress: 5, stage: 'Đang chuẩn bị dữ liệu dịch', updatedAt: Date.now() });
     try {
       const next = cues.map((cue) => ({ ...cue }));
+      const translationMemory: TranslationMemoryItem[] = onlyMissing
+        ? cues.filter((cue) => cue.translatedText.trim()).slice(-24).map((cue) => ({ source: cue.originalText, translation: cue.translatedText }))
+        : [];
       const batchSize = mode === 'quality' ? 8 : 16;
       const totalBatches = Math.ceil(queue.length / batchSize);
       for (let start = 0; start < queue.length; start += batchSize) {
@@ -128,7 +133,7 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
         easeProgressTo(Math.min(94, Math.max(8, ((start + batch.length * 0.88) / queue.length) * 100)));
         let result: { items: Array<{ id: string; translation: string }> };
         try {
-          result = await api.translate(provider, assignment.model, batch, sourceLanguage, targetLanguage, style, customPrompt, glossary.filter((entry) => entry.enabled), controller.signal);
+          result = await api.translate(provider, assignment.model, batch, sourceLanguage, targetLanguage, style, customPrompt, glossary.filter((entry) => entry.enabled), controller.signal, next, translationMemory);
         } catch (error) {
           if (error instanceof DOMException && error.name === 'AbortError') throw error;
           const remaining = queue.length - start;
@@ -144,6 +149,11 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
           const cue = next.find((candidate) => candidate.id === item.id);
           if (cue) cue.translatedText = item.translation;
         }
+        translationMemory.push(...batch.flatMap((cue) => {
+          const translation = result.items.find((item) => item.id === cue.id)?.translation?.trim();
+          return translation ? [{ source: cue.originalText, translation }] : [];
+        }));
+        if (translationMemory.length > 24) translationMemory.splice(0, translationMemory.length - 24);
         setProgress(Math.min(98, ((start + batch.length) / queue.length) * 100));
         setProgressStage(`Đã nhận batch ${batchNumber}/${totalBatches} · đang lưu kết quả`);
         onCuesChange([...next]);
