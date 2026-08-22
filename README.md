@@ -23,7 +23,7 @@ Provider được nhập tại **Cài đặt → AI Providers**. Provider ưu ti
 - **Microsoft Edge TTS**: TTS tiếng Việt không cần API key với hai giọng `HoaiMyNeural` và `NamMinhNeural`; các lượt đọc được xếp hàng để hạn chế lỗi dịch vụ.
 - Editor dùng chung `SubtitleCue[]`: video preview, subtitle overlay, list editable, timestamp, CPS, G1/G2/G3, timeline và autosave local.
 - Style subtitle và sinh ASS; modal blur region; modal dubbing/provider workflow; export SRT/ASS.
-- **Tải Douyin hàng loạt**: bóc tách video gốc không watermark/logo từ link chia sẻ hoặc link web Douyin, tải hàng loạt theo tiến trình và nạp trực tiếp vào OCR, Review tự động hoặc Lồng tiếng video.
+- **Tải Douyin/Bilibili hàng loạt**: tải video công khai từ link chia sẻ Douyin, Bilibili hoặc b23.tv theo tiến trình và nạp trực tiếp vào OCR, Review tự động hoặc Lồng tiếng video.
 - **Review tự động**: chép lời video nguồn, lập hồ sơ nhân vật, tạo kịch bản kể lại cốt truyện dài 5–45 phút, chọn/cắt cảnh theo timestamp, tạo giọng đọc, ghép hình + phụ đề và xuất MP4.
 - Có thể tải bản dựng lên kênh YouTube thử nghiệm ở chế độ **Private**, theo dõi trạng thái xử lý và mở thẳng YouTube Studio để xác nhận Content ID.
 

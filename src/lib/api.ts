@@ -9,6 +9,9 @@ import type {
   DubbingMetadata,
   GlossaryEntry,
   LogoOverlay,
+  ProductAdJobStatus,
+  ProductAdOutputMode,
+  ProductAdPlatform,
   ReviewAspectRatio,
   ReviewJobStatus,
   SubtitleCue,
@@ -40,6 +43,8 @@ export function buildTranslationMemory(cues: SubtitleCue[], cueId: string, limit
 }
 export const reviewVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/review/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
+export const productAdVideoUrl = (jobId: string, download = false) =>
+  `${MEDIA_BACKEND_ORIGIN}/api/product-ads/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
 
 export type StoredMediaResult = {
   uploadId: string;
@@ -748,6 +753,34 @@ export const api = {
       body: JSON.stringify(input),
       signal,
     }),
+  createProductAdJob: (
+    input: {
+      imageUploadIds: string[];
+      productName: string;
+      productDescription: string;
+      targetAudience?: string;
+      offer?: string;
+      callToAction?: string;
+      platform: ProductAdPlatform;
+      outputMode: ProductAdOutputMode;
+      targetDurationSeconds: number;
+      tone: string;
+      customPrompt?: string;
+      burnSubtitles: boolean;
+      vision?: { provider: AIProvider; model: string };
+      script: { provider: AIProvider; model: string };
+      tts?: { provider: AIProvider; model: string; voice: string; speed: number };
+    },
+    signal?: AbortSignal,
+  ) => request<ProductAdJobStatus>("/api/product-ads/jobs", {
+    method: "POST",
+    body: JSON.stringify(input),
+    signal,
+  }),
+  getProductAdJob: (id: string, signal?: AbortSignal) =>
+    request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}`, { signal }),
+  cancelProductAdJob: (id: string) =>
+    request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   getReviewJob: (id: string, signal?: AbortSignal) =>
     request<ReviewJobStatus>(`/api/review/jobs/${encodeURIComponent(id)}`, {
       signal,
@@ -821,11 +854,17 @@ export const api = {
       ),
       signal,
     }),
-  startDouyinBatch: (urlsOrText: string[] | string, signal?: AbortSignal) =>
+  startDouyinBatch: (
+    urlsOrText: string[] | string,
+    bilibiliQuality: 64 | 16 = 64,
+    signal?: AbortSignal,
+  ) =>
     request<DouyinBatchJob>("/api/douyin/batch", {
       method: "POST",
       body: JSON.stringify(
-        Array.isArray(urlsOrText) ? { urls: urlsOrText } : { text: urlsOrText },
+        Array.isArray(urlsOrText)
+          ? { urls: urlsOrText, bilibiliQuality }
+          : { text: urlsOrText, bilibiliQuality },
       ),
       signal,
     }),

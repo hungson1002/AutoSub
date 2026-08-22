@@ -373,6 +373,72 @@ export interface ReviewJobStatus {
   youtube: ReviewYouTubeStatus;
 }
 
+export type ProductAdPlatform = "tiktok" | "youtube-shorts" | "both";
+export type ProductAdOutputMode = "render" | "veo3-script";
+export type ProductAdJobState =
+  | "queued"
+  | "analyzing"
+  | "scripting"
+  | "voicing"
+  | "rendering"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface ProductAdScene {
+  id: string;
+  imageIndex: number;
+  headline: string;
+  narration: string;
+  visualPrompt?: string;
+  continuity?: string;
+}
+
+export interface ProductAdPlan {
+  title: string;
+  caption: string;
+  disclosure: string;
+  hashtags: string[];
+  scenes: ProductAdScene[];
+}
+
+export interface Veo3PromptClip {
+  id: string;
+  index: number;
+  imageIndex: number;
+  startSeconds: number;
+  endSeconds: number;
+  durationSeconds: number;
+  headline: string;
+  narration: string;
+  prompt: string;
+}
+
+export interface Veo3PromptPack {
+  model: "Veo 3";
+  aspectRatio: "9:16";
+  clipLimitSeconds: 10;
+  totalDurationSeconds: number;
+  clips: Veo3PromptClip[];
+}
+
+export interface ProductAdJobStatus {
+  id: string;
+  status: ProductAdJobState;
+  stage: string;
+  progressPercent: number;
+  createdAt: string;
+  updatedAt: string;
+  productName: string;
+  imageNames: string[];
+  outputMode: ProductAdOutputMode;
+  warnings: string[];
+  error?: string;
+  plan?: ProductAdPlan;
+  veo3Pack?: Veo3PromptPack;
+  result?: { videoFile: string; subtitleFile: string; durationMs: number };
+}
+
 export type DouyinItemState =
   | "pending"
   | "resolving"
@@ -380,9 +446,12 @@ export type DouyinItemState =
   | "completed"
   | "failed"
   | "cancelled";
+export type BilibiliQuality = 64 | 16;
 export interface DouyinBatchItem {
   id: string;
   originalUrl: string;
+  platform?: "douyin" | "bilibili";
+  bilibiliQuality?: BilibiliQuality;
   videoId?: string;
   title?: string;
   author?: string;

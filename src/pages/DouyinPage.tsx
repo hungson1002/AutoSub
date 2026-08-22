@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import type { VideoAsset, DouyinBatchItem, DouyinBatchJob } from "../types";
+import type { VideoAsset, DouyinBatchItem, DouyinBatchJob, BilibiliQuality } from "../types";
 import { api, friendlyErrorMessage } from "../lib/api";
+import { SelectField } from "../components/SelectField";
 import {
   ArrowDownToLine,
   AudioLines,
@@ -20,8 +21,8 @@ import {
   Zap,
 } from "../components/Icons";
 
-const DOUYIN_URL_PATTERN =
-  /https?:\/\/(?:v\.douyin\.com\/[A-Za-z0-9_-]+|(?:www\.|ies\.)?douyin\.com\/(?:video|note|share\/video)\/\d+)[^\s]*/gi;
+const VIDEO_SOURCE_URL_PATTERN =
+  /https?:\/\/(?:v\.douyin\.com\/[A-Za-z0-9_-]+\/?|(?:www\.|ies\.|m\.)?douyin\.com\/(?:video|note|share\/video)\/\d+|(?:www\.)?b23\.tv\/[A-Za-z0-9_-]+\/?|(?:(?:www|m)\.)?bilibili\.com\/video\/(?:BV[0-9A-Za-z]+|av\d+))[^\s]*/gi;
 
 const itemStatusLabel: Record<DouyinBatchItem["status"], string> = {
   pending: "Đang chờ",
@@ -71,6 +72,7 @@ export function DouyinPage({
   const [batchJob, setBatchJob] = useState<DouyinBatchJob>();
   const [activeBatchId, setActiveBatchId] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
+  const [bilibiliQuality, setBilibiliQuality] = useState<BilibiliQuality>(64);
   const [submitError, setSubmitError] = useState("");
   const [pollError, setPollError] = useState("");
   const [historyItems, setHistoryItems] = useState<DouyinBatchItem[]>(() => {
@@ -87,7 +89,7 @@ export function DouyinPage({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
-    const matches = inputText.match(DOUYIN_URL_PATTERN) || [];
+    const matches = inputText.match(VIDEO_SOURCE_URL_PATTERN) || [];
     const cleaned = Array.from(
       new Set(matches.map((url) => url.replace(/[),;。，！？\s]+$/, ""))),
     );
@@ -150,7 +152,7 @@ export function DouyinPage({
         setActiveBatchId(undefined);
         if (job.status === "completed") {
           onNotice(
-            `Đã tải thành công ${job.completedItems} video Douyin.`,
+            `Đã tải thành công ${job.completedItems} video.`,
             "success",
           );
         } else if (job.status === "completed_with_errors") {
@@ -192,7 +194,7 @@ export function DouyinPage({
   const handleStartBatch = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (detectedUrls.length === 0) {
-      setSubmitError("Chưa tìm thấy link Douyin hợp lệ trong nội dung đã dán.");
+      setSubmitError("Chưa tìm thấy link Douyin hoặc Bilibili hợp lệ trong nội dung đã dán.");
       inputRef.current?.focus();
       return;
     }
@@ -200,7 +202,7 @@ export function DouyinPage({
     setSubmitError("");
     setSubmitting(true);
     try {
-      const job = await api.startDouyinBatch(detectedUrls);
+      const job = await api.startDouyinBatch(detectedUrls, bilibiliQuality);
       setBatchJob(job);
       setActiveBatchId(job.id);
       setInputText("");
@@ -232,7 +234,7 @@ export function DouyinPage({
   };
 
   const makeAssetFromItem = (item: DouyinBatchItem): VideoAsset => ({
-    name: item.filename || `${item.title || "douyin_video"}.mp4`,
+    name: item.filename || `${item.title || "source_video"}.mp4`,
     url: `http://127.0.0.1:8787/api/uploads/${item.uploadId}/media`,
     type: "video/mp4",
     uploadId: item.uploadId,
@@ -258,11 +260,14 @@ export function DouyinPage({
     if (!item.uploadId) return;
     const anchor = document.createElement("a");
     anchor.href = `http://127.0.0.1:8787/api/uploads/${item.uploadId}/media?download=1`;
-    anchor.download = item.filename || `${item.title || "douyin"}.mp4`;
+    anchor.download = item.filename || `${item.title || item.platform || "video"}.mp4`;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
   };
+
+  const thumbnailDownloadUrl = (item: DouyinBatchItem) =>
+    `http://127.0.0.1:8787/api/douyin/thumbnail?url=${encodeURIComponent(item.coverUrl || "")}&filename=${encodeURIComponent(`${item.title || item.platform || "video"}_thumbnail`)}`;
 
   const handleRetryItem = (item: DouyinBatchItem) => {
     setBatchJob(undefined);
@@ -278,19 +283,26 @@ export function DouyinPage({
     ? batchJob.completedItems + batchJob.failedItems
     : 0;
   const batchProgress = batchJob
-    ? Math.round((processedItems / Math.max(1, batchJob.totalItems)) * 100)
+    ? batchJob.status !== "queued" && batchJob.status !== "running"
+      ? 100
+      : Math.round(
+          batchJob.items.reduce(
+            (total, item) => total + item.progressPercent,
+            0,
+          ) / Math.max(1, batchJob.totalItems),
+        )
     : 0;
 
   return (
     <main className="page douyin-page">
       <header className="douyin-hero">
         <div className="douyin-hero-copy">
-          <span className="eyebrow">DOUYIN INGEST</span>
+          <span className="eyebrow">DOUYIN + BILIBILI INGEST</span>
           <h1>
-            Thu video Douyin. <span>Sẵn sàng để dựng.</span>
+            Thu video Douyin &amp; Bilibili. <span>Sẵn sàng để dựng.</span>
           </h1>
           <p>
-            Dán link chia sẻ, AutoSub lấy bản MP4 chất lượng cao và đưa thẳng
+            Dán link chia sẻ Douyin hoặc Bilibili, AutoSub lấy bản MP4 công khai và đưa thẳng
             vào quy trình hậu kỳ.
           </p>
         </div>
@@ -342,7 +354,7 @@ export function DouyinPage({
               value={inputText}
               onChange={(event) => setInputText(event.target.value)}
               placeholder={
-                "https://v.douyin.com/xxxxxx/\n\nBạn cũng có thể dán nguyên đoạn “Sao chép liên kết” từ ứng dụng Douyin."
+                "https://v.douyin.com/xxxxxx/\nhttps://www.bilibili.com/video/BVxxxxxx\n\nBạn cũng có thể dán nguyên nội dung chia sẻ."
               }
               aria-describedby="douyin-link-help douyin-input-error"
               aria-invalid={Boolean(submitError)}
@@ -363,8 +375,23 @@ export function DouyinPage({
             )}
           </div>
           <p id="douyin-link-help" className="douyin-field-help">
-            Hỗ trợ link rút gọn, video và bài chia sẻ công khai từ douyin.com.
+            Hỗ trợ video công khai từ douyin.com, bilibili.com và link rút gọn b23.tv.
           </p>
+
+          <div className="field douyin-quality-field">
+            <span>Chất lượng Bilibili</span>
+            <SelectField
+              ariaLabel="Chất lượng tải Bilibili"
+              value={String(bilibiliQuality)}
+              onChange={(value) => setBilibiliQuality(Number(value) as BilibiliQuality)}
+              disabled={isDownloading || submitting}
+              options={[
+                { value: "64", label: "720p — chất lượng tốt", description: "Tải song song tối đa 8 kết nối" },
+                { value: "16", label: "360p — siêu tốc", description: "File nhỏ hơn, phù hợp video dài" },
+              ]}
+            />
+            <small className="douyin-field-help">AutoSub lấy luồng MP4 trực tiếp và không chèn logo. Logo hoặc watermark đã nằm sẵn trong video của tác giả vẫn được giữ nguyên.</small>
+          </div>
 
           {detectedUrls.length > 0 && (
             <div
@@ -416,7 +443,7 @@ export function DouyinPage({
                 )}
                 {submitting
                   ? "Đang tạo hàng đợi"
-                  : `Tải ${detectedUrls.length ? `${detectedUrls.length} video` : "video Douyin"}`}
+                  : `Tải ${detectedUrls.length ? `${detectedUrls.length} video` : "video Douyin/Bilibili"}`}
               </button>
             )}
           </div>
@@ -575,6 +602,7 @@ export function DouyinPage({
                       </div>
                       <div className="douyin-item-meta">
                         {item.author && <span>{item.author}</span>}
+                        {item.platform && <span>{item.platform === "bilibili" ? "Bilibili" : "Douyin"}</span>}
                         {formatBytes(item.fileSize) && (
                           <span>{formatBytes(item.fileSize)}</span>
                         )}
@@ -642,6 +670,14 @@ export function DouyinPage({
                           >
                             <Download size={13} /> Lưu MP4
                           </button>
+                          {item.coverUrl && (
+                            <a
+                              className="button small ghost"
+                              href={thumbnailDownloadUrl(item)}
+                            >
+                              <Download size={13} /> Tải thumbnail
+                            </a>
+                          )}
                           {!batchJob && (
                             <button
                               className="douyin-delete-item"

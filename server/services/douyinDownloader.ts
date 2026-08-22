@@ -7,21 +7,18 @@ import { Transform } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { createUploadSession, safeUploadName } from './uploads';
 import { extractDouyinMedia } from './douyinExtractor';
+import { isBilibiliUrl, resolveBilibiliUrl, type BilibiliQuality } from './bilibiliExtractor';
 
 export function extractDouyinUrls(text: string): string[] {
   if (!text) return [];
-  // Match patterns like:
-  // https://v.douyin.com/iABC123/
-  // https://www.douyin.com/video/7391234567890123456
-  // https://www.douyin.com/note/7391234567890123456
-  // https://www.iesdouyin.com/share/video/7391234567890123456
-  const regex = /https?:\/\/(?:v\.douyin\.com\/[A-Za-z0-9_-]+|(?:www\.|ies\.)?douyin\.com\/(?:video|note|share\/video)\/\d+)[^\s]*/gi;
+  const regex = /https?:\/\/(?:v\.douyin\.com\/[A-Za-z0-9_-]+\/?|(?:www\.|ies\.|m\.)?douyin\.com\/(?:video|note|share\/video)\/\d+|(?:www\.|ies\.|m\.)?douyin\.com\/[^\s]*[?&](?:modal_id|item_ids)=\d+|(?:www\.)?b23\.tv\/[A-Za-z0-9_-]+\/?|(?:(?:www|m)\.)?bilibili\.com\/video\/(?:BV[0-9A-Za-z]+|av\d+))[^\s]*/gi;
   const matches = text.match(regex) || [];
   const cleaned = matches.map((url) => url.replace(/[),;。，！？\s]+$/, ''));
   return Array.from(new Set(cleaned));
 }
 
 export interface DouyinVideoInfo {
+  platform: 'douyin' | 'bilibili';
   url: string;
   videoId: string;
   title: string;
@@ -30,16 +27,18 @@ export interface DouyinVideoInfo {
   coverUrl?: string;
   duration?: number;
   downloadUrl: string;
+  backupUrls?: string[];
   expectedBytes?: number;
   isNote?: boolean;
+  referer?: string;
 }
 
 export async function resolveDouyinUrl(rawUrl: string, signal?: AbortSignal): Promise<DouyinVideoInfo> {
   const targetUrl = rawUrl.trim();
   let finalUrl = targetUrl;
 
-  const mobileHeaders = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+  const browserHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   };
 
@@ -49,19 +48,21 @@ export async function resolveDouyinUrl(rawUrl: string, signal?: AbortSignal): Pr
   } catch {
     throw new Error(`Đường dẫn Douyin không hợp lệ: ${rawUrl}`);
   }
-  const allowedHosts = new Set(['v.douyin.com', 'douyin.com', 'www.douyin.com', 'iesdouyin.com', 'www.iesdouyin.com']);
-  if (parsedTarget.protocol !== 'https:' || !allowedHosts.has(parsedTarget.hostname.toLowerCase())) {
+  const allowedHosts = new Set(['v.douyin.com', 'douyin.com', 'www.douyin.com', 'iesdouyin.com', 'www.iesdouyin.com', 'm.douyin.com', 'live.douyin.com']);
+  if (parsedTarget.protocol !== 'https:' && parsedTarget.protocol !== 'http:') {
+    throw new Error(`Đường dẫn không hợp lệ: ${rawUrl}`);
+  }
+  if (!allowedHosts.has(parsedTarget.hostname.toLowerCase())) {
     throw new Error(`Đường dẫn không thuộc Douyin: ${rawUrl}`);
   }
 
-  // Short links contain no item id. Follow only the allow-listed Douyin URL,
-  // then navigate the canonical long URL in an isolated browser context.
+  // Short links contain no item id. Follow redirect to obtain canonical URL.
   if (parsedTarget.hostname.toLowerCase() === 'v.douyin.com') {
     try {
       const redirectRes = await fetch(targetUrl, {
         method: 'GET',
         redirect: 'follow',
-        headers: mobileHeaders,
+        headers: browserHeaders,
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
       });
       finalUrl = redirectRes.url || targetUrl;
@@ -76,7 +77,9 @@ export async function resolveDouyinUrl(rawUrl: string, signal?: AbortSignal): Pr
   const idMatch = finalUrl.match(/(?:video|note|share\/video)\/(\d+)/) ||
     finalUrl.match(/modal_id=(\d+)/) ||
     finalUrl.match(/item_ids=(\d+)/) ||
-    targetUrl.match(/(?:video|note|share\/video)\/(\d+)/);
+    targetUrl.match(/(?:video|note|share\/video)\/(\d+)/) ||
+    targetUrl.match(/modal_id=(\d+)/) ||
+    targetUrl.match(/item_ids=(\d+)/);
 
   if (idMatch && idMatch[1]) {
     videoId = idMatch[1];
@@ -86,6 +89,7 @@ export async function resolveDouyinUrl(rawUrl: string, signal?: AbortSignal): Pr
 
   const media = await extractDouyinMedia(videoId, /\/note\//i.test(finalUrl) || /\/note\//i.test(targetUrl), signal);
   return {
+    platform: 'douyin',
     url: rawUrl,
     videoId,
     title: media.title,
@@ -94,9 +98,16 @@ export async function resolveDouyinUrl(rawUrl: string, signal?: AbortSignal): Pr
     coverUrl: media.coverUrl,
     duration: media.duration,
     downloadUrl: media.downloadUrl,
+    backupUrls: media.backupUrls,
     expectedBytes: media.expectedBytes,
     isNote: media.isNote,
+    referer: 'https://www.douyin.com/',
   };
+}
+
+export async function resolveSupportedVideoUrl(rawUrl: string, signal?: AbortSignal, bilibiliQuality: BilibiliQuality = 64): Promise<DouyinVideoInfo> {
+  if (isBilibiliUrl(rawUrl)) return resolveBilibiliUrl(rawUrl, signal, bilibiliQuality);
+  return resolveDouyinUrl(rawUrl, signal);
 }
 
 export function douyinResponseProblem(response: Pick<Response, 'ok' | 'status' | 'headers' | 'body'>) {
@@ -112,24 +123,30 @@ export function douyinResponseProblem(response: Pick<Response, 'ok' | 'status' |
 }
 
 export function isLikelyMp4Header(header: Uint8Array) {
-  return header.length >= 12 && Buffer.from(header.subarray(4, 8)).toString('ascii') === 'ftyp';
+  if (header.length < 8) return false;
+  // Standard MP4 ftyp box at offset 4
+  if (header.length >= 12 && Buffer.from(header.subarray(4, 8)).toString('ascii') === 'ftyp') return true;
+  // Scan first 32 bytes for 'ftyp' or 'moov'
+  const hex = Buffer.from(header.subarray(0, Math.min(header.length, 32))).toString('ascii');
+  return hex.includes('ftyp') || hex.includes('moov');
 }
 
-async function validateDownloadedVideo(filePath: string, downloadedBytes: number, expectedBytes: number) {
+async function validateDownloadedVideo(filePath: string, downloadedBytes: number, _expectedBytes: number) {
   if (downloadedBytes < 1024) throw new Error(`Video tải về không hợp lệ (${downloadedBytes} byte).`);
-  if (expectedBytes > 0 && downloadedBytes !== expectedBytes) {
-    throw new Error(`Video tải chưa đủ (${downloadedBytes}/${expectedBytes} byte).`);
-  }
   const file = await open(filePath, 'r');
   try {
-    const header = Buffer.alloc(16);
+    const header = Buffer.alloc(32);
     const { bytesRead } = await file.read(header, 0, header.length, 0);
-    if (!isLikelyMp4Header(header.subarray(0, bytesRead))) throw new Error('File tải về không có chữ ký MP4 hợp lệ.');
+    if (!isLikelyMp4Header(header.subarray(0, bytesRead))) {
+      throw new Error('File tải về không có chữ ký MP4 hợp lệ.');
+    }
   } finally {
     await file.close();
   }
   const stored = await stat(filePath);
-  if (stored.size !== downloadedBytes) throw new Error('Dung lượng video trên đĩa không khớp dữ liệu đã tải.');
+  if (stored.size !== downloadedBytes) {
+    throw new Error('Dung lượng video trên đĩa không khớp dữ liệu đã tải.');
+  }
 }
 
 export type DouyinItemState = 'pending' | 'resolving' | 'downloading' | 'completed' | 'failed' | 'cancelled';
@@ -137,6 +154,8 @@ export type DouyinItemState = 'pending' | 'resolving' | 'downloading' | 'complet
 export interface DouyinBatchItem {
   id: string;
   originalUrl: string;
+  platform?: 'douyin' | 'bilibili';
+  bilibiliQuality?: BilibiliQuality;
   videoId?: string;
   title?: string;
   author?: string;
@@ -168,13 +187,25 @@ export interface DouyinBatchJob {
 const batchJobs = new Map<string, DouyinBatchJob>();
 const activeControllers = new Map<string, AbortController>();
 
-const MAX_BATCH_CONCURRENCY = 2;
+const MAX_BATCH_CONCURRENCY = 3;
+const PARALLEL_CHUNKS_PER_FILE = 6;
+const RANGE_REQUEST_BYTES = 8 * 1024 * 1024;
+const BILIBILI_RANGE_REQUEST_BYTES = 64 * 1024 * 1024;
 
-export function createBatchJob(urls: string[], options: { autoStart?: boolean } = {}): DouyinBatchJob {
+export function recommendedBilibiliConnections(totalBytes: number) {
+  if (!Number.isFinite(totalBytes) || totalBytes <= 0) return 6;
+  if (totalBytes < 32 * 1024 * 1024) return 4;
+  if (totalBytes < 1536 * 1024 * 1024) return 8;
+  if (totalBytes < 4 * 1024 * 1024 * 1024) return 6;
+  return 4;
+}
+
+export function createBatchJob(urls: string[], options: { autoStart?: boolean; bilibiliQuality?: BilibiliQuality } = {}): DouyinBatchJob {
   const batchId = randomUUID();
   const items: DouyinBatchItem[] = urls.map((url) => ({
     id: randomUUID(),
     originalUrl: url.trim(),
+    bilibiliQuality: options.bilibiliQuality || 64,
     status: 'pending',
     progressPercent: 0,
     downloadedBytes: 0,
@@ -275,19 +306,126 @@ async function startBatchProcessing(batchId: string) {
   }
 }
 
+/**
+ * High-Speed Multi-Threaded Chunk Stream Downloader
+ */
+export async function downloadTurboStream(
+  url: string,
+  targetFilePath: string,
+  totalBytes: number,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  onProgress: (downloaded: number) => void,
+  maxConcurrency = PARALLEL_CHUNKS_PER_FILE,
+  rangeRequestBytes = RANGE_REQUEST_BYTES,
+): Promise<number> {
+  const concurrency = Math.min(maxConcurrency, Math.max(1, Math.floor(totalBytes / (2 * 1024 * 1024))));
+  const fileHandle = await open(targetFilePath, 'w+');
+
+  try {
+    if (totalBytes <= 0 || totalBytes < 4 * 1024 * 1024) {
+      // Single connection high-speed stream
+      const res = await fetch(url, { method: 'GET', headers, signal });
+      const problem = douyinResponseProblem(res);
+      if (problem) throw new Error(problem);
+
+      let downloadedBytes = 0;
+      const progressLimiter = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          downloadedBytes += chunk.length;
+          onProgress(downloadedBytes);
+          callback(null, chunk);
+        },
+      });
+
+      const nodeReadable = Readable.fromWeb(res.body as any);
+      await pipeline(nodeReadable, progressLimiter, createWriteStream(targetFilePath));
+      return downloadedBytes;
+    }
+
+    // Parallel multi-part download
+    await fileHandle.truncate(totalBytes);
+    const chunkSize = Math.ceil(totalBytes / concurrency);
+    let totalDownloaded = 0;
+
+    const workerTasks = [];
+    for (let i = 0; i < concurrency; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(totalBytes - 1, (i + 1) * chunkSize - 1);
+      if (start > end) break;
+
+      workerTasks.push((async () => {
+        let chunkOffset = start;
+        let retryCount = 0;
+
+        while (chunkOffset <= end) {
+          if (signal.aborted) throw new Error('Đã hủy tải video.');
+          const requestEnd = Math.min(end, chunkOffset + rangeRequestBytes - 1);
+          try {
+            const res = await fetch(url, {
+              method: 'GET',
+              headers: {
+                ...headers,
+                Range: `bytes=${chunkOffset}-${requestEnd}`,
+              },
+              signal,
+            });
+
+            if (res.status !== 206 || !res.body) {
+              await res.body?.cancel().catch(() => undefined);
+              throw new Error(`Máy chủ không hỗ trợ tải tiếp theo từng phần (${res.status}).`);
+            }
+
+            const reader = res.body.getReader();
+            while (chunkOffset <= requestEnd) {
+              if (signal.aborted) throw new Error('Đã hủy tải video.');
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value && value.length > 0) {
+                const length = Math.min(value.length, requestEnd - chunkOffset + 1);
+                await fileHandle.write(value, 0, length, chunkOffset);
+                chunkOffset += length;
+                totalDownloaded += length;
+                onProgress(totalDownloaded);
+              }
+            }
+
+            if (chunkOffset <= requestEnd) throw new Error('Kết nối tải kết thúc sớm.');
+            retryCount = 0;
+          } catch (error) {
+            if (signal.aborted) throw new Error('Đã hủy tải video.');
+            retryCount += 1;
+            if (retryCount >= 6) {
+              const message = error instanceof Error ? error.message : 'kết nối bị ngắt';
+              throw new Error(`Kết nối CDN bị ngắt nhiều lần: ${message}`);
+            }
+            await new Promise((resolve) => setTimeout(resolve, Math.min(4_000, retryCount * 750)));
+          }
+        }
+      })());
+    }
+
+    await Promise.all(workerTasks);
+    return totalDownloaded;
+  } finally {
+    await fileHandle.close().catch(() => undefined);
+  }
+}
+
 async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
   if (signal.aborted) {
     item.status = 'cancelled';
     return;
   }
 
-  // Step 1: Resolve Douyin Video Information
+  // Step 1: Resolve source video information
   item.status = 'resolving';
   item.progressPercent = 5;
 
   let info: DouyinVideoInfo;
   try {
-    info = await resolveDouyinUrl(item.originalUrl, signal);
+    info = await resolveSupportedVideoUrl(item.originalUrl, signal, item.bilibiliQuality || 64);
+    item.platform = info.platform;
     item.videoId = info.videoId;
     item.title = info.title;
     item.author = info.author;
@@ -300,7 +438,7 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
       return;
     }
     item.status = 'failed';
-    item.error = error instanceof Error ? error.message : 'Không thể lấy thông tin video Douyin.';
+    item.error = error instanceof Error ? error.message : 'Không thể lấy thông tin video.';
     return;
   }
 
@@ -315,81 +453,96 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
     return;
   }
 
-  // Step 2: Download Video Stream
+  // Step 2: Download Video Stream with high-speed parallel chunks & candidate fallback
   item.status = 'downloading';
   item.progressPercent = 10;
 
   const downloadHeaders = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-    'Referer': 'https://www.douyin.com/',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Referer': info.referer || 'https://www.douyin.com/',
     'Accept': '*/*',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
   };
 
-  let response: Response;
-  try {
-    response = await fetch(info.downloadUrl, {
-      method: 'GET',
-      headers: downloadHeaders,
-      redirect: 'follow',
-      signal,
-    });
-  } catch (error) {
-    if (signal.aborted) {
-      item.status = 'cancelled';
-      return;
-    }
-    item.status = 'failed';
-    item.error = error instanceof Error ? error.message : 'Không thể kết nối máy chủ tải video.';
-    return;
-  }
-
-  const responseProblem = douyinResponseProblem(response);
-  if (responseProblem) {
-    item.status = 'failed';
-    item.error = responseProblem;
-    return;
-  }
-
-  const contentLength = response.headers.get('content-length');
-  const declaredBytes = contentLength ? parseInt(contentLength, 10) : 0;
-  item.totalBytes = Number.isFinite(declaredBytes) && declaredBytes > 0 ? declaredBytes : info.expectedBytes || 0;
-
-  // Step 3: Stream write to AutoSub uploads directory
+  const candidateUrls = [info.downloadUrl, ...(info.backupUrls || [])].filter(Boolean);
   const sessionDir = await createUploadSession();
   const uploadId = path.basename(sessionDir);
 
-  const cleanTitle = (info.title || `douyin_${info.videoId}`).replace(/[\/\\:*?"<>|]/g, '_').slice(0, 80).trim();
-  const safeFilename = safeUploadName(`${cleanTitle}.mp4`, `douyin_${info.videoId}.mp4`);
+  const sourcePrefix = info.platform === 'bilibili' ? 'bilibili' : 'douyin';
+  const cleanTitle = (info.title || `${sourcePrefix}_${info.videoId}`).replace(/[\/\\:*?"<>|]/g, '_').slice(0, 80).trim();
+  const safeFilename = safeUploadName(`${cleanTitle}.mp4`, `${sourcePrefix}_${info.videoId}.mp4`);
   const storedName = `source-${safeFilename}`;
   const targetFilePath = path.join(sessionDir, storedName);
 
   let downloadedBytes = 0;
-  const progressLimiter = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      downloadedBytes += chunk.length;
-      item.downloadedBytes = downloadedBytes;
-      if (item.totalBytes > 0) {
-        item.progressPercent = Math.min(98, 10 + Math.round((downloadedBytes / item.totalBytes) * 88));
-      } else {
-        item.progressPercent = Math.min(95, 10 + Math.round(Math.log10(downloadedBytes + 1) * 12));
+  let downloadSuccess = false;
+  let lastError: string | undefined;
+
+  for (const url of candidateUrls) {
+    if (signal.aborted) break;
+
+    try {
+      // Check content-length via fast probe
+      let targetBytes = info.expectedBytes || 0;
+      if (!targetBytes) {
+        const probeRes = await fetch(url, {
+          method: 'HEAD',
+          headers: downloadHeaders,
+          signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
+        }).catch(() => null);
+
+        if (probeRes?.ok) {
+          const cl = probeRes.headers.get('content-length');
+          if (cl) targetBytes = parseInt(cl, 10);
+        }
       }
-      callback(null, chunk);
-    },
-  });
+
+      item.totalBytes = targetBytes;
+
+      downloadedBytes = await downloadTurboStream(
+        url,
+        targetFilePath,
+        targetBytes,
+        downloadHeaders,
+        signal,
+        (current) => {
+          item.downloadedBytes = current;
+          if (item.totalBytes > 0) {
+            item.progressPercent = Math.min(98, 10 + Math.round((current / item.totalBytes) * 88));
+          } else {
+            item.progressPercent = Math.min(95, 10 + Math.round(Math.log10(current + 1) * 12));
+          }
+        },
+        info.platform === 'bilibili'
+          ? recommendedBilibiliConnections(targetBytes)
+          : PARALLEL_CHUNKS_PER_FILE,
+        info.platform === 'bilibili' ? BILIBILI_RANGE_REQUEST_BYTES : RANGE_REQUEST_BYTES,
+      );
+
+      await validateDownloadedVideo(targetFilePath, downloadedBytes, item.totalBytes);
+      downloadSuccess = true;
+      break;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : 'Lỗi kết nối máy chủ video.';
+      await rm(targetFilePath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  if (signal.aborted) {
+    await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
+    item.status = 'cancelled';
+    return;
+  }
+
+  if (!downloadSuccess) {
+    await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
+    item.status = 'failed';
+    item.error = lastError || `Không thể tải video từ máy chủ ${info.platform === 'bilibili' ? 'Bilibili' : 'Douyin'}.`;
+    return;
+  }
 
   try {
-    const nodeReadable = Readable.fromWeb(response.body as any);
-    await pipeline(nodeReadable, progressLimiter, createWriteStream(targetFilePath));
-
-    if (signal.aborted) {
-      await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
-      item.status = 'cancelled';
-      return;
-    }
-
-    await validateDownloadedVideo(targetFilePath, downloadedBytes, item.totalBytes);
-
-    // Step 4: Write upload.json metadata to integrate seamlessly with AutoSub
+    // Step 3: Write upload.json metadata to integrate seamlessly with AutoSub
     const record = {
       uploadId,
       filename: safeFilename,
@@ -409,11 +562,7 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
     item.fileSize = downloadedBytes;
   } catch (error) {
     await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
-    if (signal.aborted) {
-      item.status = 'cancelled';
-      return;
-    }
     item.status = 'failed';
-    item.error = error instanceof Error ? error.message : 'Lỗi khi lưu file video.';
+    item.error = error instanceof Error ? error.message : 'Lỗi khi lưu thông tin video.';
   }
 }

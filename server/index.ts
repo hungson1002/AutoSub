@@ -12,6 +12,7 @@ import { uploadRoutes } from './routes/uploads';
 import { reviewRoutes } from './routes/review';
 import { voiceCloneRoutes } from './routes/voiceClones';
 import { douyinRoutes } from './routes/douyin';
+import { productAdRoutes } from './routes/productAds';
 
 // The multipart plugin enforces the actual per-file limit. Leave a small amount
 // of room here for multipart headers and boundaries so a file exactly at 4 GiB
@@ -45,6 +46,7 @@ await app.register(extractionRoutes);
 await app.register(dubbingRoutes);
 await app.register(exportRoutes);
 await app.register(reviewRoutes);
+await app.register(productAdRoutes);
 await app.register(douyinRoutes);
 app.setErrorHandler((error, _request, reply) => {
   app.log.warn(error instanceof Error ? error.message : String(error));
