@@ -1,8 +1,10 @@
 export type TranslationMode = 'quality' | 'fast';
 
+export const translationBatchSize = (mode: TranslationMode) => mode === 'quality' ? 20 : 32;
+
 export const translationModes = [
-  { value: 'quality', label: 'Chất lượng (Từng dòng)', description: 'Batch nhỏ, kiểm soát từng cue' },
-  { value: 'fast', label: 'Nhanh (Batch lớn)', description: 'Ít lượt gọi hơn' },
+  { value: 'quality', label: 'Chất lượng', description: '20 cue/batch · nhiều ngữ cảnh hơn' },
+  { value: 'fast', label: 'Nhanh', description: '32 cue/batch · ít lượt gọi hơn' },
 ];
 
 export const translationStyles = [

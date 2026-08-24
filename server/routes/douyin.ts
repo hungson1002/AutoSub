@@ -32,7 +32,7 @@ export async function douyinRoutes(app: FastifyInstance) {
   app.addHook('onClose', closeDouyinExtractor);
 
   app.get('/api/douyin/thumbnail', async (request, reply) => {
-    const query = request.query as { url?: string; filename?: string };
+    const query = request.query as { url?: string; filename?: string; download?: string };
     const imageUrl = String(query.url || '');
     if (!isSupportedThumbnailUrl(imageUrl)) {
       return reply.code(400).send({ error: 'Đường dẫn thumbnail không được hỗ trợ.' });
@@ -69,7 +69,13 @@ export async function douyinRoutes(app: FastifyInstance) {
     const encodedName = encodeURIComponent(`${baseName}.${extension}`);
 
     reply.header('Content-Type', contentType);
-    reply.header('Content-Disposition', `attachment; filename="${fallbackName}.${extension}"; filename*=UTF-8''${encodedName}`);
+    reply.header('Cache-Control', 'public, max-age=3600');
+    reply.header(
+      'Content-Disposition',
+      query.download === '1'
+        ? `attachment; filename="${fallbackName}.${extension}"; filename*=UTF-8''${encodedName}`
+        : 'inline',
+    );
     const length = response.headers.get('content-length');
     if (length) reply.header('Content-Length', length);
     return reply.send(Readable.fromWeb(response.body as any));

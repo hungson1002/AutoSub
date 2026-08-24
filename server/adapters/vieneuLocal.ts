@@ -55,7 +55,7 @@ export async function listVoices(_provider: AIProvider): Promise<AIVoice[]> {
 
 export async function testConnection(_provider: AIProvider) {
   const [runtime, profiles] = await Promise.all([vieneuRuntimeStatus(), listVoiceCloneProfiles()]);
-  return { ok: true, warning: `VieNeu Local sẵn sàng · CPU ${runtime.threads} luồng · ${profiles.length} giọng clone · model tự tải một lần khi nghe thử.` };
+  return { ok: true, warning: `VieNeu Local sẵn sàng · ${runtime.workers} worker × ${runtime.threads} luồng CPU · ${profiles.length} giọng clone · model tự tải một lần khi nghe thử.` };
 }
 
 function assertModel(model: string) {

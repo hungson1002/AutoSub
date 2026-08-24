@@ -11,13 +11,13 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
-import { run, ensureWorkdir, workdir } from "../services/ffmpeg";
+import { run, ensureWorkdir, preferredH264Encoder } from "../services/ffmpeg";
 import { getDubbingResult } from "../services/dubbingJobs";
 import { buildExportAudioFilter } from "../services/exportAudio";
 import { DUB_LOUDNESS_FILTER } from "../services/audioMastering";
 import {
   cleanupUploadSession,
-  createUploadSession,
+  createTemporarySession,
   discardUploadStream,
   persistUploadStream,
   resolveUpload,
@@ -285,9 +285,23 @@ export async function exportRoutes(app: FastifyInstance) {
       });
     }
 
+    // A completed dub result is already a mastered 48 kHz WAV. Avoid a full
+    // decode/filter/encode pass when the user requests that exact track.
+    if (completedDub && trimStartMs === 0 && trimEndMs === undefined) {
+      const inputStat = await stat(input);
+      reply.header("Content-Type", "audio/wav");
+      reply.header("Content-Length", String(inputStat.size));
+      reply.header(
+        "Content-Disposition",
+        'attachment; filename="autosub-current-audio.wav"',
+      );
+      return reply.send(createReadStream(input));
+    }
+
     const job = `audio-export-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    const output = path.join(workdir, "exports", `${job}.wav`);
-    const stagedOutput = path.join(workdir, "exports", `${job}.rendering.wav`);
+    const exportDir = await createTemporarySession('audio-export-');
+    const output = path.join(exportDir, `${job}.wav`);
+    const stagedOutput = path.join(exportDir, `${job}.rendering.wav`);
     const requestAbort = new AbortController();
     const abortOnClientClose = () => requestAbort.abort();
     request.raw.once("aborted", abortOnClientClose);
@@ -315,7 +329,7 @@ export async function exportRoutes(app: FastifyInstance) {
       );
       const stream = createReadStream(output);
       const cleanupOutput = () => {
-        void unlink(output).catch(() => undefined);
+        void cleanupUploadSession(exportDir);
       };
       stream.once("close", cleanupOutput);
       stream.once("error", cleanupOutput);
@@ -339,12 +353,13 @@ export async function exportRoutes(app: FastifyInstance) {
           .filter((file): file is string => Boolean(file))
           .map((file) => unlink(file).catch(() => undefined)),
       );
+      if (!responseSent) await cleanupUploadSession(exportDir);
     }
   });
 
   app.post("/api/export/video", async (request, reply) => {
     await ensureWorkdir();
-    const uploadDir = await createUploadSession();
+    const uploadDir = await createTemporarySession('export-');
     const fields: Fields = {};
     let input: string | undefined;
     let dubFile: string | undefined;
@@ -488,13 +503,13 @@ export async function exportRoutes(app: FastifyInstance) {
     }
 
     const job = `export-${Date.now()}`;
-    const assFile = path.join(workdir, "subtitles", `${job}.ass`);
-    const output = path.join(workdir, "exports", `${job}.mp4`);
+    const assFile = path.join(uploadDir, `${job}.ass`);
+    const output = path.join(uploadDir, `${job}.mp4`);
     // Never expose FFmpeg's in-progress file as a download.  An interrupted
     // MP4 does not contain its final `moov` atom, which Windows Media Player
     // correctly reports as an unsupported/corrupt encoding.
-    const stagedOutput = path.join(workdir, "exports", `${job}.rendering.mp4`);
-    const separationDir = path.join(workdir, "audio", `${job}-stems`);
+    const stagedOutput = path.join(uploadDir, `${job}.rendering.mp4`);
+    const separationDir = path.join(uploadDir, `${job}-stems`);
     const requestAbort = new AbortController();
     const abortOnClientClose = () => requestAbort.abort();
     request.raw.once("aborted", abortOnClientClose);
@@ -764,31 +779,30 @@ export async function exportRoutes(app: FastifyInstance) {
         options.videoEdit?.aspectRatio,
       );
       if (scaledOutput) args.push("-s", scaledOutput);
-      // yuv420p + avc1 are the broadly supported H.264-in-MP4 combination
-      // for Windows Media Player, mobile devices and browser downloads.
-      // Faster x264 preset while retaining the same CRF quality target. This
-      // trades a little file size for meaningfully shorter export times.
-      args.push(
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "high",
-        "-tag:v",
-        "avc1",
-        "-crf",
-        String(Math.round(clamp(Number(options.crf ?? 20), 16, 35))),
-        "-preset",
-        "veryfast",
-      );
+      // Keep H.264 compatibility and benchmark the available encoders once per
+      // server run. QVBR preserves the requested visual-quality target when
+      // AMD AMF wins; otherwise the established x264 path remains unchanged.
+      const requestedQuality = String(Math.round(clamp(Number(options.crf ?? 20), 16, 35)));
+      const videoEncoder = await preferredH264Encoder();
+      if (videoEncoder === "h264_amf") {
+        args.push(
+          "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality",
+          "-rc", "qvbr", "-qvbr_quality_level", requestedQuality,
+          "-vbaq", "true", "-preanalysis", "true",
+          "-pix_fmt", "yuv420p", "-profile:v", "high", "-tag:v", "avc1",
+        );
+      } else {
+        args.push(
+          "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high",
+          "-tag:v", "avc1", "-crf", requestedQuality, "-preset", "veryfast",
+        );
+      }
       if (audio) args.push("-c:a", "aac", "-shortest");
       else args.push("-an");
       if (trimDurationSeconds !== undefined)
         args.push("-t", trimDurationSeconds.toFixed(3));
       // The file is downloaded only after a successful encode, so a second
-      // full-file faststart relocation is unnecessary. It is especially slow
-      // when the workdir is synchronized by OneDrive. The staged file is still
+      // full-file faststart relocation is unnecessary. The staged file is
       // validated and atomically renamed before it is sent to the browser.
       args.push("-progress", "pipe:2", "-nostats", stagedOutput);
 
@@ -836,7 +850,7 @@ export async function exportRoutes(app: FastifyInstance) {
       };
       setExportProgress(exportId, {
         percent: Math.max(45, exportProgress.get(exportId || "")?.percent || 0),
-        stage: "FFmpeg đang render video và âm thanh",
+        stage: videoEncoder === "h264_amf" ? "AMD GPU đang render video và âm thanh" : "FFmpeg đang render video và âm thanh",
         status: "running",
       });
       armStallTimer();
@@ -853,9 +867,10 @@ export async function exportRoutes(app: FastifyInstance) {
             const match = /^out_time_(?:us|ms)=(\d+)/.exec(trimmed);
             if (!match) continue;
             const renderedMs = Number(match[1]) / 1000;
+            const renderer = videoEncoder === "h264_amf" ? "AMD GPU" : "FFmpeg";
             const stage = renderSpeed
-              ? `FFmpeg đang render video và âm thanh · ${renderSpeed}`
-              : "FFmpeg đang render video và âm thanh";
+              ? `${renderer} đang render video và âm thanh · ${renderSpeed}`
+              : `${renderer} đang render video và âm thanh`;
             setExportProgress(exportId, {
               percent: Math.round(
                 Math.min(96, Math.max(45, 45 + (renderedMs / durationMs) * 51)),
@@ -868,7 +883,7 @@ export async function exportRoutes(app: FastifyInstance) {
       } catch (error) {
         if (renderStalled) {
           throw new Error(
-            "FFmpeg không tạo thêm dữ liệu trong 3 phút nên AutoSub đã dừng job bị treo. Hãy thử xuất lại; nếu lặp lại, hãy chuyển workdir ra ngoài thư mục OneDrive.",
+            "FFmpeg không tạo thêm dữ liệu trong 3 phút nên AutoSub đã dừng job bị treo. Hãy thử xuất lại và kiểm tra dung lượng đĩa nếu lỗi lặp lại.",
           );
         }
         throw error;
@@ -943,7 +958,7 @@ export async function exportRoutes(app: FastifyInstance) {
       );
       responseStream = createReadStream(output);
       const cleanupOutput = () => {
-        void unlink(output).catch(() => undefined);
+        void cleanupUploadSession(uploadDir);
       };
       responseStream.once("close", cleanupOutput);
       responseStream.once("error", cleanupOutput);
@@ -980,7 +995,7 @@ export async function exportRoutes(app: FastifyInstance) {
       await rm(separationDir, { recursive: true, force: true }).catch(
         () => undefined,
       );
-      await cleanupUploadSession(uploadDir);
+      if (!responseSent) await cleanupUploadSession(uploadDir);
       if (fields.exportId)
         setTimeout(
           () => exportProgress.delete(fields.exportId),

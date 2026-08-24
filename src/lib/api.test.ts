@@ -192,7 +192,7 @@ test("extraction sends only the stored upload reference after the one-time uploa
   };
 
   try {
-    await api.extractStt("upload-1", provider, "stt-model", "Auto Detect");
+    await api.extractStt("upload-1", provider, "stt-model", "Auto Detect", undefined, "stt-progress-1");
     await api.extractOcr(
       "upload-1",
       provider,
@@ -206,6 +206,7 @@ test("extraction sends only the stored upload reference after the one-time uploa
   }
 
   assert.equal(calls.length, 2);
+  assert.equal(JSON.parse(String(calls[0]?.init?.body)).progressId, "stt-progress-1");
   for (const call of calls) {
     assert.equal(call.init?.method, "POST");
     assert.equal(

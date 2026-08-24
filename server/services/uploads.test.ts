@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   assertUploadSize,
   cleanupUploadSession,
+  createTemporarySession,
   createUploadSession,
   MAX_UPLOAD_BYTES,
   persistUploadStream,
@@ -14,7 +15,18 @@ import {
   resolveUpload,
   UploadTooLargeError,
 } from "./uploads";
+import { temporaryRoot, workdir } from "./ffmpeg";
 import { buildLocalFilePickerScript } from "./localFilePicker";
+
+test("temporary media sessions stay outside the persistent project workdir", async () => {
+  const directory = await createTemporarySession("test-");
+  try {
+    assert.equal(path.resolve(directory).startsWith(`${path.resolve(temporaryRoot)}${path.sep}`), true);
+    assert.equal(path.resolve(directory).startsWith(`${path.resolve(workdir)}${path.sep}`), false);
+  } finally {
+    await cleanupUploadSession(directory);
+  }
+});
 
 test("local media picker owns a topmost window so the dialog stays visible", () => {
   const script = buildLocalFilePickerScript("video");

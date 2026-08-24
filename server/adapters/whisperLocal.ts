@@ -23,6 +23,6 @@ export async function testModel(_provider: AIProvider, model: string, capability
   return { ok: true, model, capability: 'stt', latencyMs: Date.now() - startedAt, output: result.text.slice(0, 120) };
 }
 
-export function transcribe(_provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal) {
-  return transcribeWithWhisper(model, audio, filename, language, signal);
+export function transcribe(_provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal, onProgress?: (percent: number) => void) {
+  return transcribeWithWhisper(model, audio, filename, language, signal, onProgress);
 }

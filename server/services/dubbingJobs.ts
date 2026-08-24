@@ -863,11 +863,11 @@ class DubbingRunner {
     await this.setCueStatus(cue, 'fitting');
     const finalPath = audioFile(this.job.id, cue.id);
     const temporary = `${finalPath}.${process.pid}.${Date.now()}.tmp.wav`;
-    // Preserve a clean, un-stretched speech master. Group-aware fitting runs
-    // after all neighboring cue durations are available.
-    await run('ffmpeg', ['-y', '-i', speechPath, '-filter:a', tempoFilter(1), '-ar', '48000', '-ac', '2', temporary], this.controller.signal);
+    // speechPath is already normalized PCM 48 kHz stereo. A byte-for-byte copy
+    // avoids launching FFmpeg once per cue before group-aware fitting.
+    await copyFile(speechPath, temporary);
     await replacePreparedFile(temporary, finalPath);
-    const finalAudioDurationMs = await probeDuration(finalPath);
+    const finalAudioDurationMs = ttsDurationMs;
     const metadata = metadataFor(cue, timing, finalText, ttsDurationMs, finalAudioDurationMs, rewriteAttempts, 1, warning);
     await this.setCueStatus(cue, 'done', { audioFile: path.relative(jobDir(this.job.id), finalPath), metadata, error: undefined });
   }

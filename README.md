@@ -33,7 +33,7 @@ Các capability AI không được provider hỗ trợ sẽ trả lỗi rõ ràn
 
 Luồng dịch subtitle không còn xử lý từng dòng hoàn toàn độc lập:
 
-- Chế độ **Chất lượng** gửi 8 cue mỗi batch; chế độ **Nhanh** gửi 16 cue mỗi batch.
+- Chế độ **Chất lượng** gửi 20 cue mỗi batch; chế độ **Nhanh** gửi 32 cue mỗi batch để giảm số lượt gọi API nhưng vẫn giữ ngữ cảnh giữa các batch.
 - Mỗi cue kèm tối đa 2 câu trước và 2 câu sau để model hiểu đại từ, câu bị cắt, chủ thể và mạch hành động.
 - Với phong cách **Review phim**, AI tạo một translation bible trước để ghi nhớ tên nhân vật, vai trò, quan hệ, cách xưng hô và thuật ngữ lặp lại.
 - Cách xưng hô được lưu thành bảng hai chiều giữa từng cặp nhân vật; nếu transcript không đủ dữ kiện xác định người nói, hệ thống ưu tiên cách gọi trung tính thay vì tự suy diễn “mày/tao”.
@@ -75,7 +75,7 @@ Provider **Whisper Local** được thêm tự động trong **Cài đặt → A
 - `small-q5_1`: tải khoảng 181 MiB, nhanh hơn và là lựa chọn mặc định phù hợp đa số video.
 - `medium-q5_0`: tải khoảng 514 MiB, nhận lời thoại/tên riêng tốt hơn nhưng chạy chậm hơn.
 
-Runtime và model nằm trong `workdir/whisper/`, được giữ lại khi dọn file tạm. Mặc định Whisper chạy tuần tự, CPU tối đa 4 luồng và priority thấp để máy vẫn phản hồi. Có thể đặt `AUTOSUB_WHISPER_THREADS=2` nếu muốn giảm tải thêm, hoặc `AUTOSUB_WHISPER_CPP_PATH` để dùng một `whisper-cli` đã cài sẵn.
+Runtime và model nằm trong `workdir/whisper/`, được giữ lại khi dọn file tạm. Mặc định Whisper chạy tuần tự với tối đa 8 luồng CPU; có thể đặt `AUTOSUB_WHISPER_THREADS` (1–16), hoặc `AUTOSUB_WHISPER_CPP_PATH` để dùng một `whisper-cli` đã cài sẵn có hỗ trợ GPU.
 
 ## Microsoft Edge TTS
 
@@ -91,6 +91,8 @@ Edge TTS sử dụng dịch vụ đọc trực tuyến của Microsoft Edge, kh�
 
 Provider **VieNeu Local Clone** được thêm tự động và chạy trên CPU bằng VieNeu-TTS v3 Turbo/ONNX. Mở mục **Clone giọng** ở thanh bên, tải một mẫu giọng sạch với một người nói liên tục khoảng 6–10 giây, không nhạc nền hoặc tiếng vang, đặt tên và xác nhận bạn sở hữu giọng hoặc đã được người nói cho phép. Mẫu được giữ ở 48 kHz, cắt im lặng hai đầu và khử nhiễu khi enrollment để giữ màu giọng tốt hơn. Sau khi tạo hồ sơ, bạn có thể nghe thử ngay hoặc dùng cùng giọng đó trong cả **Review tự động** và **Lồng tiếng video** bằng cách chọn TTS Provider **VieNeu Local Clone**.
 
-AutoSub tự tạo môi trường Python 3.12 trong `workdir/vieneu/runtime/` bằng `uv`, cài VieNeu ONNX cùng `kaldi-native-fbank` và tải model ở lần tổng hợp đầu tiên. Nhánh local không cài PyTorch/torchaudio nhiều gigabyte. Giọng đã tạo nằm trong `workdir/voice-clones/vieneu/` và không bị xóa bởi nút dọn file tạm. Mặc định worker dùng 2 luồng CPU, xếp hàng các lượt tổng hợp và tự tắt toàn bộ cây tiến trình sau 45 giây rảnh để trả RAM; có thể đặt `AUTOSUB_VIENEU_THREADS=1` nếu máy yếu.
+AutoSub tự tạo môi trường Python 3.12 trong `workdir/vieneu/runtime/` bằng `uv`, cài VieNeu ONNX cùng `kaldi-native-fbank` và tải model ở lần tổng hợp đầu tiên. Nhánh local không cài PyTorch/torchaudio nhiều gigabyte. Giọng đã tạo nằm trong `workdir/voice-clones/vieneu/` và không bị xóa bởi nút dọn file tạm. Mặc định có 3 worker, mỗi worker dùng 2 luồng CPU và tự tắt sau 45 giây rảnh; có thể chỉnh bằng `AUTOSUB_VIENEU_WORKERS` và `AUTOSUB_VIENEU_THREADS` (1–4).
+
+Các file trung gian nặng được ghi vào `%LOCALAPPDATA%\AutoSub\temp` để tránh chi phí đồng bộ OneDrive. Có thể đổi bằng `AUTOSUB_TEMP_DIR`; dữ liệu dự án lâu dài vẫn ở `workdir` và có thể chuyển bằng `AUTOSUB_WORKDIR`. OCR dùng 4 request đồng thời (`AUTOSUB_OCR_CONCURRENCY`), Groq STT dùng 2 chunk đồng thời (`AUTOSUB_GROQ_STT_CONCURRENCY`). Encoder video được benchmark tự động; `AUTOSUB_VIDEO_ENCODER=libx264` hoặc `h264_amf` dùng để ép lựa chọn khi cần.
 
 VieNeu-TTS được phát hành theo Apache-2.0, nhưng người dùng vẫn phải có quyền đối với mẫu giọng và nội dung đầu ra. Nếu clone giọng của người khác đã cho phép, hãy thực hiện khai báo nội dung tổng hợp theo quy định của nền tảng. Clone giọng chỉ thay phần thuyết minh; nó không loại bỏ hoặc né Content ID đối với hình ảnh/âm thanh phim.

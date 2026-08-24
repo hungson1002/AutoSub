@@ -5,7 +5,33 @@ import Fastify from 'fastify';
 import test from 'node:test';
 import type { AIProvider } from '../types';
 import { cleanupUploadSession, createUploadSession } from '../services/uploads';
-import { extractionRoutes, GROQ_DIRECT_AUDIO_LIMIT_BYTES } from './extraction';
+import { extractionRoutes, GROQ_DIRECT_AUDIO_LIMIT_BYTES, mapWithConcurrency } from './extraction';
+
+test('bounded extraction work preserves input order and concurrency limit', async () => {
+  let active = 0;
+  let peak = 0;
+  const values = await mapWithConcurrency([1, 2, 3, 4, 5], 2, async (value) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, (6 - value) * 2));
+    active -= 1;
+    return value * 10;
+  });
+  assert.deepEqual(values, [10, 20, 30, 40, 50]);
+  assert.equal(peak, 2);
+});
+
+test('missing extraction progress is reported as failed instead of running forever', async () => {
+  const app = Fastify({ logger: false });
+  try {
+    await extractionRoutes(app);
+    const response = await app.inject({ method: 'GET', url: '/api/extract/progress/missing-job' });
+    assert.equal(response.statusCode, 200);
+    assert.equal((response.json() as { status: string }).status, 'failed');
+  } finally {
+    await app.close();
+  }
+});
 
 test('STT extraction chunks oversized Groq audio after receiving only JSON uploadId', async () => {
   const directory = await createUploadSession();

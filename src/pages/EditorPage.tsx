@@ -21,6 +21,7 @@ import {
   MAX_BROWSER_UPLOAD_BYTES,
 } from "../lib/api";
 import { storage } from "../lib/storage";
+import { translationBatchSize } from "../lib/translationConfig";
 import {
   AudioLines,
   Captions,
@@ -868,7 +869,7 @@ export function EditorPage({
           if (error instanceof DOMException && error.name === "AbortError") throw error;
         }
       }
-      const batchSize = setup.mode === "quality" ? 8 : 16;
+      const batchSize = translationBatchSize(setup.mode);
       const totalBatches = Math.ceil(cues.length / batchSize);
       for (let start = 0; start < cues.length; start += batchSize) {
         const batch = cues.slice(start, start + batchSize);

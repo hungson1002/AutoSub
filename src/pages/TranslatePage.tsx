@@ -12,7 +12,7 @@ import { CapabilityAssignmentPicker } from '../components/CapabilityAssignmentPi
 import { capabilityAssignments } from '../lib/settings';
 import { TestedModelSelect } from '../components/TestedModelSelect';
 import { isCapabilityModelPassed } from '../lib/modelTests';
-import { translationLanguages, translationModes, translationStyles, type TranslationMode } from '../lib/translationConfig';
+import { translationBatchSize, translationLanguages, translationModes, translationStyles, type TranslationMode } from '../lib/translationConfig';
 
 const defaultTranslationStyle = translationStyles.find((item) => item.value === 'Review phim')?.value ?? translationStyles[0]?.value ?? 'Phổ thông';
 
@@ -130,7 +130,7 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
           if (error instanceof DOMException && error.name === 'AbortError') throw error;
         }
       }
-      const batchSize = mode === 'quality' ? 8 : 16;
+      const batchSize = translationBatchSize(mode);
       const totalBatches = Math.ceil(queue.length / batchSize);
       for (let start = 0; start < queue.length; start += batchSize) {
         const batch = queue.slice(start, start + batchSize);
@@ -208,7 +208,7 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
         {style === 'Tùy chỉnh' && <label className="field"><span>Prompt phong cách tùy chỉnh</span><textarea value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} placeholder="Ví dụ: Giữ cách xưng hô thân mật, câu ngắn, tự nhiên như lời thoại phim..." /></label>}
         <button className="button primary large full" onClick={() => void runTranslation(hasPartialTranslation)} disabled={working || !ready}><WandSparkles size={16} /> {working ? 'Đang dịch…' : hasPartialTranslation ? `Dịch tiếp ${untranslatedCount} cue` : untranslatedCount === 0 ? 'Dịch lại toàn bộ' : 'Bắt đầu dịch'} <span>→</span></button>
         {translationFailure && <div className="translation-recovery" role="status"><strong>Còn {translationFailure.remaining} cue chưa dịch</strong><span>{translationFailure.message}</span><button className="button ghost small" onClick={() => void runTranslation(true)} disabled={working || !ready}>Dịch tiếp {untranslatedCount} cue →</button></div>}
-        <div className="translation-note"><Languages size={15} /><span>{mode === 'quality' ? 'Chế độ Chất lượng dùng batch 8 cue.' : 'Chế độ Nhanh dùng batch 16 cue.'} Timestamp luôn lấy từ file gốc.</span></div>
+        <div className="translation-note"><Languages size={15} /><span>Đang dùng batch {translationBatchSize(mode)} cue. Timestamp luôn lấy từ file gốc.</span></div>
       </div>
       <div className="cue-preview"><div className="section-title"><span>PREVIEW / {cues.length} CUE</span><button className="text-button" onClick={onOpenEditor}>Mở Editor →</button></div><div className="mini-cues">{cues.slice(0, 7).map((cue) => <div className="mini-cue" key={cue.id}><span>{String(cue.index).padStart(2, '0')}</span><div><small>{formatClock(cue.startMs)} — {formatClock(cue.endMs)}</small><p>{cue.originalText}</p><strong>{cue.translatedText || <em>Chưa dịch</em>}</strong></div></div>)}{cues.length > 7 && <div className="more-cues">+ {cues.length - 7} cue trong Editor</div>}</div></div>
     </section> : <div className="empty-workspace"><div className="empty-glyph"><Languages size={26} /></div><h2>Bắt đầu từ một file phụ đề</h2><p>Import SRT/VTT để mở cấu hình dịch và preview.</p></div>}

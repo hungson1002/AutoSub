@@ -19,8 +19,16 @@ test('douyinRoutes downloads thumbnails from supported image CDNs', async () => 
     });
     assert.equal(response.statusCode, 200);
     assert.equal(response.headers['content-type'], 'image/jpeg');
-    assert.match(response.headers['content-disposition'] || '', /attachment;.*\.jpg/);
+    assert.equal(response.headers['content-disposition'], 'inline');
+    assert.equal(response.headers['cache-control'], 'public, max-age=3600');
     assert.equal(response.rawPayload.length, 4);
+
+    const download = await app.inject({
+      method: 'GET',
+      url: `/api/douyin/thumbnail?url=${encodeURIComponent('https://i0.hdslb.com/bfs/archive/cover.jpg')}&filename=${encodeURIComponent('Ảnh bìa')}&download=1`,
+    });
+    assert.equal(download.statusCode, 200);
+    assert.match(download.headers['content-disposition'] || '', /attachment;.*\.jpg/);
 
     const blocked = await app.inject({
       method: 'GET',

@@ -13,6 +13,7 @@ import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
 import { TestedModelSelect } from '../components/TestedModelSelect';
 import { isCapabilityModelPassed } from '../lib/modelTests';
+import { translationBatchSize } from '../lib/translationConfig';
 
 export function ExtractPage({ providers, settings, initialAsset, onCuesChange, onAssetChange, onOpenEditor, onNotice }: { providers: AIProvider[]; settings: AppSettings; initialAsset?: VideoAsset; onCuesChange: (cues: SubtitleCue[]) => void; onAssetChange: (asset?: VideoAsset) => void; onOpenEditor: () => void; onNotice: (message: string, kind?: 'success' | 'error') => void }) {
   const [tab, setTab] = useState<'ocr' | 'stt'>('ocr');
@@ -55,14 +56,23 @@ export function ExtractPage({ providers, settings, initialAsset, onCuesChange, o
     }, 120);
   };
 
-  const pollExtractionProgress = async (progressId: string, signal: AbortSignal) => {
+  const pollExtractionProgress = async (progressId: string, controller: AbortController) => {
+    const { signal } = controller;
     try {
       const status = await api.getExtractionProgress(progressId, signal);
       setProgress(status.percent);
       setProgressStage(status.stage);
-      if (status.status === 'running' && !signal.aborted) progressPollRef.current = window.setTimeout(() => void pollExtractionProgress(progressId, signal), 250);
+      if (status.status === 'failed') {
+        controller.abort(new Error(status.error || 'Tác vụ STT đã bị ngắt. Hãy chạy lại.'));
+        return;
+      }
+      if (status.status === 'cancelled') {
+        controller.abort();
+        return;
+      }
+      if (status.status === 'running' && !signal.aborted) progressPollRef.current = window.setTimeout(() => void pollExtractionProgress(progressId, controller), 250);
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === 'AbortError') && !signal.aborted) progressPollRef.current = window.setTimeout(() => void pollExtractionProgress(progressId, signal), 500);
+      if (!(error instanceof DOMException && error.name === 'AbortError') && !signal.aborted) progressPollRef.current = window.setTimeout(() => void pollExtractionProgress(progressId, controller), 500);
     }
   };
 
@@ -184,12 +194,12 @@ export function ExtractPage({ providers, settings, initialAsset, onCuesChange, o
     setWorking(true);
     setProgress(10);
     setProgressStage(tab === 'ocr' ? 'Đang khởi tạo OCR progress' : autoTranslate ? 'FFmpeg → STT → Translation' : 'FFmpeg → STT provider');
-    const progressId = tab === 'ocr' ? crypto.randomUUID() : undefined;
-    if (progressId) void pollExtractionProgress(progressId, controller.signal);
-    else easeProgressTo(autoTranslate ? 58 : 60);
+    const progressId = crypto.randomUUID();
     try {
       if (tab === 'stt') {
-        const result = await api.extractStt(asset.uploadId, provider, assignment.model, sourceLanguage, controller.signal);
+        const extraction = api.extractStt(asset.uploadId, provider, assignment.model, sourceLanguage, controller.signal, progressId);
+        progressPollRef.current = window.setTimeout(() => void pollExtractionProgress(progressId, controller), 300);
+        const result = await extraction;
         if ((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV) console.info(`[FRONTEND RECEIVED] ${JSON.stringify({ cueCount: result.cues.length, cues: result.cues.slice(0, 5).map((cue) => ({ text: cue.originalText, startMs: cue.startMs, endMs: cue.endMs })) })}`);
         clearProgressTimers();
         setProgress(65);
@@ -208,7 +218,7 @@ export function ExtractPage({ providers, settings, initialAsset, onCuesChange, o
               if (error instanceof DOMException && error.name === 'AbortError') throw error;
             }
             const translatedCues = result.cues.map((cue) => ({ ...cue }));
-            const batchSize = 8;
+            const batchSize = translationBatchSize('quality');
             const totalBatches = Math.ceil(result.cues.length / batchSize);
             for (let start = 0; start < result.cues.length; start += batchSize) {
               const batch = result.cues.slice(start, start + batchSize);
@@ -235,7 +245,9 @@ export function ExtractPage({ providers, settings, initialAsset, onCuesChange, o
         updateRunState({ status: 'completed', mode: tab, fileName: asset.name, cueCount: nextCues.length, updatedAt: Date.now() });
         onNotice(`Đã trích xuất ${nextCues.length} cue${autoTranslate ? ' và xử lý auto-translation.' : '.'}`, 'success');
       } else {
-        const result = await api.extractOcr(asset.uploadId, provider, assignment.model, roi, samplingFps, filterWatermark, controller.signal, progressId);
+        const extraction = api.extractOcr(asset.uploadId, provider, assignment.model, roi, samplingFps, filterWatermark, controller.signal, progressId);
+        progressPollRef.current = window.setTimeout(() => void pollExtractionProgress(progressId, controller), 300);
+        const result = await extraction;
         clearProgressTimers();
         setProgress(95);
         setProgressStage(`Đã nhận OCR · ${result.cues.length} cue, đang lưu kết quả`);

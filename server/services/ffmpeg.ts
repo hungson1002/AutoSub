@@ -1,10 +1,19 @@
 import { mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-export const workdir = path.join(process.cwd(), 'workdir');
-export async function ensureWorkdir() { for (const name of ['uploads', 'audio', 'audio-mastering', 'frames', 'subtitles', 'tts', 'exports']) await mkdir(path.join(workdir, name), { recursive: true }); }
+export const workdir = path.resolve(process.env.AUTOSUB_WORKDIR?.trim() || path.join(process.cwd(), 'workdir'));
+export const temporaryRoot = path.resolve(process.env.AUTOSUB_TEMP_DIR?.trim() || path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'AutoSub', 'temp'));
+export async function ensureWorkdir() {
+  await Promise.all([
+    ...['uploads', 'audio', 'audio-mastering', 'frames', 'subtitles', 'tts', 'exports'].map((name) => mkdir(path.join(workdir, name), { recursive: true })),
+    mkdir(path.join(temporaryRoot, 'sessions'), { recursive: true }),
+  ]);
+}
 const mediaExecutableCache = new Map<string, string>();
+export type H264Encoder = 'libx264' | 'h264_amf';
+let h264EncoderPromise: Promise<H264Encoder> | undefined;
 
 async function resolveMediaCommand(command: string) {
   if (process.platform !== 'win32' || (command !== 'ffmpeg' && command !== 'ffprobe')) return command;
@@ -68,6 +77,33 @@ export async function run(command: string, args: string[], signal?: AbortSignal,
   });
 }
 export async function available(command: string) { try { await run(command, ['-version']); return true; } catch { return false; } }
+
+export async function preferredH264Encoder(): Promise<H264Encoder> {
+  const configured = process.env.AUTOSUB_VIDEO_ENCODER?.trim().toLowerCase();
+  if (configured === 'libx264') return 'libx264';
+  if (h264EncoderPromise) return h264EncoderPromise;
+  h264EncoderPromise = (async () => {
+    if (process.platform !== 'win32' && configured !== 'h264_amf') return 'libx264';
+    const benchmark = async (encoderArgs: string[]) => {
+      const startedAt = performance.now();
+      await run('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=1280x720:r=30', '-t', '2',
+        ...encoderArgs, '-pix_fmt', 'yuv420p', '-f', 'null', '-',
+      ]);
+      return performance.now() - startedAt;
+    };
+    try {
+      const hardwareArgs = ['-c:v', 'h264_amf', '-usage', 'transcoding', '-quality', 'quality', '-rc', 'qvbr', '-qvbr_quality_level', '20', '-vbaq', 'true', '-preanalysis', 'true'];
+      const hardwareMs = await benchmark(hardwareArgs);
+      if (configured === 'h264_amf') return 'h264_amf';
+      const softwareMs = await benchmark(['-c:v', 'libx264', '-crf', '20', '-preset', 'veryfast']);
+      return hardwareMs < softwareMs * 0.9 ? 'h264_amf' : 'libx264';
+    } catch {
+      return 'libx264';
+    }
+  })();
+  return h264EncoderPromise;
+}
 export async function cleanWorkdir() { await rm(workdir, { recursive: true, force: true }); await ensureWorkdir(); }
 
 export interface TemporaryCleanupResult { removedFiles: number; removedDirectories: number; freedBytes: number; skippedActiveJobs: number; skippedRecentFiles: number }
@@ -142,5 +178,5 @@ export async function cleanupTemporaryFiles(root = workdir, minimumAgeMs = 10 * 
   return result;
 }
 export async function probeDimensions(filePath: string) { const result = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', filePath]); const [width, height] = result.stdout.trim().split('x').map(Number); return { width: width || 1920, height: height || 1080 }; }
-export async function extractAudio(input: string, output: string) { await run('ffmpeg', ['-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', output]); }
+export async function extractAudio(input: string, output: string, signal?: AbortSignal) { await run('ffmpeg', ['-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', output], signal); }
 export async function extractRoiFrames(input: string, outputPattern: string, fps: number, roi: { x: number; y: number; w: number; h: number }) { const filter = `fps=${fps},crop=iw*${roi.w / 100}:ih*${roi.h / 100}:iw*${roi.x / 100}:ih*${roi.y / 100}`; await run('ffmpeg', ['-y', '-i', input, '-vf', filter, '-q:v', '4', outputPattern]); }

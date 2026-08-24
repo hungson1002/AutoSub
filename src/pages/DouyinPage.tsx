@@ -42,6 +42,15 @@ const batchStatusCopy: Record<DouyinBatchJob["status"], string> = {
   failed: "Không tải được video nào",
 };
 
+const thumbnailProxyUrl = (item: DouyinBatchItem, download = false) => {
+  const query = new URLSearchParams({ url: item.coverUrl || "" });
+  if (download) {
+    query.set("filename", `${item.title || item.platform || "video"}_thumbnail`);
+    query.set("download", "1");
+  }
+  return `http://127.0.0.1:8787/api/douyin/thumbnail?${query.toString()}`;
+};
+
 function formatDuration(seconds?: number) {
   if (seconds === undefined) return undefined;
   const safeSeconds = Math.max(0, Math.round(seconds));
@@ -265,9 +274,6 @@ export function DouyinPage({
     anchor.click();
     document.body.removeChild(anchor);
   };
-
-  const thumbnailDownloadUrl = (item: DouyinBatchItem) =>
-    `http://127.0.0.1:8787/api/douyin/thumbnail?url=${encodeURIComponent(item.coverUrl || "")}&filename=${encodeURIComponent(`${item.title || item.platform || "video"}_thumbnail`)}`;
 
   const handleRetryItem = (item: DouyinBatchItem) => {
     setBatchJob(undefined);
@@ -578,10 +584,15 @@ export function DouyinPage({
                     key={item.id}
                   >
                     <div className="douyin-thumb">
-                      {item.coverUrl ? (
-                        <img src={item.coverUrl} alt="" loading="lazy" />
-                      ) : (
-                        <Film size={25} aria-hidden="true" />
+                      <Film size={25} aria-hidden="true" />
+                      {item.coverUrl && (
+                        <img
+                          key={item.coverUrl}
+                          src={thumbnailProxyUrl(item)}
+                          alt=""
+                          loading="lazy"
+                          onError={(event) => { event.currentTarget.hidden = true; }}
+                        />
                       )}
                       {item.duration !== undefined && (
                         <span>{formatDuration(item.duration)}</span>
@@ -673,7 +684,7 @@ export function DouyinPage({
                           {item.coverUrl && (
                             <a
                               className="button small ghost"
-                              href={thumbnailDownloadUrl(item)}
+                              href={thumbnailProxyUrl(item, true)}
                             >
                               <Download size={13} /> Tải thumbnail
                             </a>

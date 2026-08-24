@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { cleanupUploadSession, createUploadSession } from './uploads';
+import { cleanupUploadSession, createTemporarySession } from './uploads';
 import { run, workdir } from './ffmpeg';
 import { normalizeCueTimeline } from './subtitles';
 
@@ -205,7 +205,7 @@ async function probeDuration(audioPath: string) {
 }
 
 async function prepareVADAudio(audioPath: string) {
-  const temporaryDir = await createUploadSession();
+  const temporaryDir = await createTemporarySession('vad-');
   const normalizedPath = path.join(temporaryDir, 'vad-input.wav');
   try {
     await run('ffmpeg', [

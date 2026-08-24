@@ -71,11 +71,11 @@ export function buildTranslationGuide(provider: AIProvider, model: string, items
   return openai.buildTranslationGuide(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary);
 }
 
-export function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal): Promise<{ text: string; segments: SubtitleSegment[] }> {
+export function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal, onProgress?: (percent: number) => void): Promise<{ text: string; segments: SubtitleSegment[] }> {
   if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
   if (isCapCut(provider)) throw new ProviderError('CapCut TTS chỉ cung cấp capability TTS.', 400);
   if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
-  return isElevenLabs(provider) ? elevenlabs.transcribe(provider, model, audio, filename, language, signal) : isWhisperLocal(provider) ? whisperLocal.transcribe(provider, model, audio, filename, language, signal) : openai.transcribe(provider, model, audio, filename, language, signal);
+  return isElevenLabs(provider) ? elevenlabs.transcribe(provider, model, audio, filename, language, signal) : isWhisperLocal(provider) ? whisperLocal.transcribe(provider, model, audio, filename, language, signal, onProgress) : openai.transcribe(provider, model, audio, filename, language, signal);
 }
 
 export function recognizeImage(provider: AIProvider, model: string, imagePath: string, prompt: string, signal?: AbortSignal) {

@@ -1,11 +1,11 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { Readable } from 'node:stream';
-import { workdir } from './ffmpeg';
+import { temporaryRoot, workdir } from './ffmpeg';
 
 export const MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 export const UPLOAD_SESSION_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -42,6 +42,13 @@ export async function createUploadSession() {
   const directory = path.join(workdir, 'uploads', randomUUID());
   await mkdir(directory, { recursive: true });
   return directory;
+}
+
+/** Regenerable request scratch space kept off synced project folders. */
+export async function createTemporarySession(prefix = 'session-') {
+  const root = path.join(temporaryRoot, 'sessions');
+  await mkdir(root, { recursive: true });
+  return mkdtemp(path.join(root, prefix.replace(/[^a-zA-Z0-9._-]/g, '_')));
 }
 
 export type StoredUpload = {
@@ -196,5 +203,13 @@ export async function cleanupIncompleteUploads() {
     }
     const files = await readdir(directory, { withFileTypes: true }).catch(() => []);
     await Promise.all(files.filter((file) => file.isFile() && file.name.endsWith('.part')).map((file) => rm(path.join(directory, file.name), { force: true })));
+  }));
+
+  const temporarySessionsRoot = path.join(temporaryRoot, 'sessions');
+  const temporarySessions = await readdir(temporarySessionsRoot, { withFileTypes: true }).catch(() => []);
+  await Promise.all(temporarySessions.filter((entry) => entry.isDirectory()).map(async (session) => {
+    const directory = path.join(temporarySessionsRoot, session.name);
+    const details = await stat(directory).catch(() => undefined);
+    if (details && Date.now() - details.mtimeMs > UPLOAD_SESSION_RETENTION_MS) await rm(directory, { recursive: true, force: true });
   }));
 }

@@ -408,6 +408,7 @@ export const api = {
     model: string,
     language: string,
     signal?: AbortSignal,
+    progressId?: string,
   ) =>
     request<{
       cues: SubtitleCue[];
@@ -443,7 +444,7 @@ export const api = {
       };
     }>("/api/extract/stt", {
       method: "POST",
-      body: JSON.stringify({ uploadId, provider, model, language }),
+      body: JSON.stringify({ uploadId, provider, model, language, progressId }),
       signal,
     }),
   extractOcr: async (

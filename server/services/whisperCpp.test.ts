@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { parseWhisperJson, WHISPER_MODEL_DEFINITIONS } from './whisperCpp';
+import { parseWhisperJson, parseWhisperProgress, WHISPER_MODEL_DEFINITIONS } from './whisperCpp';
 
 test('parseWhisperJson converts whisper.cpp millisecond offsets to subtitle seconds', () => {
   const result = parseWhisperJson({
@@ -24,4 +24,9 @@ test('Whisper Local exposes only bounded quantized models', () => {
 
 test('parseWhisperJson rejects malformed output instead of creating fake timestamps', () => {
   assert.throws(() => parseWhisperJson({ text: 'missing transcription' }), /danh sách transcript/i);
+});
+
+test('parseWhisperProgress reads the latest CLI progress update', () => {
+  assert.equal(parseWhisperProgress('progress =  21%\rprogress = 42%'), 42);
+  assert.equal(parseWhisperProgress('no progress here'), undefined);
 });

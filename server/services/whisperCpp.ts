@@ -2,21 +2,21 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { constants as osConstants, setPriority } from 'node:os';
+import { availableParallelism, constants as osConstants, setPriority } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { pipeline } from 'node:stream/promises';
 import type { AIModel, SubtitleSegment } from '../types';
 import { ProviderError } from '../adapters/errors';
-import { run, workdir } from './ffmpeg';
+import { run, temporaryRoot, workdir } from './ffmpeg';
 
 const WHISPER_RELEASE = 'v1.9.2';
 const WHISPER_ROOT = path.join(workdir, 'whisper');
 const RUNTIME_ROOT = path.join(WHISPER_ROOT, 'runtime');
 const MODEL_ROOT = path.join(WHISPER_ROOT, 'models');
 const DOWNLOAD_ROOT = path.join(WHISPER_ROOT, 'downloads');
-const TEMP_ROOT = path.join(WHISPER_ROOT, 'tmp');
+const TEMP_ROOT = path.join(temporaryRoot, 'whisper');
 
 interface WhisperModelDefinition {
   id: string;
@@ -75,8 +75,8 @@ function runtimeAsset(): RuntimeAsset | undefined {
   return undefined;
 }
 
-function managedPath(target: string) {
-  const relative = path.relative(WHISPER_ROOT, path.resolve(target));
+function managedPath(target: string, root = WHISPER_ROOT) {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new ProviderError('Đường dẫn Whisper Local không hợp lệ.', 500);
   return target;
 }
@@ -132,10 +132,10 @@ async function findExecutable(directory: string): Promise<string | undefined> {
   return undefined;
 }
 
-function runProcess(command: string, args: string[], signal?: AbortSignal, cwd?: string) {
+function runProcess(command: string, args: string[], signal?: AbortSignal, cwd?: string, onStderr?: (chunk: string) => void) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(command, args, { cwd, windowsHide: true });
-    if (child.pid) {
+    if (child.pid && process.env.AUTOSUB_BACKGROUND_PRIORITY === '1') {
       try { setPriority(child.pid, osConstants.priority.PRIORITY_BELOW_NORMAL); } catch { /* OS may deny priority changes; execution can continue safely. */ }
     }
     let stdout = '';
@@ -152,7 +152,11 @@ function runProcess(command: string, args: string[], signal?: AbortSignal, cwd?:
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener('abort', abort, { once: true });
     child.stdout?.on('data', (chunk) => { stdout = (stdout + chunk.toString()).slice(-256 * 1024); });
-    child.stderr?.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-256 * 1024); });
+    child.stderr?.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderr = (stderr + text).slice(-256 * 1024);
+      onStderr?.(text);
+    });
     child.once('error', (error) => fail(error));
     child.once('close', (code) => {
       if (settled) return;
@@ -276,6 +280,12 @@ export function parseWhisperJson(value: unknown): { text: string; segments: Subt
   return { text: segments.map((segment) => segment.text || '').join(' ').trim(), segments };
 }
 
+export function parseWhisperProgress(chunk: string) {
+  const matches = [...chunk.matchAll(/progress\s*=\s*(\d{1,3})%/gi)];
+  if (!matches.length) return undefined;
+  return Math.max(0, Math.min(100, Number(matches.at(-1)?.[1])));
+}
+
 let whisperQueue: Promise<void> = Promise.resolve();
 
 function waitForTurn(previous: Promise<void>, signal?: AbortSignal) {
@@ -313,8 +323,9 @@ async function withWhisperQueue<T>(task: () => Promise<T>, signal?: AbortSignal)
 }
 
 function whisperThreads() {
-  const configured = Number(process.env.AUTOSUB_WHISPER_THREADS || 4);
-  return Math.max(1, Math.min(8, Number.isFinite(configured) ? Math.round(configured) : 4));
+  const fallback = Math.min(8, availableParallelism());
+  const configured = Number(process.env.AUTOSUB_WHISPER_THREADS || fallback);
+  return Math.max(1, Math.min(16, Number.isFinite(configured) ? Math.round(configured) : fallback));
 }
 
 async function prepareAudio(audio: Buffer | string, filename: string, directory: string, signal?: AbortSignal) {
@@ -335,11 +346,11 @@ async function prepareAudio(audio: Buffer | string, filename: string, directory:
   return wav;
 }
 
-export async function transcribeWithWhisper(modelId: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal) {
+export async function transcribeWithWhisper(modelId: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal, onProgress?: (percent: number) => void) {
   return withWhisperQueue(async () => {
     const [executable, modelPath] = await Promise.all([ensureWhisperRuntime(signal), ensureWhisperModel(modelId, signal)]);
     await mkdir(TEMP_ROOT, { recursive: true });
-    const directory = managedPath(await mkdtemp(path.join(TEMP_ROOT, 'stt-')));
+    const directory = managedPath(await mkdtemp(path.join(TEMP_ROOT, 'stt-')), TEMP_ROOT);
     try {
       const input = await prepareAudio(audio, filename, directory, signal);
       const outputBase = path.join(directory, 'result');
@@ -349,11 +360,13 @@ export async function transcribeWithWhisper(modelId: string, audio: Buffer | str
         '--language', normalizeLanguage(language),
         '--threads', String(whisperThreads()),
         '--processors', '1',
-        '--no-gpu',
         '--output-json',
         '--output-file', outputBase,
-        '--no-prints',
-      ], signal, path.dirname(executable));
+        '--print-progress',
+      ], signal, path.dirname(executable), (chunk) => {
+        const percent = parseWhisperProgress(chunk);
+        if (percent !== undefined) onProgress?.(percent);
+      });
       const raw = await readFile(`${outputBase}.json`, 'utf8').catch(() => {
         throw new ProviderError('Whisper Local không tạo được transcript.', 502, execution.stderr || execution.stdout || 'Không có file JSON đầu ra.');
       });

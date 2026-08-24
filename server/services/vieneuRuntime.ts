@@ -4,11 +4,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { constants as osConstants, setPriority } from 'node:os';
 import path from 'node:path';
 import { ProviderError } from '../adapters/errors';
-import { run, workdir } from './ffmpeg';
+import { run, temporaryRoot, workdir } from './ffmpeg';
 
-const VIENEU_VERSION = '3.2.5';
+const VIENEU_VERSION = '3.3.0';
+const SEA_G2P_VERSION = '0.9.0';
 const RUNTIME_ROOT = path.join(workdir, 'vieneu', 'runtime');
-const TEMP_ROOT = path.join(workdir, 'vieneu', 'tmp');
+const TEMP_ROOT = path.join(temporaryRoot, 'vieneu');
 const BRIDGE_SCRIPT = path.join(process.cwd(), 'server', 'services', 'vieneu_bridge.py');
 const IDLE_TIMEOUT_MS = 45_000;
 
@@ -131,10 +132,13 @@ async function findUv() {
   throw new ProviderError('VieNeu Local cần uv để tự cài runtime. Hãy cài uv bằng “winget install astral-sh.uv” rồi thử lại.', 503);
 }
 
-async function runtimeIsReady(executable: string) {
+async function runtimeIsReady(executable: string, requiredVersion?: string) {
   if (!(await stat(executable).catch(() => undefined))?.isFile()) return false;
   try {
-    await runProcess(executable, ['-c', 'import vieneu, kaldi_native_fbank, onnxruntime; print("ready")'], undefined, 90_000);
+    const versionCheck = requiredVersion
+      ? `import importlib.metadata as metadata; assert metadata.version("vieneu") == ${JSON.stringify(requiredVersion)}; `
+      : '';
+    await runProcess(executable, ['-c', `${versionCheck}import vieneu, kaldi_native_fbank, onnxruntime; print("ready")`], undefined, 90_000);
     return true;
   } catch {
     return false;
@@ -154,12 +158,12 @@ export async function ensureVieneuRuntime(signal?: AbortSignal) {
   runtimePromise = (async () => {
     await mkdir(RUNTIME_ROOT, { recursive: true });
     const executable = pythonExecutable();
-    if (await runtimeIsReady(executable)) return executable;
+    if (await runtimeIsReady(executable, VIENEU_VERSION)) return executable;
     const uv = await findUv();
     if (!(await stat(executable).catch(() => undefined))?.isFile()) await runProcess(uv, ['venv', '--python', '3.12', path.join(RUNTIME_ROOT, '.venv')], signal);
     await runProcess(uv, ['pip', 'install', '--python', executable, '--no-deps', `vieneu==${VIENEU_VERSION}`], signal);
-    await runProcess(uv, ['pip', 'install', '--python', executable, 'sea-g2p==0.8.4', 'onnxruntime>=1.20.0', 'numpy', 'soundfile', 'soxr', 'tokenizers>=0.20', 'huggingface_hub', 'PyYAML', 'perth>=0.2.0', 'kaldi-native-fbank==1.22.3'], signal);
-    if (!await runtimeIsReady(executable)) throw new ProviderError('VieNeu Local đã cài nhưng Python không import được runtime.', 503);
+    await runProcess(uv, ['pip', 'install', '--python', executable, `sea-g2p==${SEA_G2P_VERSION}`, 'onnxruntime>=1.20.0', 'numpy', 'soundfile', 'soxr', 'tokenizers>=0.20', 'huggingface_hub', 'PyYAML', 'perth>=0.2.0', 'kaldi-native-fbank==1.22.3'], signal);
+    if (!await runtimeIsReady(executable, VIENEU_VERSION)) throw new ProviderError('VieNeu Local đã cài nhưng Python không import được runtime.', 503);
     return executable;
   })().catch((error) => {
     runtimePromise = undefined;
@@ -168,42 +172,53 @@ export async function ensureVieneuRuntime(signal?: AbortSignal) {
   return runtimePromise;
 }
 
-let worker: ChildProcessWithoutNullStreams | undefined;
-let workerStartPromise: Promise<ChildProcessWithoutNullStreams> | undefined;
-let stdoutBuffer = '';
-let stderrTail = '';
-let idleTimer: NodeJS.Timeout | undefined;
-const pending = new Map<string, PendingRequest>();
-
-function clearIdleTimer() {
-  if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = undefined;
+interface BridgeSlot {
+  worker?: ChildProcessWithoutNullStreams;
+  startPromise?: Promise<ChildProcessWithoutNullStreams>;
+  stdoutBuffer: string;
+  stderrTail: string;
+  idleTimer?: NodeJS.Timeout;
+  load: number;
+  pending: Map<string, PendingRequest>;
 }
 
-function stopWorker(reason?: Error) {
-  clearIdleTimer();
-  const current = worker;
-  worker = undefined;
-  workerStartPromise = undefined;
-  stdoutBuffer = '';
+const vieneuThreads = () => Math.max(1, Math.min(4, Number(process.env.AUTOSUB_VIENEU_THREADS) || 2));
+const vieneuWorkerCount = () => Math.max(1, Math.min(4, Number(process.env.AUTOSUB_VIENEU_WORKERS) || 3));
+const bridgeSlots: BridgeSlot[] = Array.from(
+  { length: vieneuWorkerCount() },
+  () => ({ stdoutBuffer: '', stderrTail: '', load: 0, pending: new Map() }),
+);
+
+function clearIdleTimer(slot: BridgeSlot) {
+  if (slot.idleTimer) clearTimeout(slot.idleTimer);
+  slot.idleTimer = undefined;
+}
+
+function stopWorker(slot: BridgeSlot, reason?: Error) {
+  clearIdleTimer(slot);
+  const current = slot.worker;
+  slot.worker = undefined;
+  slot.startPromise = undefined;
+  slot.stdoutBuffer = '';
   if (current) terminateProcess(current);
   if (reason) {
-    for (const item of pending.values()) { item.cleanup(); item.reject(reason); }
-    pending.clear();
+    for (const item of slot.pending.values()) { item.cleanup(); item.reject(reason); }
+    slot.pending.clear();
   }
+  slot.load = 0;
 }
 
-function scheduleIdleStop() {
-  clearIdleTimer();
-  if (pending.size) return;
-  idleTimer = setTimeout(() => stopWorker(), IDLE_TIMEOUT_MS);
-  idleTimer.unref();
+function scheduleIdleStop(slot: BridgeSlot) {
+  clearIdleTimer(slot);
+  if (slot.pending.size || slot.load) return;
+  slot.idleTimer = setTimeout(() => stopWorker(slot), IDLE_TIMEOUT_MS);
+  slot.idleTimer.unref();
 }
 
-async function getWorker(signal?: AbortSignal) {
-  if (worker && !worker.killed) return worker;
-  if (workerStartPromise) return workerStartPromise;
-  workerStartPromise = (async () => {
+async function getWorker(slot: BridgeSlot, signal?: AbortSignal) {
+  if (slot.worker && !slot.worker.killed) return slot.worker;
+  if (slot.startPromise) return slot.startPromise;
+  slot.startPromise = (async () => {
     const executable = await ensureVieneuRuntime(signal);
     const child = spawn(executable, [BRIDGE_SCRIPT], {
       windowsHide: true,
@@ -212,72 +227,83 @@ async function getWorker(signal?: AbortSignal) {
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1',
         HF_HUB_DISABLE_SYMLINKS_WARNING: '1',
-        AUTOSUB_VIENEU_THREADS: process.env.AUTOSUB_VIENEU_THREADS || '2',
+        AUTOSUB_VIENEU_THREADS: String(vieneuThreads()),
       },
     });
-    if (child.pid) {
+    if (child.pid && process.env.AUTOSUB_BACKGROUND_PRIORITY === '1') {
       try { setPriority(child.pid, osConstants.priority.PRIORITY_BELOW_NORMAL); } catch { /* Windows may deny priority changes. */ }
     }
-    worker = child;
-    stderrTail = '';
+    slot.worker = child;
+    slot.stderrTail = '';
     child.stdout.on('data', (chunk) => {
-      stdoutBuffer += chunk.toString();
+      slot.stdoutBuffer += chunk.toString();
       for (;;) {
-        const newline = stdoutBuffer.indexOf('\n');
+        const newline = slot.stdoutBuffer.indexOf('\n');
         if (newline < 0) break;
-        const line = stdoutBuffer.slice(0, newline).trim();
-        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        const line = slot.stdoutBuffer.slice(0, newline).trim();
+        slot.stdoutBuffer = slot.stdoutBuffer.slice(newline + 1);
         if (!line) continue;
         let response: BridgeResponse | undefined;
         try { response = JSON.parse(line) as BridgeResponse; } catch { continue; }
         const requestId = String(response.requestId || '');
-        const item = pending.get(requestId);
+        const item = slot.pending.get(requestId);
         if (!item) continue;
-        pending.delete(requestId);
+        slot.pending.delete(requestId);
+        slot.load = Math.max(0, slot.load - 1);
         item.cleanup();
         if (response.ok === false) item.reject(new ProviderError('VieNeu Local không tạo được giọng đọc.', 502, String(response.error || 'Unknown bridge error')));
         else item.resolve(response);
-        scheduleIdleStop();
+        scheduleIdleStop(slot);
       }
     });
-    child.stderr.on('data', (chunk) => { stderrTail = (stderrTail + chunk.toString()).slice(-256 * 1024); });
-    child.once('error', (error) => stopWorker(error));
+    child.stderr.on('data', (chunk) => { slot.stderrTail = (slot.stderrTail + chunk.toString()).slice(-256 * 1024); });
+    child.once('error', (error) => stopWorker(slot, error));
     child.once('close', (code) => {
-      if (worker !== child) return;
-      stopWorker(new ProviderError('VieNeu Local đã dừng ngoài dự kiến.', 502, stderrTail || `exit ${code ?? 'unknown'}`));
+      if (slot.worker !== child) return;
+      stopWorker(slot, new ProviderError('VieNeu Local đã dừng ngoài dự kiến.', 502, slot.stderrTail || `exit ${code ?? 'unknown'}`));
     });
     return child;
   })().catch((error) => {
-    workerStartPromise = undefined;
+    slot.startPromise = undefined;
     throw error;
   });
-  return workerStartPromise;
+  return slot.startPromise;
 }
 
 async function sendBridge(request: Record<string, unknown>, signal?: AbortSignal) {
-  clearIdleTimer();
-  const child = await getWorker(signal);
+  const slot = bridgeSlots.reduce((best, candidate) => candidate.load < best.load ? candidate : best);
+  clearIdleTimer(slot);
+  slot.load += 1;
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = await getWorker(slot, signal);
+  } catch (error) {
+    slot.load = Math.max(0, slot.load - 1);
+    throw error;
+  }
   return new Promise<BridgeResponse>((resolve, reject) => {
     const requestId = randomUUID();
-    const abort = () => stopWorker(new ProviderError('Đã hủy VieNeu Local.', 499));
+    const abort = () => stopWorker(slot, new ProviderError('Đã hủy VieNeu Local.', 499));
     const cleanup = () => signal?.removeEventListener('abort', abort);
-    if (signal?.aborted) { abort(); reject(new ProviderError('Đã hủy VieNeu Local.', 499)); return; }
+    if (signal?.aborted) { slot.load = Math.max(0, slot.load - 1); abort(); reject(new ProviderError('Đã hủy VieNeu Local.', 499)); return; }
     signal?.addEventListener('abort', abort, { once: true });
-    pending.set(requestId, { resolve, reject, cleanup });
+    slot.pending.set(requestId, { resolve, reject, cleanup });
     child.stdin.write(`${JSON.stringify({ ...request, requestId })}\n`, (error) => {
       if (!error) return;
-      const item = pending.get(requestId);
+      const item = slot.pending.get(requestId);
       if (!item) return;
-      pending.delete(requestId);
+      slot.pending.delete(requestId);
+      slot.load = Math.max(0, slot.load - 1);
       item.cleanup();
       item.reject(error);
+      scheduleIdleStop(slot);
     });
   });
 }
 
 export async function vieneuRuntimeStatus(signal?: AbortSignal) {
   const executable = await ensureVieneuRuntime(signal);
-  return { executable, threads: Math.max(1, Math.min(4, Number(process.env.AUTOSUB_VIENEU_THREADS) || 2)) };
+  return { executable, threads: vieneuThreads(), workers: vieneuWorkerCount() };
 }
 
 async function vieneuAudioQuality(file: string, signal?: AbortSignal) {
@@ -332,4 +358,4 @@ export async function synthesizeWithVieneu(text: string, voice: VieneuVoiceInput
   }
 }
 
-process.once('exit', () => stopWorker());
+process.once('exit', () => bridgeSlots.forEach((slot) => stopWorker(slot)));
