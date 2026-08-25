@@ -360,7 +360,7 @@ function distanceBetween(leftStart: number, leftEnd: number, rightStart: number,
   return leftEnd < rightStart ? rightStart - leftEnd : leftStart - rightEnd;
 }
 
-function selectSpeechRegion(regions: SpeechRegion[], cue: TimestampRefinementCue, config: TimestampRefinementConfig, minimumRegionIndex: number, usedRegions: Set<SpeechRegion>) {
+function selectSpeechRegion(regions: SpeechRegion[], cue: TimestampRefinementCue, config: TimestampRefinementConfig, minimumRegionIndex: number, usedRegions: Set<SpeechRegion>, nextCue?: TimestampRefinementCue) {
   const providerStartMs = Math.max(0, Math.round(cue.startMs));
   const providerEndMs = Math.max(providerStartMs + 1, Math.round(cue.endMs));
   const searchStartMs = Math.max(0, providerStartMs - Math.max(0, config.searchPaddingBeforeMs));
@@ -411,6 +411,19 @@ function selectSpeechRegion(regions: SpeechRegion[], cue: TimestampRefinementCue
     ? { ...selected.region, endMs: providerEndMs }
     : selected.region;
   const regionDurationMs = boundedRegion.endMs - boundedRegion.startMs;
+  // A VAD region that reaches into the following provider cue contains more
+  // than one utterance. Consuming it here would push/collapse every later cue.
+  if (nextCue) {
+    const nextStartMs = Math.max(0, Math.round(nextCue.startMs));
+    const nextEndMs = Math.max(nextStartMs + 1, Math.round(nextCue.endMs));
+    if (boundedRegion.startMs >= nextStartMs || boundedRegion.endMs >= nextEndMs) return undefined;
+  }
+  // A long CJK sentence cannot fit into a tiny VAD fragment. Keep genuinely
+  // short utterances, but reject collapsed windows such as 15 characters in
+  // 570 ms that would be unreadable and are usually the tail of another cue.
+  const cueText = typeof cue.originalText === 'string' ? cue.originalText : typeof cue.text === 'string' ? cue.text : '';
+  const cjkLength = [...cueText.matchAll(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu)].length;
+  if (cjkLength >= 4 && regionDurationMs < cjkLength * 70) return undefined;
   if (regionDurationMs > Math.max(providerDurationMs * 4, providerDurationMs + 5000)) return undefined;
   // A materially longer region is usually music/ambient audio or multiple
   // utterances joined together. Keep the provider hint instead of making a
@@ -440,7 +453,7 @@ export function refineCuesWithSpeechRegions<T extends TimestampRefinementCue>(cu
   let minimumRegionIndex = 0;
   const usedRegions = new Set<SpeechRegion>();
   const refined = cues.map((cue, index) => {
-    const selected = scanConfidence !== 'low' ? selectSpeechRegion(speechRegions, cue, config, minimumRegionIndex, usedRegions) : undefined;
+    const selected = scanConfidence !== 'low' ? selectSpeechRegion(speechRegions, cue, config, minimumRegionIndex, usedRegions, cues[index + 1]) : undefined;
     if (!selected || selected.region.endMs <= selected.region.startMs) {
       details.push(fallbackDetail(index, cue, scanConfidence));
       debugRefinement('TIMESTAMP MATCH', { cue: index + 1, provider: [cue.startMs, cue.endMs], refined: false, confidence: scanConfidence });

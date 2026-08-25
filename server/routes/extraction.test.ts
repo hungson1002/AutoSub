@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import test from 'node:test';
 import type { AIProvider } from '../types';
 import { cleanupUploadSession, createUploadSession } from '../services/uploads';
-import { extractionRoutes, GROQ_DIRECT_AUDIO_LIMIT_BYTES, mapWithConcurrency } from './extraction';
+import { buildOcrPrompt, extractionRoutes, GROQ_DIRECT_AUDIO_LIMIT_BYTES, mapWithConcurrency } from './extraction';
 
 test('bounded extraction work preserves input order and concurrency limit', async () => {
   let active = 0;
@@ -19,6 +19,13 @@ test('bounded extraction work preserves input order and concurrency limit', asyn
   });
   assert.deepEqual(values, [10, 20, 30, 40, 50]);
   assert.equal(peak, 2);
+});
+
+test('OCR prompt preserves the detected source script instead of translating it', () => {
+  const prompt = buildOcrPrompt('Auto Detect');
+  assert.match(prompt, /verbatim/i);
+  assert.match(prompt, /original (?:language|script)/i);
+  assert.match(prompt, /never translate/i);
 });
 
 test('missing extraction progress is reported as failed instead of running forever', async () => {

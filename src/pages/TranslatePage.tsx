@@ -120,7 +120,8 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
     setProgressStage('Đang chuẩn bị dữ liệu dịch');
     updateRunState({ status: 'running', fileName, total: cues.length, translated: translatedCount, remaining: queue.length, progress: 5, stage: 'Đang chuẩn bị dữ liệu dịch', updatedAt: Date.now() });
     try {
-      const next = cues.map((cue) => ({ ...cue }));
+      const next = cues.map((cue) => onlyMissing ? { ...cue } : { ...cue, translatedText: '' });
+      let lastWarning = '';
       let translationGuide = '';
       if (style === 'Review phim') {
         setProgressStage('Đang lập translation bible cho nhân vật và thuật ngữ');
@@ -137,7 +138,7 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
         const batchNumber = Math.floor(start / batchSize) + 1;
         setProgressStage(`Đang gửi batch ${batchNumber}/${totalBatches} · cue ${start + 1}–${start + batch.length}`);
         easeProgressTo(Math.min(94, Math.max(8, ((start + batch.length * 0.88) / queue.length) * 100)));
-        let result: { items: Array<{ id: string; translation: string }> };
+        let result: { items: Array<{ id: string; translation: string }>; pendingCueIds?: string[]; warning?: string };
         try {
           const translationMemory = buildTranslationMemory(next, batch[0]?.id || '', 24);
           result = await api.translate(provider, assignment.model, batch, sourceLanguage, targetLanguage, style, customPrompt, glossary.filter((entry) => entry.enabled), controller.signal, next, translationMemory, translationGuide);
@@ -156,16 +157,26 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
           const cue = next.find((candidate) => candidate.id === item.id);
           if (cue) cue.translatedText = item.translation;
         }
+        if (result.warning) lastWarning = result.warning;
         setProgress(Math.min(98, ((start + batch.length) / queue.length) * 100));
         setProgressStage(`Đã nhận batch ${batchNumber}/${totalBatches} · đang lưu kết quả`);
         onCuesChange([...next]);
         const translated = next.filter((cue) => cue.translatedText.trim()).length;
         updateRunState({ status: 'running', fileName, total: next.length, translated, remaining: next.length - translated, progress: Math.min(98, ((start + batch.length) / queue.length) * 100), stage: `Đã nhận batch ${batchNumber}/${totalBatches} · đang lưu kết quả`, updatedAt: Date.now() });
       }
+      const translated = next.filter((cue) => cue.translatedText.trim()).length;
+      const remaining = next.length - translated;
       setProgress(100);
-      setProgressStage('Đã hoàn tất dịch toàn bộ subtitle');
-      updateRunState({ status: 'completed', fileName, total: next.length, translated: next.length, remaining: 0, progress: 100, stage: 'Đã hoàn tất dịch toàn bộ subtitle', updatedAt: Date.now() });
-      onNotice(`Đã dịch ${next.filter((cue) => cue.translatedText.trim()).length}/${next.length} cue.`, 'success');
+      if (remaining > 0) {
+        const stage = `Đã lưu ${translated}/${next.length} cue · còn ${remaining} cue cần dịch tiếp`;
+        setProgressStage(stage);
+        updateRunState({ status: 'failed', fileName, total: next.length, translated, remaining, message: lastWarning || `Còn ${remaining} cue chưa có bản dịch hợp lệ.`, progress: 100, stage, updatedAt: Date.now() });
+        onNotice(stage, 'error');
+      } else {
+        setProgressStage('Đã hoàn tất dịch toàn bộ subtitle');
+        updateRunState({ status: 'completed', fileName, total: next.length, translated, remaining: 0, progress: 100, stage: 'Đã hoàn tất dịch toàn bộ subtitle', updatedAt: Date.now() });
+        onNotice(`Đã dịch ${translated}/${next.length} cue.`, 'success');
+      }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         const remaining = cues.filter((cue) => !cue.translatedText.trim()).length;

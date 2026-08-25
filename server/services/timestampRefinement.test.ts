@@ -94,6 +94,22 @@ test('does not reuse one speech region for multiple provider cues', () => {
   assert.equal(result.metadata.fallbackCount, 2);
 });
 
+test('keeps provider timestamps when a broad VAD region would swallow adjacent dialogue', () => {
+  const result = refineCuesWithSpeechRegions([
+    cue(19_000, 22_000, '二位便是今日报名门派游历的客人'),
+    cue(22_000, 24_000, '是我们你是今天带我们的师姐吗'),
+  ], [
+    { startMs: 19_548, endMs: 24_310 },
+    { startMs: 24_476, endMs: 25_046 },
+  ]);
+
+  assert.deepEqual(result.cues.map(({ startMs, endMs }) => ({ startMs, endMs })), [
+    { startMs: 19_000, endMs: 22_000 },
+    { startMs: 22_000, endMs: 24_000 },
+  ]);
+  assert.equal(result.metadata.fallbackCount, 2);
+});
+
 test('speech region lookup scales across thousands of cues', () => {
   const regions = Array.from({ length: 3000 }, (_, index) => ({ startMs: index * 3000, endMs: index * 3000 + 1200 }));
   const cues = regions.map((region, index) => cue(region.startMs - 250, region.endMs + 250, `cue-${index}`));

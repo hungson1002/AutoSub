@@ -229,3 +229,36 @@ test('rejects Chinese source text echoed unchanged for Vietnamese translation', 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('rejects unclear and skipped placeholders instead of counting them as translated', async () => {
+  const originalFetch = globalThis.fetch;
+  const provider: AIProvider = {
+    id: 'translation-provider', name: 'Translation provider', baseUrl: 'http://provider.test/v1', enabled: true,
+    models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true },
+  };
+  let request: { messages?: Array<{ role: string; content: string }> } | undefined;
+  globalThis.fetch = (async (_input: string | URL, init?: RequestInit) => {
+    request = JSON.parse(String(init?.body)) as typeof request;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      items: [
+        { id: 'a', translation: '[Không rõ]' },
+        { id: 'b', translation: '[Đoạn âm thanh không rõ — bỏ qua]' },
+      ],
+    }) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => translateBatch(provider, 'model', [
+        { id: 'a', text: '塞内牛门快', targetDurationMs: 1000 },
+        { id: 'b', text: '无隔长苏立门快', targetDurationMs: 1000 },
+      ], 'Chinese', 'Vietnamese', 'Review phim', '', []),
+      /placeholder|không rõ|bỏ qua/i,
+    );
+    assert.match(request?.messages?.[0]?.content || '', /placeholder/i);
+    assert.doesNotMatch(request?.messages?.[0]?.content || '', /return an empty translation/i);
+    assert.match(request?.messages?.[0]?.content || '', /OCR|ASR/i);
+    assert.match(request?.messages?.[0]?.content || '', /do not guess/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

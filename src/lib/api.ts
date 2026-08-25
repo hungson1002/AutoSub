@@ -303,7 +303,7 @@ export const api = {
     translationMemory: TranslationMemoryItem[] = [],
     translationGuide = '',
   ) =>
-    request<{ items: Array<{ id: string; translation: string }> }>(
+    request<{ items: Array<{ id: string; translation: string }>; pendingCueIds?: string[]; warning?: string }>(
       "/api/translate",
       {
         method: "POST",
@@ -456,6 +456,7 @@ export const api = {
     filterWatermark: boolean,
     signal?: AbortSignal,
     progressId?: string,
+    language?: string,
   ) =>
     request<{ cues: SubtitleCue[]; uploadId: string }>("/api/extract/ocr", {
       method: "POST",
@@ -467,6 +468,7 @@ export const api = {
         samplingFps,
         filterWatermark,
         progressId,
+        language,
       }),
       signal,
     }),

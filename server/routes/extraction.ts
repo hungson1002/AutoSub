@@ -67,6 +67,13 @@ const forgetExtractionProgress = (progressId: string | undefined) => {
 const segmentDebug = (segments: Array<{ text?: string; start?: number; end?: number }>) => segments.slice(0, 5).map((segment) => ({ text: segment.text, start: segment.start, end: segment.end, startMs: typeof segment.start === 'number' ? Math.round(segment.start * 1000) : undefined, endMs: typeof segment.end === 'number' ? Math.round(segment.end * 1000) : undefined }));
 const cueDebug = (cues: Array<{ startMs: number; endMs: number; originalText?: string }>) => cues.slice(0, 5).map((cue) => ({ text: cue.originalText, startMs: cue.startMs, endMs: cue.endMs }));
 
+export function buildOcrPrompt(language = 'Auto Detect') {
+  const languageHint = /^(?:auto(?:matic)?(?:[\s_-]*detect)?)$/i.test(language.trim())
+    ? 'Detect the source language only to identify its original script.'
+    : `The expected source language is ${language}.`;
+  return `Transcribe verbatim only the subtitle text visible in this video frame. ${languageHint} Preserve the exact original language and script. Never translate, romanize, summarize, correct, or explain the text. Ignore logos, watermarks, scene text and UI text. Return plain subtitle text only; if there is no subtitle, return an empty string.`;
+}
+
 async function transcribeGroqAudio(provider: AIProvider, model: string, audio: string, language: string, signal?: AbortSignal, onProgress?: (percent: number) => void) {
   const audioSize = (await stat(audio)).size;
   debugMedia('stt', { audioPath: audio, audioSize, provider: provider.name, providerType: resolveProviderType(provider) });
@@ -203,7 +210,7 @@ export async function extractionRoutes(app: FastifyInstance) {
         changedFrames,
         boundedConcurrency(process.env.AUTOSUB_OCR_CONCURRENCY, 4),
         async ({ framePath, frameIndex }) => {
-          const text = await recognizeImage(body.provider!, body.model!, framePath, 'Read only the subtitle text visible in this video frame. Ignore logos, watermarks, scene text and other UI text. Return plain text only. If there is no subtitle, return an empty string.');
+          const text = await recognizeImage(body.provider!, body.model!, framePath, buildOcrPrompt(body.language));
           recognized += 1;
           reportExtractionProgress(progressId, { percent: changedFrames.length ? 45 + ((recognized / changedFrames.length) * 48) : 93, stage: `Vision provider · ${recognized}/${changedFrames.length} frame thay đổi`, processed: recognized, total: changedFrames.length });
           return text ? { text, timestampMs: Math.round(frameIndex * 1000 / fps) } : undefined;

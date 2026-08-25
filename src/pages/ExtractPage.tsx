@@ -245,7 +245,7 @@ export function ExtractPage({ providers, settings, initialAsset, onCuesChange, o
         updateRunState({ status: 'completed', mode: tab, fileName: asset.name, cueCount: nextCues.length, updatedAt: Date.now() });
         onNotice(`Đã trích xuất ${nextCues.length} cue${autoTranslate ? ' và xử lý auto-translation.' : '.'}`, 'success');
       } else {
-        const extraction = api.extractOcr(asset.uploadId, provider, assignment.model, roi, samplingFps, filterWatermark, controller.signal, progressId);
+        const extraction = api.extractOcr(asset.uploadId, provider, assignment.model, roi, samplingFps, filterWatermark, controller.signal, progressId, sourceLanguage);
         progressPollRef.current = window.setTimeout(() => void pollExtractionProgress(progressId, controller), 300);
         const result = await extraction;
         clearProgressTimers();

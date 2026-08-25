@@ -73,7 +73,7 @@ test('CapCut jobs are serialized and narration is sped up without padding or tri
   assert.equal(tempoFilter(1), 'anull');
   assert.equal(fallbackTempoFilter(1.25), 'atempo=1.250');
   assert.equal(fallbackTempoFilter(1), 'anull');
-  assert.equal(ADAPTIVE_FIT_VERSION, 2);
+  assert.equal(ADAPTIVE_FIT_VERSION, 3);
   assert.equal(fittingTempo(0.65), 1);
   assert.equal(fittingTempo(0.90), 1);
   assert.equal(fittingTempo(1.08), 1.08);
@@ -95,7 +95,7 @@ test('time-stretch integrity guard rejects new full-scale impulses', () => {
   assert.equal(timeStretchIntroducedArtifacts(source, clean), false);
 });
 
-test('timeline planner preserves natural gaps and shifts later cues after an overrun', () => {
+test('timeline planner preserves natural gaps and limits adjacent voice overlap', () => {
   const plan = planDubbingTimeline([
     { cueId: 'a', startMs: 0, endMs: 2_000, audioDurationMs: 2_000 },
     { cueId: 'b', startMs: 2_000, endMs: 3_000, audioDurationMs: 2_500 },
@@ -106,7 +106,7 @@ test('timeline planner preserves natural gaps and shifts later cues after an ove
   assert.deepEqual(plan.map(({ cueId, timelineStartMs, timelineEndMs, timelineShiftMs }) => ({ cueId, timelineStartMs, timelineEndMs, timelineShiftMs })), [
     { cueId: 'a', timelineStartMs: 0, timelineEndMs: 2_000, timelineShiftMs: 0 },
     { cueId: 'b', timelineStartMs: 2_000, timelineEndMs: 4_500, timelineShiftMs: 0 },
-    { cueId: 'c', timelineStartMs: 4_520, timelineEndMs: 5_520, timelineShiftMs: 1_520 },
+    { cueId: 'c', timelineStartMs: 4_250, timelineEndMs: 5_250, timelineShiftMs: 1_250 },
     { cueId: 'd', timelineStartMs: 9_000, timelineEndMs: 10_000, timelineShiftMs: 0 },
   ]);
 });
@@ -123,6 +123,18 @@ test('timeline planner never pulls a cue earlier than its source timestamp', () 
   assert.ok(plan.every((cue) => cue.timelineStartMs >= cue.startMs));
 });
 
+test('timeline planner delays the next cue enough to cap a long overrun at 250 ms', () => {
+  const plan = planDubbingTimeline([
+    { cueId: 'long', startMs: 0, endMs: 1_000, audioDurationMs: 1_600 },
+    { cueId: 'next', startMs: 1_000, endMs: 2_000, audioDurationMs: 850 },
+  ]);
+
+  assert.equal(plan[0].timelineEndMs, 1_600);
+  assert.equal(plan[1].timelineStartMs, 1_350);
+  assert.equal(plan[1].timelineShiftMs, 350);
+  assert.equal(plan[0].timelineEndMs - plan[1].timelineStartMs, 250);
+});
+
 test('adaptive fitting shares a long cue across a bounded local cue group', () => {
   const plan = planAdaptiveCueTempos([
     { cueId: '13', startMs: 35_280, endMs: 36_800, targetDurationMs: 1_520, audioDurationMs: 1_775 },
@@ -133,8 +145,7 @@ test('adaptive fitting shares a long cue across a bounded local cue group', () =
     { cueId: '18', startMs: 45_080, endMs: 48_080, targetDurationMs: 3_000, audioDurationMs: 2_749 },
   ]);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
-  assert.ok((byId.get('14') || 0) > 1.02);
-  assert.ok((byId.get('14') || 2) < 1.06);
+  assert.equal(byId.get('14'), 1.18);
   assert.equal(byId.get('13'), byId.get('14'));
   assert.equal(byId.get('14'), byId.get('15'));
   assert.equal(byId.get('14'), byId.get('16'));
@@ -152,6 +163,45 @@ test('adaptive fitting does not spread tempo across a real pause', () => {
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
   assert.equal(byId.get('before'), byId.get('long'));
   assert.equal(byId.get('after-gap'), 1);
+});
+
+test('adaptive fitting gives a neighboring cue group enough tempo before using timeline overlap', () => {
+  const items = [
+    { cueId: '10', startMs: 19_548, endMs: 22_136, targetDurationMs: 2_976, audioDurationMs: 3_081 },
+    { cueId: '11', startMs: 24_476, endMs: 27_650, targetDurationMs: 3_174, audioDurationMs: 3_648 },
+    { cueId: '12', startMs: 27_670, endMs: 29_993, targetDurationMs: 2_323, audioDurationMs: 2_763 },
+    { cueId: '13', startMs: 30_013, endMs: 32_545, targetDurationMs: 2_743, audioDurationMs: 2_915 },
+    { cueId: '14', startMs: 32_836, endMs: 34_577, targetDurationMs: 2_002, audioDurationMs: 1_733 },
+  ];
+  const plan = planAdaptiveCueTempos(items);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+
+  assert.ok((byId.get('11') || 0) > 1.06);
+  assert.equal(byId.get('11'), byId.get('12'));
+  assert.equal(byId.get('12'), byId.get('13'));
+  assert.equal(byId.get('13'), byId.get('14'));
+  assert.ok((byId.get('10') || 2) < (byId.get('11') || 0));
+
+  const timeline = planDubbingTimeline(items.map((item) => ({
+    cueId: item.cueId,
+    startMs: item.startMs,
+    endMs: item.endMs,
+    audioDurationMs: item.audioDurationMs / (byId.get(item.cueId) || 1),
+  })));
+  assert.ok(Math.max(...timeline.map((item) => item.timelineShiftMs)) <= 20);
+});
+
+test('adaptive fitting speeds the whole local group when one cue exceeds the overlap budget', () => {
+  const plan = planAdaptiveCueTempos([
+    { cueId: 'before', startMs: 0, endMs: 1_000, targetDurationMs: 1_000, audioDurationMs: 500 },
+    { cueId: 'long', startMs: 1_000, endMs: 2_000, targetDurationMs: 1_000, audioDurationMs: 1_500 },
+    { cueId: 'after', startMs: 2_000, endMs: 3_000, targetDurationMs: 1_000, audioDurationMs: 500 },
+  ]);
+  const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
+
+  assert.equal(byId.get('before'), 1.18);
+  assert.equal(byId.get('long'), 1.18);
+  assert.equal(byId.get('after'), 1.18);
 });
 
 test('auto cadence shares sustained timing pressure across a dense block', () => {
@@ -226,7 +276,7 @@ test('roomy long-form cue does not speed up just to match its own SRT window', (
   assert.equal(byId.get('final-fit-1'), 1);
 });
 
-test('uses nearby cue slack instead of forcing the long middle cue to 1.4x', () => {
+test('caps the shared local cadence instead of forcing the long middle cue to 1.4x', () => {
   const items = [
     { cueId: '13', startMs: 35_280, endMs: 36_800, targetDurationMs: 1_520, audioDurationMs: 1_855 },
     { cueId: '14', startMs: 36_800, endMs: 39_160, targetDurationMs: 2_360, audioDurationMs: 3_351 },
@@ -239,7 +289,7 @@ test('uses nearby cue slack instead of forcing the long middle cue to 1.4x', () 
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
   const sharedTempo = byId.get('14') || 0;
 
-  assert.ok(sharedTempo > 1.05 && sharedTempo < 1.10);
+  assert.equal(sharedTempo, 1.18);
   assert.equal(byId.get('13'), sharedTempo);
   assert.equal(byId.get('15'), sharedTempo);
   assert.equal(byId.get('16'), sharedTempo);

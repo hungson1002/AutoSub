@@ -73,7 +73,7 @@ export interface AlignTranscriptToAudioResult<T extends AlignmentCue> {
   metadata: TextAudioAlignmentMetadata;
 }
 
-const ALIGNER_VERSION = 1;
+const ALIGNER_VERSION = 2;
 const debugAlignment = (scope: string, value: Record<string, unknown>) => {
   if (process.env.AUTOSUB_DEBUG_UPLOADS === '1') console.info(`[${scope}] ${JSON.stringify(value)}`);
 };

@@ -52,8 +52,15 @@ export async function translationRoutes(app: FastifyInstance) {
           } else if (attempt === 2) throw error;
         }
       }
-      if (pending.length) throw new ProviderError(`${lastValidationMessage || 'Translation chưa hoàn tất.'} Còn ${pending.length} cue chưa dịch sau 3 lần retry.`, 422, JSON.stringify({ pendingCueIds: pending.map((item) => item.id) }));
-      return { items: body.items.map((item) => result.get(item.id)!).filter(Boolean) };
+      const items = body.items.map((item) => result.get(item.id)!).filter(Boolean);
+      if (pending.length) {
+        return {
+          items,
+          pendingCueIds: pending.map((item) => item.id),
+          warning: `${lastValidationMessage || 'Translation chưa hoàn tất.'} Còn ${pending.length} cue chưa dịch sau 3 lần retry.`,
+        };
+      }
+      return { items, pendingCueIds: [] };
     } catch (error) {
       return sendProviderError(reply, error, 'Translation request thất bại.');
     }

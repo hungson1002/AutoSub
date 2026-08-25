@@ -154,6 +154,7 @@ const DEFAULTS = {
   adaptiveMaxGapMs: 1_200,
   joinGapMaxMs: 450,
   joinedCueGapMs: 20,
+  maxVoiceOverlapMs: 250,
   minSpeed: 0.90,
   maxRewriteAttempts: 2,
   batchSize: 30,
@@ -166,7 +167,7 @@ const DEFAULTS = {
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
 const TTS_CACHE_VERSION = 'tts-v10-clean-speech-fit';
-export const ADAPTIVE_FIT_VERSION = 2;
+export const ADAPTIVE_FIT_VERSION = 3;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
@@ -253,24 +254,20 @@ export const buildStemAudioMixFilter = (durationMs: number, originalVolume: numb
   };
 };
 
-export function planDubbingTimeline(items: DubbingTimelineItem[], _joinGapMaxMs = DEFAULTS.joinGapMaxMs, joinedCueGapMs = DEFAULTS.joinedCueGapMs): PlannedDubbingTimelineItem[] {
-  let previousEndMs = 0;
-  let previousOriginalEndMs: number | undefined;
+export function planDubbingTimeline(items: DubbingTimelineItem[], _joinGapMaxMs = DEFAULTS.joinGapMaxMs, _joinedCueGapMs = DEFAULTS.joinedCueGapMs): PlannedDubbingTimelineItem[] {
+  let previousEndMs: number | undefined;
   return [...items]
     .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs)
     .map((item) => {
       const originalStartMs = Math.round(item.startMs);
-      const timelineStartMs = previousOriginalEndMs === undefined
+      // Stay on the subtitle timestamp when there is room. If the previous
+      // voice overruns, delay this cue only until its final 250 ms so the
+      // hand-off feels conversational without two full phrases competing.
+      const timelineStartMs = previousEndMs === undefined
         ? originalStartMs
-        // Never pull a cue into an earlier silent gap. That made speech arrive
-        // before its SRT timestamp. Ripple only when prior speech overruns this
-        // cue, with a small separation to prevent two voices overlapping.
-        : previousEndMs > originalStartMs
-          ? previousEndMs + joinedCueGapMs
-          : originalStartMs;
+        : Math.max(originalStartMs, previousEndMs - DEFAULTS.maxVoiceOverlapMs);
       const timelineEndMs = timelineStartMs + Math.max(1, Math.round(item.audioDurationMs));
       previousEndMs = timelineEndMs;
-      previousOriginalEndMs = Math.round(item.endMs);
       return {
         ...item,
         timelineStartMs,
@@ -282,6 +279,7 @@ export function planDubbingTimeline(items: DubbingTimelineItem[], _joinGapMaxMs 
 
 export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: number = DEFAULTS.hardSpeedMax, pressuredMaxSpeed: number = DEFAULTS.pressuredSpeedMax) {
   const ordered = [...items].sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  const orderedIndex = new Map(ordered.map((item, index) => [item.cueId, index]));
   const tempos = new Map(ordered.map((item) => [item.cueId, 1]));
   for (let index = 0; index < ordered.length; index += 1) {
     const item = ordered[index];
@@ -310,7 +308,18 @@ export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: numb
     const pauseBudgetMs = Math.max(0, group.length - 1) * DEFAULTS.joinedCueGapMs;
     const speechBudgetMs = Math.max(1, spanMs - pauseBudgetMs);
     const groupRequiredSpeed = group.reduce((sum, cue) => sum + cue.audioDurationMs, 0) / speechBudgetMs;
-    const sharedTempo = fittingTempo(groupRequiredSpeed, maxSpeed);
+    // Nearby silence is free timing room. Once that room and the permitted
+    // 250 ms hand-off are exhausted, raise the cadence of the whole local
+    // group rather than making only the long cue suddenly race.
+    const overlapBoundRequiredSpeed = group.reduce((required, cue) => {
+      const cueIndex = orderedIndex.get(cue.cueId) ?? -1;
+      const next = cueIndex >= 0 ? ordered[cueIndex + 1] : undefined;
+      const availableMs = next
+        ? Math.max(cue.targetDurationMs, next.startMs - cue.startMs)
+        : cue.targetDurationMs;
+      return Math.max(required, cue.audioDurationMs / Math.max(1, availableMs + DEFAULTS.maxVoiceOverlapMs));
+    }, 1);
+    const sharedTempo = fittingTempo(Math.max(groupRequiredSpeed, overlapBoundRequiredSpeed), maxSpeed);
     for (const cue of group) tempos.set(cue.cueId, Math.max(tempos.get(cue.cueId) || 1, sharedTempo));
   }
 
@@ -977,15 +986,13 @@ class DubbingRunner {
     }
     await rm(timelineDir(this.job.id), { recursive: true, force: true });
     await mkdir(timelineDir(this.job.id), { recursive: true });
-    const segments: string[] = [];
+    const segments: Array<{ file: string; startMs: number; durationMs: number }> = [];
     const batchSize = this.job.config.batchSize;
     for (let offset = 0; offset < completed.length; offset += batchSize) {
       const batch = completed.slice(offset, offset + batchSize);
-      const nextCue = completed[offset + batch.length];
-      const nextStart = nextCue ? planById.get(nextCue.id)?.timelineStartMs : undefined;
       const firstPlan = planById.get(batch[0].id);
       const segmentStart = offset === 0 ? 0 : firstPlan?.timelineStartMs ?? batch[0].input.startMs;
-      const segmentEnd = nextStart ?? Math.max(...batch.map((cue) => planById.get(cue.id)?.timelineEndMs ?? cue.input.endMs));
+      const segmentEnd = Math.max(...batch.map((cue) => planById.get(cue.id)?.timelineEndMs ?? cue.input.endMs));
       const durationMs = Math.max(segmentEnd - segmentStart, 100);
       const args: string[] = ['-y'];
       const filters: string[] = [];
@@ -999,14 +1006,21 @@ class DubbingRunner {
       filters.push(buildTimelineMixFilter(batch.length, durationMs));
       const output = path.join(timelineDir(this.job.id), `segment-${String(segments.length).padStart(5, '0')}.wav`);
       await run('ffmpeg', [...args, '-filter_complex', filters.join(';'), '-map', '[out]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', output], this.controller.signal);
-      segments.push(output);
+      segments.push({ file: output, startMs: segmentStart, durationMs });
     }
-    const listFile = path.join(timelineDir(this.job.id), 'concat.txt');
-    await writeFile(listFile, segments.map((file) => `file '${file.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'), 'utf8');
     const rawFinalPath = path.join(resultDir(this.job.id), 'dub-track-raw.wav');
     const finalPath = path.join(resultDir(this.job.id), 'dub-track.wav');
     const masteredTemporary = `${finalPath}.${process.pid}.${Date.now()}.master.wav`;
-    await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', rawFinalPath], this.controller.signal);
+    const timelineDurationMs = Math.max(...segments.map((segment) => segment.startMs + segment.durationMs), 100);
+    const finalArgs: string[] = ['-y'];
+    const finalFilters: string[] = [];
+    segments.forEach((segment, index) => {
+      finalArgs.push('-i', segment.file);
+      const delay = Math.max(0, Math.round(segment.startMs));
+      finalFilters.push(`[${index}:a]adelay=${delay}|${delay}[a${index}]`);
+    });
+    finalFilters.push(buildTimelineMixFilter(segments.length, timelineDurationMs));
+    await run('ffmpeg', [...finalArgs, '-filter_complex', finalFilters.join(';'), '-map', '[out]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', rawFinalPath], this.controller.signal);
     try {
       await masterDubFile(rawFinalPath, masteredTemporary, this.controller.signal);
       await replacePreparedFile(masteredTemporary, finalPath);
