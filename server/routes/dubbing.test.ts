@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import test from 'node:test';
 import type { AIProvider } from '../types';
 import { workdir } from '../services/ffmpeg';
+import { DUB_MASTERING_VERSION } from '../services/audioMastering';
 import { createDubbingJob } from '../services/dubbingJobs';
 import { dubbingRoutes } from './dubbing';
 
@@ -41,7 +42,7 @@ test('dubbing result streams from disk and supports HTTP Range 206', async () =>
     const persisted = JSON.parse(await readFile(jobPath, 'utf8')) as Record<string, unknown>;
     persisted.status = 'completed';
     persisted.doneCues = 1;
-    persisted.result = { audioFile: 'result/track.wav', metadataFile: 'result/metadata.json', durationMs: 1000, masteringVersion: 1 };
+    persisted.result = { audioFile: 'result/track.wav', metadataFile: 'result/metadata.json', durationMs: 1000, masteringVersion: DUB_MASTERING_VERSION };
     await writeFile(jobPath, JSON.stringify(persisted), 'utf8');
 
     await dubbingRoutes(app);

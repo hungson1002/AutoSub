@@ -131,30 +131,27 @@ const DEFAULTS = {
   maxCueExtensionPercent: 0.15,
   maxCueExtensionMs: 400,
   safetyGapMs: 80,
-  idealSpeedMin: 0.95,
-  idealSpeedMax: 1.10,
-  acceptableSpeedMax: 1.20,
+  acceptableSpeedMax: 1.08,
   // Respect the voice speed selected by the user. Apply an additional tempo
   // only when the generated speech is actually longer than its cue window.
   narrationTempo: 1,
-  rewriteTriggerSpeed: 1.70,
+  // Prefer a shorter, meaning-preserving Vietnamese line over making an
+  // entire speech block sound rushed. Rewriting is optional and falls back to
+  // bounded time-stretch when no Translation provider is configured.
+  rewriteTriggerSpeed: 1.15,
   hardSpeedMax: 1.18,
-  gentleSpeedMax: 1.12,
-  pressuredSpeedMax: 1.50,
-  adaptiveBlockLoadTrigger: 1.03,
-  adaptiveBlockLoadMinCues: 8,
-  adaptiveBlockDelayTriggerMs: 500,
-  adaptiveBlockMinCues: 3,
-  adaptiveBlockMinDelayedCues: 3,
-  // A difficult line borrows cadence from a small conversational neighbourhood
-  // (up to two earlier lines and the following lines).  This avoids a single
-  // cue suddenly sounding rushed while nearby silent gaps go unused.
-  adaptiveGroupSize: 7,
-  adaptiveLookBehind: 2,
-  adaptiveMaxGapMs: 1_200,
-  joinGapMaxMs: 450,
-  joinedCueGapMs: 20,
-  maxVoiceOverlapMs: 250,
+  pressuredSpeedMax: 1.12,
+  // Subtitle/STT cuts often leave a false 0.3-1.0 s hole inside continuous
+  // narration. Let the preceding line use that room, but keep a real breath
+  // and treat larger gaps as hard scene/dialogue anchors.
+  adaptiveMaxGapMs: 900,
+  clusterReservedPauseMs: 120,
+  clusterTempoBlend: 0.15,
+  // A sub-frame-perfect target made every line race. Human dubbing sounds more
+  // natural with a tiny bounded delay than with a permanent 10-16% speed-up.
+  maxTimelineDriftMs: 120,
+  emergencyTimelineDriftMs: 250,
+  joinedCueGapMs: 0,
   minSpeed: 0.90,
   maxRewriteAttempts: 2,
   batchSize: 30,
@@ -167,7 +164,8 @@ const DEFAULTS = {
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
 const TTS_CACHE_VERSION = 'tts-v10-clean-speech-fit';
-export const ADAPTIVE_FIT_VERSION = 3;
+const SPEECH_PREP_VERSION = 'speech-v2-tight-edges';
+export const ADAPTIVE_FIT_VERSION = 11;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
@@ -212,25 +210,16 @@ export const buildTimelineMixFilter = (inputCount: number, durationMs: number) =
 
 export const cueBoundaryFades = (durationMs: number) => {
   const safeDurationMs = Math.max(1, Number(durationMs) || 1);
-  // CapCut responses can contain a very short decoder impulse 25-40 ms after
-  // the file begins. Keep the ramp active past that point; 80 ms is short
-  // enough to preserve consonants while suppressing the transition click.
-  const fadeInDuration = Math.min(0.08, Math.max(0.012, safeDurationMs / 4_000));
-  const fadeOutDuration = Math.min(0.08, Math.max(0.012, safeDurationMs / 4_000));
+  // The cached TTS is already clean PCM. A true micro-fade is enough to avoid
+  // a discontinuity at digital silence without swallowing the first consonant.
+  const fadeInDuration = Math.min(0.008, Math.max(0.002, safeDurationMs / 8_000));
+  const fadeOutDuration = Math.min(0.008, Math.max(0.002, safeDurationMs / 8_000));
   return {
     fadeInDuration,
     fadeOutDuration,
     fadeOutStart: Math.max(0, safeDurationMs / 1000 - fadeOutDuration),
   };
 };
-
-// Repair isolated MP3 decoder impulses before applying the boundary envelope.
-// Two conservative passes remove both polarities of the short decoder impulse
-// without the voice distortion caused by one aggressive pass. They reduced the
-// measured cue onset jump from 1.782 to 0.058 on the real CapCut regression job
-// without changing cue duration.
-const gentleDeclick = 'adeclick=w=20:o=75:a=4:t=1.5:b=2:m=s';
-export const cueDeclickFilter = `${gentleDeclick},${gentleDeclick}`;
 
 export const buildSeparatedAudioMixFilter = (durationMs: number, originalVolume: number) => {
   return buildStemAudioMixFilter(durationMs, originalVolume, 1);
@@ -254,119 +243,76 @@ export const buildStemAudioMixFilter = (durationMs: number, originalVolume: numb
   };
 };
 
-export function planDubbingTimeline(items: DubbingTimelineItem[], _joinGapMaxMs = DEFAULTS.joinGapMaxMs, _joinedCueGapMs = DEFAULTS.joinedCueGapMs): PlannedDubbingTimelineItem[] {
+export function planDubbingTimeline(items: DubbingTimelineItem[], joinedCueGapMs = DEFAULTS.joinedCueGapMs): PlannedDubbingTimelineItem[] {
+  const ordered = [...items].sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  const planned: PlannedDubbingTimelineItem[] = [];
   let previousEndMs: number | undefined;
-  return [...items]
-    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs)
-    .map((item) => {
-      const originalStartMs = Math.round(item.startMs);
-      // Stay on the subtitle timestamp when there is room. If the previous
-      // voice overruns, delay this cue only until its final 250 ms so the
-      // hand-off feels conversational without two full phrases competing.
-      const timelineStartMs = previousEndMs === undefined
-        ? originalStartMs
-        : Math.max(originalStartMs, previousEndMs - DEFAULTS.maxVoiceOverlapMs);
-      const timelineEndMs = timelineStartMs + Math.max(1, Math.round(item.audioDurationMs));
-      previousEndMs = timelineEndMs;
-      return {
-        ...item,
-        timelineStartMs,
-        timelineEndMs,
-        timelineShiftMs: timelineStartMs - Math.round(item.startMs),
-      };
+  for (const item of ordered) {
+    const sourceStartMs = Math.max(0, Math.round(item.startMs));
+    // SRT timing is the source of truth. A long prior cue may delay the next
+    // cue, but no cue may be pulled into a source pause or spoken early.
+    const timelineStartMs = Math.max(
+      sourceStartMs,
+      previousEndMs === undefined ? 0 : previousEndMs + Math.max(0, Math.round(joinedCueGapMs)),
+    );
+    const timelineEndMs = timelineStartMs + Math.max(1, Math.round(item.audioDurationMs));
+    planned.push({
+      ...item,
+      timelineStartMs,
+      timelineEndMs,
+      timelineShiftMs: timelineStartMs - sourceStartMs,
     });
+    previousEndMs = timelineEndMs;
+  }
+  return planned;
 }
 
-export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: number = DEFAULTS.hardSpeedMax, pressuredMaxSpeed: number = DEFAULTS.pressuredSpeedMax) {
+export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: number = DEFAULTS.hardSpeedMax, _pressuredMaxSpeed: number = DEFAULTS.pressuredSpeedMax) {
   const ordered = [...items].sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
-  const orderedIndex = new Map(ordered.map((item, index) => [item.cueId, index]));
-  const tempos = new Map(ordered.map((item) => [item.cueId, 1]));
-  for (let index = 0; index < ordered.length; index += 1) {
-    const item = ordered[index];
-    const ownRequiredSpeed = item.audioDurationMs / Math.max(item.targetDurationMs, 1);
-    if (ownRequiredSpeed <= DEFAULTS.gentleSpeedMax) {
-      tempos.set(item.cueId, Math.max(tempos.get(item.cueId) || 1, fittingTempo(ownRequiredSpeed, maxSpeed)));
-      continue;
+  const availableDurationsMs: number[] = [];
+  const localTempos = ordered.map((item, index) => {
+    const next = ordered[index + 1];
+    const sourceDurationMs = Math.max(1, item.endMs - item.startMs);
+    const configuredDurationMs = Math.max(sourceDurationMs, item.targetDurationMs || sourceDurationMs);
+    let availableDurationMs = configuredDurationMs;
+    if (next) {
+      const sourceGapMs = Math.max(0, next.startMs - item.endMs);
+      const reservedGapMs = sourceGapMs <= DEFAULTS.adaptiveMaxGapMs
+        ? Math.min(sourceGapMs, DEFAULTS.clusterReservedPauseMs)
+        : sourceGapMs;
+      availableDurationMs = Math.max(configuredDurationMs, sourceDurationMs + sourceGapMs - reservedGapMs);
     }
+    availableDurationsMs.push(availableDurationMs);
+    const requiredTempo = item.audioDurationMs / Math.max(availableDurationMs, 1);
+    return fittingTempo(requiredTempo, maxSpeed);
+  });
 
-    // Share a difficult line with one prior cue and up to four following cues.
-    // Stop at a real scene/speech gap so unrelated narration is never grouped.
-    let groupStart = index;
-    for (let step = 0; step < DEFAULTS.adaptiveLookBehind && groupStart > 0; step += 1) {
-      const gap = ordered[groupStart].startMs - ordered[groupStart - 1].endMs;
-      if (gap > DEFAULTS.adaptiveMaxGapMs) break;
-      groupStart -= 1;
-    }
-    let groupEnd = index + 1;
-    while (groupEnd < ordered.length && groupEnd - groupStart < DEFAULTS.adaptiveGroupSize) {
-      const gap = ordered[groupEnd].startMs - ordered[groupEnd - 1].endMs;
-      if (gap > DEFAULTS.adaptiveMaxGapMs) break;
-      groupEnd += 1;
-    }
-    const group = ordered.slice(groupStart, groupEnd);
-    const spanMs = Math.max(1, group[group.length - 1].endMs - group[0].startMs);
-    const pauseBudgetMs = Math.max(0, group.length - 1) * DEFAULTS.joinedCueGapMs;
-    const speechBudgetMs = Math.max(1, spanMs - pauseBudgetMs);
-    const groupRequiredSpeed = group.reduce((sum, cue) => sum + cue.audioDurationMs, 0) / speechBudgetMs;
-    // Nearby silence is free timing room. Once that room and the permitted
-    // 250 ms hand-off are exhausted, raise the cadence of the whole local
-    // group rather than making only the long cue suddenly race.
-    const overlapBoundRequiredSpeed = group.reduce((required, cue) => {
-      const cueIndex = orderedIndex.get(cue.cueId) ?? -1;
-      const next = cueIndex >= 0 ? ordered[cueIndex + 1] : undefined;
-      const availableMs = next
-        ? Math.max(cue.targetDurationMs, next.startMs - cue.startMs)
-        : cue.targetDurationMs;
-      return Math.max(required, cue.audioDurationMs / Math.max(1, availableMs + DEFAULTS.maxVoiceOverlapMs));
-    }, 1);
-    const sharedTempo = fittingTempo(Math.max(groupRequiredSpeed, overlapBoundRequiredSpeed), maxSpeed);
-    for (const cue of group) tempos.set(cue.cueId, Math.max(tempos.get(cue.cueId) || 1, sharedTempo));
-  }
+  // A dub actor does not suddenly race for one subtitle and return to normal
+  // on the next. Share a small amount of timing pressure with adjacent cues in
+  // the same dialogue cluster. Hard pauses remain untouched anchors.
+  const blendedTempos = localTempos.map((tempo, index) => {
+    const previousIsJoined = index > 0 && ordered[index].startMs - ordered[index - 1].endMs <= DEFAULTS.adaptiveMaxGapMs;
+    const nextIsJoined = index + 1 < ordered.length && ordered[index + 1].startMs - ordered[index].endMs <= DEFAULTS.adaptiveMaxGapMs;
+    const previousTempo = previousIsJoined ? localTempos[index - 1] : tempo;
+    const nextTempo = nextIsJoined ? localTempos[index + 1] : tempo;
+    const blend = DEFAULTS.clusterTempoBlend;
+    return fittingTempo(tempo * (1 - blend * 2) + previousTempo * blend + nextTempo * blend, maxSpeed);
+  });
 
-  // Long-form narration needs a second, block-level pass. A harmless amount
-  // of overrun on one cue becomes several seconds of drift when it repeats
-  // throughout a dense speech block. Keep the conservative 1.18x local fit
-  // for ordinary/short sections, and only unlock a higher tempo when the block is
-  // demonstrably under timing pressure. Real pauses split blocks, so this does
-  // not make an entire video faster just because one isolated cue is long.
-  const blocks: AdaptiveTempoItem[][] = [];
-  for (const item of ordered) {
-    const block = blocks[blocks.length - 1];
-    const previous = block?.[block.length - 1];
-    if (!block || !previous || item.startMs - previous.endMs > DEFAULTS.adaptiveMaxGapMs) blocks.push([item]);
-    else block.push(item);
-  }
-  for (const block of blocks) {
-    if (block.length < 2) continue;
-    const spanMs = Math.max(1, block[block.length - 1].endMs - block[0].startMs);
-    const pauseBudgetMs = Math.max(0, block.length - 1) * DEFAULTS.joinedCueGapMs;
-    const speechBudgetMs = Math.max(1, spanMs - pauseBudgetMs);
-    const blockLoad = block.reduce((sum, cue) => sum + cue.audioDurationMs, 0) / speechBudgetMs;
-    const projected = planDubbingTimeline(block.map((cue) => ({
-      cueId: cue.cueId,
-      startMs: cue.startMs,
-      endMs: cue.endMs,
-      audioDurationMs: cue.audioDurationMs / Math.max(tempos.get(cue.cueId) || 1, 0.01),
-    })));
-    const delayedCues = projected.filter((cue) => cue.timelineShiftMs >= DEFAULTS.adaptiveBlockDelayTriggerMs).length;
-    const isDensePressuredBlock = block.length >= DEFAULTS.adaptiveBlockMinCues
-      && ((block.length >= DEFAULTS.adaptiveBlockLoadMinCues && blockLoad >= DEFAULTS.adaptiveBlockLoadTrigger)
-        || delayedCues >= DEFAULTS.adaptiveBlockMinDelayedCues);
-    const isPressuredPair = block.length === 2 && delayedCues > 0;
-    if (!isDensePressuredBlock && !isPressuredPair) continue;
-
-    // Do not overwrite the local cadence with each cue's own SRT duration.
-    // That was technically punctual, but it made one long cue race at 1.42x
-    // while the immediately adjacent cues kept their unused time at 1.00x.
-    // A pressured run is spoken as one natural phrase: share a modest tempo
-    // across its continuous cues, leave real pauses alone, and let the normal
-    // timeline ripple through harmless gaps instead of starting speech early.
-    const sharedTempo = fittingTempo(blockLoad, pressuredMaxSpeed);
-    for (const cue of block) {
-      tempos.set(cue.cueId, Math.max(tempos.get(cue.cueId) || 1, sharedTempo));
-    }
-  }
-  return ordered.map((item) => ({ cueId: item.cueId, tempo: tempos.get(item.cueId) || 1 }));
+  // Keep each cue at or after its source timestamp, then add only the tempo
+  // needed to stop a local delay from accumulating across the cluster.
+  let previousEndMs: number | undefined;
+  return ordered.map((item, index) => {
+    const timelineStartMs = Math.max(item.startMs, previousEndMs ?? item.startMs);
+    const latestNaturalEndMs = Math.max(
+      item.endMs + DEFAULTS.emergencyTimelineDriftMs,
+      item.startMs + availableDurationsMs[index],
+    );
+    const catchUpTempo = item.audioDurationMs / Math.max(1, latestNaturalEndMs - timelineStartMs);
+    const tempo = fittingTempo(Math.max(blendedTempos[index], catchUpTempo), maxSpeed);
+    previousEndMs = timelineStartMs + item.audioDurationMs / tempo;
+    return { cueId: item.cueId, tempo };
+  });
 }
 
 async function writeJsonAtomic(file: string, value: unknown) {
@@ -545,7 +491,7 @@ export function fittingTempo(requiredSpeed: number, maxSpeed: number = DEFAULTS.
 // Keep a short piece of the provider's natural room tone at both ends. Cutting
 // exactly at the first/last voiced sample creates a broadband click whenever
 // adjacent CapCut MP3 responses are placed on the dubbing timeline.
-export const speechTrimFilter = 'silenceremove=start_periods=1:start_duration=0.03:start_threshold=-45dB:start_silence=0.04,areverse,silenceremove=start_periods=1:start_duration=0.03:start_threshold=-45dB:start_silence=0.04,areverse';
+export const speechTrimFilter = 'silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0.01,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0.01,areverse';
 
 export function isTransientDubbingError(error: unknown) {
   if (error instanceof ProviderError) {
@@ -563,6 +509,19 @@ export function isRewriteUnavailableError(error: unknown) {
   const status = error instanceof ProviderError ? error.status : undefined;
   return (status === undefined || [400, 404, 405, 422].includes(status))
     && /(?:capability\s+chat|chat\s+capability)|(?:chat|capability).*(?:unsupported|not supported|unavailable)/i.test(error.message);
+}
+
+export function shouldAttemptDubbingRewrite(mode: TimingMode, requiredSpeed: number, attempt: number) {
+  // Strict mode keeps imported subtitle text and timestamps authoritative. A
+  // locally long cue may still fit naturally once its whole block is planned.
+  return mode !== 'strict'
+    && requiredSpeed > DEFAULTS.rewriteTriggerSpeed
+    && attempt < DEFAULTS.maxRewriteAttempts;
+}
+
+export function shouldFallbackDubbingRewrite(error: unknown, aborted: boolean) {
+  if (aborted) return false;
+  return !(error instanceof Error && error.name === 'AbortError');
 }
 
 function sleep(ms: number, signal: AbortSignal) {
@@ -648,11 +607,19 @@ async function loadProvider(jobId: string, ref: string) {
 function ttsCacheFiles(jobId: string, provider: AIProvider, input: StoredCue['input'], text: string) {
   const speed = clamp(Number(input.speed) || 1, DEFAULTS.minSpeed, DEFAULTS.hardSpeedMax);
   const cacheKey = createHash('sha256').update(JSON.stringify([TTS_CACHE_VERSION, provider.id, provider.baseUrl, input.model, input.voice, text, speed, 'wav'])).digest('hex');
+  const speechKey = createHash('sha256').update(JSON.stringify([cacheKey, SPEECH_PREP_VERSION])).digest('hex');
   return {
     speed,
     rawPath: path.join(cacheDir(jobId), `${cacheKey}.wav`),
-    speechPath: path.join(cacheDir(jobId), `${cacheKey}.speech.wav`),
+    speechPath: path.join(cacheDir(jobId), `${speechKey}.speech.wav`),
   };
+}
+
+async function ensurePreparedSpeech(rawPath: string, speechPath: string, signal: AbortSignal) {
+  const prepared = await stat(speechPath).catch(() => undefined);
+  if (prepared?.isFile()) return;
+  await stat(rawPath);
+  await run('ffmpeg', ['-y', '-i', rawPath, '-af', speechTrimFilter, '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', speechPath], signal);
 }
 
 export async function createDubbingJob(input: CreateJobInput) {
@@ -826,14 +793,10 @@ class DubbingRunner {
         const generated = await this.ttsSemaphore.use(() => retryDubbingOperation(() => synthesize(provider, cue.input.model, cue.input.voice, finalText, { speed: ttsSpeed, format: 'wav', signal: this.controller.signal }), this.job.config.maxRetries, this.controller.signal));
         await writeBufferAtomic(rawPath, generated);
       }
-      try {
-        await stat(speechPath);
-      } catch {
-        await run('ffmpeg', ['-y', '-i', rawPath, '-af', speechTrimFilter, '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', speechPath], this.controller.signal);
-      }
+      await ensurePreparedSpeech(rawPath, speechPath, this.controller.signal);
       ttsDurationMs = await probeDuration(speechPath);
       requiredSpeed = ttsDurationMs / timing.targetDurationMs;
-      if (requiredSpeed <= DEFAULTS.rewriteTriggerSpeed || attempt >= DEFAULTS.maxRewriteAttempts) break;
+      if (!shouldAttemptDubbingRewrite(this.job.config.timingMode, requiredSpeed, attempt)) break;
       if (cue.skipRewrite || !rewriteProvider || !this.job.config.rewriteModel) {
         rewriteWarning = cue.skipRewrite
           ? `Cue ${cue.index}: lần rút gọn trước không ngắn hơn; AutoSub giữ nguyên nội dung và sẽ cân nhịp theo cụm.`
@@ -846,7 +809,7 @@ class DubbingRunner {
       try {
         rewritten = await this.llmSemaphore.use(() => retryDubbingOperation(() => rewriteTranslation(cue, rewriteProvider, this.job.config.rewriteModel as string, finalText, timing.targetDurationMs, ttsDurationMs, rewriteRequests, rejectedRewrites, this.controller.signal), this.job.config.maxRetries, this.controller.signal));
       } catch (error) {
-        if (!isRewriteUnavailableError(error)) throw error;
+        if (!shouldFallbackDubbingRewrite(error, this.controller.signal.aborted)) throw error;
         rewriteWarning = `Cue ${cue.index} không dùng được provider đã chọn để rút gọn; AutoSub sẽ ưu tiên cân tốc độ và khoảng trống trong cụm.`;
         break;
       }
@@ -904,6 +867,25 @@ class DubbingRunner {
       .filter((cue) => cue.status === 'done' && cue.audioFile && cue.metadata)
       .sort((left, right) => left.input.startMs - right.input.startMs || left.index - right.index);
     if (completed.length !== this.job.totalCues) throw new Error('Chưa thể dựng timeline cuối vì vẫn còn cue chưa hoàn tất.');
+    const providers = new Map<string, AIProvider>();
+    for (const cue of completed) {
+      if (!cue.metadata || cue.metadata.adaptiveFitVersion === ADAPTIVE_FIT_VERSION) continue;
+      let provider = providers.get(cue.providerRef);
+      if (!provider) {
+        provider = await loadProvider(this.job.id, cue.providerRef);
+        providers.set(cue.providerRef, provider);
+      }
+      const cached = ttsCacheFiles(this.job.id, provider, cue.input, cue.metadata.finalDubbingText);
+      await ensurePreparedSpeech(cached.rawPath, cached.speechPath, this.controller.signal);
+      const cleanDurationMs = await probeDuration(cached.speechPath);
+      cue.metadata = {
+        ...cue.metadata,
+        ttsDurationMs: cleanDurationMs,
+        finalAudioDurationMs: cleanDurationMs,
+        speedApplied: 1,
+        adaptiveFitVersion: 0,
+      };
+    }
     const adaptiveTempoById = new Map(planAdaptiveCueTempos(completed.map((cue) => ({
       cueId: cue.id,
       startMs: cue.input.startMs,
@@ -911,7 +893,6 @@ class DubbingRunner {
       audioDurationMs: cue.metadata?.ttsDurationMs || cue.input.endMs - cue.input.startMs,
       targetDurationMs: cue.metadata?.targetDurationMs || cue.input.endMs - cue.input.startMs,
     }))).map((item) => [item.cueId, item.tempo]));
-    const providers = new Map<string, AIProvider>();
     for (const cue of completed) {
       if (!cue.audioFile || !cue.metadata || cue.metadata.adaptiveFitVersion === ADAPTIVE_FIT_VERSION) continue;
       const tempo = adaptiveTempoById.get(cue.id) || 1;
@@ -921,7 +902,9 @@ class DubbingRunner {
         provider = await loadProvider(this.job.id, cue.providerRef);
         providers.set(cue.providerRef, provider);
       }
-      const cleanSpeechPath = ttsCacheFiles(this.job.id, provider, cue.input, cue.metadata.finalDubbingText).speechPath;
+      const cached = ttsCacheFiles(this.job.id, provider, cue.input, cue.metadata.finalDubbingText);
+      await ensurePreparedSpeech(cached.rawPath, cached.speechPath, this.controller.signal);
+      const cleanSpeechPath = cached.speechPath;
       const cleanSpeech = await stat(cleanSpeechPath).catch(() => undefined);
       if (cleanSpeech?.isFile()) {
         const restore = `${sourcePath}.${process.pid}.${Date.now()}.restore.wav`;
@@ -1001,7 +984,7 @@ class DubbingRunner {
         const cueDurationMs = cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs;
         const { fadeInDuration, fadeOutDuration, fadeOutStart } = cueBoundaryFades(cueDurationMs);
         args.push('-i', path.join(jobDir(this.job.id), cue.audioFile as string));
-        filters.push(`[${index}:a]${cueDeclickFilter},volume=${clamp(cue.input.volume ?? 1, 0, 2).toFixed(3)},afade=t=in:st=0:d=${fadeInDuration.toFixed(3)},afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDuration.toFixed(3)},adelay=${delay}|${delay}[a${index}]`);
+        filters.push(`[${index}:a]volume=${clamp(cue.input.volume ?? 1, 0, 2).toFixed(3)},afade=t=in:st=0:d=${fadeInDuration.toFixed(3)},afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDuration.toFixed(3)},adelay=${delay}|${delay}[a${index}]`);
       });
       filters.push(buildTimelineMixFilter(batch.length, durationMs));
       const output = path.join(timelineDir(this.job.id), `segment-${String(segments.length).padStart(5, '0')}.wav`);

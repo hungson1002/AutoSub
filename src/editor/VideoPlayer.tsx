@@ -36,6 +36,7 @@ import { VideoTrimModal } from "./VideoTrimModal";
 import { VideoCropModal } from "./VideoCropModal";
 import { cropVideoStyle } from "../lib/videoCrop";
 import { buildActiveCueIndex, findActiveCue } from "../lib/activeCue";
+import { dubAudioNeedsResync } from "../lib/mediaSync";
 
 type Roi = { x: number; y: number; w: number; h: number };
 type DragKind = "move" | "nw" | "ne" | "sw" | "se";
@@ -419,6 +420,14 @@ export function VideoPlayer({
     let cancelled = false;
     const updateActiveCue: VideoFrameRequestCallback = (_now, metadata) => {
       syncActiveCue(metadata.mediaTime * 1000);
+      const audio = dubAudioRef.current;
+      if (
+        playingDub &&
+        audio &&
+        !audio.paused &&
+        dubAudioNeedsResync(metadata.mediaTime, audioRefTime(audio))
+      )
+        audio.currentTime = metadata.mediaTime;
       if (!cancelled)
         frameId = video.requestVideoFrameCallback(updateActiveCue);
     };
@@ -427,7 +436,7 @@ export function VideoPlayer({
       cancelled = true;
       video.cancelVideoFrameCallback(frameId);
     };
-  }, [asset?.url, syncActiveCue]);
+  }, [asset?.url, playingDub, syncActiveCue]);
   useEffect(() => {
     if (!videoRef.current || !seekRequest) return;
     const next = seekRequest.timeMs / 1000;
@@ -452,8 +461,8 @@ export function VideoPlayer({
       )
         video.currentTime = effectiveVideoEdit.trimStartMs / 1000;
       if (audioMode === "dubbed" && dubAudioUrl && audio) {
+        audio.pause();
         audio.currentTime = video.currentTime;
-        void audio.play().catch(() => undefined);
       }
       void video
         .play()
@@ -473,7 +482,7 @@ export function VideoPlayer({
       dubAudioUrl &&
       dubAudioRef.current &&
       !dubAudioRef.current.paused &&
-      Math.abs(audioRefTime(dubAudioRef.current) - next / 1000) > 0.18
+      dubAudioNeedsResync(next / 1000, audioRefTime(dubAudioRef.current))
     )
       dubAudioRef.current.currentTime = next / 1000;
     onTime?.(next);
@@ -1062,6 +1071,34 @@ export function VideoPlayer({
                           return;
                         }
                         reportTime(next);
+                      }}
+                      onPlaying={(event) => {
+                        setPlaying(true);
+                        const audio = dubAudioRef.current;
+                        if (!playingDub || !audio) return;
+                        audio.pause();
+                        audio.currentTime = event.currentTarget.currentTime;
+                        audio.playbackRate = event.currentTarget.playbackRate;
+                        void audio.play().catch(() => undefined);
+                      }}
+                      onWaiting={() => dubAudioRef.current?.pause()}
+                      onStalled={() => dubAudioRef.current?.pause()}
+                      onSeeking={() => dubAudioRef.current?.pause()}
+                      onSeeked={(event) => {
+                        const audio = dubAudioRef.current;
+                        if (!playingDub || !audio) return;
+                        audio.currentTime = event.currentTarget.currentTime;
+                        if (!event.currentTarget.paused)
+                          void audio.play().catch(() => undefined);
+                      }}
+                      onRateChange={(event) => {
+                        if (dubAudioRef.current)
+                          dubAudioRef.current.playbackRate =
+                            event.currentTarget.playbackRate;
+                      }}
+                      onPause={() => {
+                        dubAudioRef.current?.pause();
+                        setPlaying(false);
                       }}
                       onEnded={() => {
                         dubAudioRef.current?.pause();

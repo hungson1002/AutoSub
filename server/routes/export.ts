@@ -14,7 +14,6 @@ import type { FastifyInstance } from "fastify";
 import { run, ensureWorkdir, preferredH264Encoder } from "../services/ffmpeg";
 import { getDubbingResult } from "../services/dubbingJobs";
 import { buildExportAudioFilter } from "../services/exportAudio";
-import { DUB_LOUDNESS_FILTER } from "../services/audioMastering";
 import {
   cleanupUploadSession,
   createTemporarySession,
@@ -313,7 +312,6 @@ export async function exportRoutes(app: FastifyInstance) {
       if (trimEndMs !== undefined)
         args.push("-t", ((trimEndMs - trimStartMs) / 1000).toFixed(3));
       args.push("-map", "0:a:0", "-vn");
-      if (completedDub) args.push("-af", DUB_LOUDNESS_FILTER);
       args.push("-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", stagedOutput);
       await run("ffmpeg", args, requestAbort.signal);
       const rendered = await stat(stagedOutput);

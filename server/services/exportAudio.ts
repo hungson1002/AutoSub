@@ -1,5 +1,3 @@
-import { DUB_LOUDNESS_FILTER } from "./audioMastering";
-
 export type ExportAudioFilterOptions = {
   hasDub: boolean;
   dubInputIndex?: number;
@@ -12,7 +10,9 @@ export type ExportAudioFilterOptions = {
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 const safeLimiter = "alimiter=limit=0.891:level=false,aresample=48000";
-const normalizeDub = DUB_LOUDNESS_FILTER;
+// Dubbing jobs are mastered once when their timeline is built. Re-running
+// loudnorm here changes the voice a second time and can create pumping/noise.
+const normalizeDub = "anull";
 
 /**
  * Builds the final export audio graph.

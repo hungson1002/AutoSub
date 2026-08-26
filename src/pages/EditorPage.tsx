@@ -1114,7 +1114,9 @@ export function EditorPage({
         }>,
         {
           videoId: asset?.uploadId,
-          timingMode: "natural",
+          // The imported SRT already marks real speech and silence accurately.
+          // Keep its text and windows strict; group fitting handles long speech.
+          timingMode: "strict",
           batchSize: 30,
           ttsConcurrency: 3,
           llmConcurrency: 2,
