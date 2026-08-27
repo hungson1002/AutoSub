@@ -63,6 +63,12 @@ function formatBytes(bytes?: number) {
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
+function formatEta(seconds?: number) {
+  if (!seconds || seconds <= 0) return undefined;
+  if (seconds < 60) return `còn khoảng ${seconds} giây`;
+  return `còn khoảng ${Math.ceil(seconds / 60)} phút`;
+}
+
 export function DouyinPage({
   onAssetChange,
   onOpenExtract,
@@ -96,6 +102,12 @@ export function DouyinPage({
   const pollTimerRef = useRef<number | undefined>(undefined);
   const isPollingRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const batchJobRef = useRef<DouyinBatchJob | undefined>(undefined);
+  const deletedItemIdsRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    batchJobRef.current = batchJob;
+  }, [batchJob]);
 
   useEffect(() => {
     const matches = inputText.match(VIDEO_SOURCE_URL_PATTERN) || [];
@@ -110,7 +122,7 @@ export function DouyinPage({
     try {
       localStorage.setItem(
         "autosub.douyin-history",
-        JSON.stringify(historyItems.slice(0, 50)),
+        JSON.stringify(historyItems),
       );
     } catch {
       // History is a convenience only. Downloading still works if storage is unavailable.
@@ -140,7 +152,11 @@ export function DouyinPage({
         setHistoryItems((previous) => {
           const merged = [...previous];
           for (const item of job.items.filter(
-            (entry) => entry.status === "completed",
+            (entry) =>
+              entry.status !== "pending" &&
+              entry.status !== "resolving" &&
+              entry.status !== "downloading" &&
+              !deletedItemIdsRef.current.has(entry.id),
           )) {
             const index = merged.findIndex(
               (entry) =>
@@ -177,6 +193,33 @@ export function DouyinPage({
         }
       } catch (error) {
         if (!cancelled) {
+          const status = (error as { status?: number } | undefined)?.status;
+          if (status === 404) {
+            const interruptedJob = batchJobRef.current;
+            const interruptedItems = interruptedJob?.items.filter((item) =>
+              item.status === "pending" || item.status === "resolving" || item.status === "downloading"
+            ) || [];
+            if (interruptedItems.length > 0) {
+              try {
+                const restoredJob = await api.startDouyinBatch(
+                  interruptedItems.map((item) => item.originalUrl),
+                  interruptedItems[0]?.bilibiliQuality || bilibiliQuality,
+                );
+                if (cancelled) return;
+                setBatchJob(restoredJob);
+                setActiveBatchId(restoredJob.id);
+                setPollError("");
+                onNotice(`Backend vừa khởi động lại. Đã tự tải lại ${restoredJob.totalItems} video bị gián đoạn.`, "success");
+                return;
+              } catch {
+                setInputText(interruptedItems.map((item) => item.originalUrl).join("\n"));
+              }
+            }
+            setActiveBatchId(undefined);
+            setBatchJob(undefined);
+            setPollError("Phiên tải đã bị gián đoạn khi backend khởi động lại. Các link đã được đưa về ô nhập.");
+            return;
+          }
           setPollError(
             friendlyErrorMessage(
               error,
@@ -198,7 +241,7 @@ export function DouyinPage({
         pollTimerRef.current = undefined;
       }
     };
-  }, [activeBatchId, onNotice]);
+  }, [activeBatchId, bilibiliQuality, onNotice]);
 
   const handleStartBatch = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -211,11 +254,13 @@ export function DouyinPage({
     setSubmitError("");
     setSubmitting(true);
     try {
-      const job = await api.startDouyinBatch(detectedUrls, bilibiliQuality);
+      const job = activeBatchId
+        ? await api.appendDouyinBatch(activeBatchId, detectedUrls, bilibiliQuality)
+        : await api.startDouyinBatch(detectedUrls, bilibiliQuality);
       setBatchJob(job);
-      setActiveBatchId(job.id);
+      if (!activeBatchId) setActiveBatchId(job.id);
       setInputText("");
-      onNotice(`Đã đưa ${job.totalItems} video vào hàng đợi.`, "success");
+      onNotice(activeBatchId ? "Đã thêm video vào hàng đợi." : `Đã đưa ${job.totalItems} video vào hàng đợi.`, "success");
     } catch (error) {
       const message = friendlyErrorMessage(
         error,
@@ -282,9 +327,41 @@ export function DouyinPage({
     window.setTimeout(() => inputRef.current?.focus(), 0);
   };
 
+  const handleCancelItem = async (item: DouyinBatchItem) => {
+    if (!batchJob?.id) return;
+    try {
+      await api.cancelDouyinBatchItem(batchJob.id, item.id);
+      setBatchJob((previous) => previous ? {
+        ...previous,
+        items: previous.items.map((entry) => entry.id === item.id
+          ? { ...entry, status: "cancelled", progressPercent: 0, error: undefined }
+          : entry),
+      } : undefined);
+      onNotice("Đã hủy tải video.", "success");
+    } catch (error) {
+      onNotice(friendlyErrorMessage(error, "Không thể hủy video này."), "error");
+    }
+  };
+
+  const handleDownloadAnotherQuality = (item: DouyinBatchItem) => {
+    if (item.platform === "bilibili") {
+      setBilibiliQuality(item.bilibiliQuality === 16 ? 64 : 16);
+    }
+    handleRetryItem(item);
+  };
+
   const isDownloading = activeBatchId !== undefined;
-  const canCloseBatch = Boolean(batchJob && !isDownloading);
-  const displayItems = batchJob ? batchJob.items : historyItems;
+  const seenItemIds = new Set<string>();
+  const displayItems = [...(batchJob?.items || []), ...historyItems].filter((item) => {
+    if (deletedItemIdsRef.current.has(item.id) || seenItemIds.has(item.id)) return false;
+    seenItemIds.add(item.id);
+    return true;
+  });
+  const handleDeleteItem = (item: DouyinBatchItem) => {
+    deletedItemIdsRef.current.add(item.id);
+    setHistoryItems((items) => items.filter((entry) => entry.id !== item.id));
+    setBatchJob((job) => job ? { ...job, items: job.items.filter((entry) => entry.id !== item.id) } : undefined);
+  };
   const processedItems = batchJob
     ? batchJob.completedItems + batchJob.failedItems
     : 0;
@@ -364,9 +441,9 @@ export function DouyinPage({
               }
               aria-describedby="douyin-link-help douyin-input-error"
               aria-invalid={Boolean(submitError)}
-              disabled={isDownloading || submitting}
+              disabled={submitting}
             />
-            {inputText && !isDownloading && !submitting && (
+            {inputText && !submitting && (
               <button
                 className="douyin-input-clear"
                 type="button"
@@ -390,7 +467,7 @@ export function DouyinPage({
               ariaLabel="Chất lượng tải Bilibili"
               value={String(bilibiliQuality)}
               onChange={(value) => setBilibiliQuality(Number(value) as BilibiliQuality)}
-              disabled={isDownloading || submitting}
+              disabled={submitting}
               options={[
                 { value: "64", label: "720p — chất lượng tốt", description: "Tải song song tối đa 8 kết nối" },
                 { value: "16", label: "360p — siêu tốc", description: "File nhỏ hơn, phù hợp video dài" },
@@ -428,28 +505,29 @@ export function DouyinPage({
           )}
 
           <div className="douyin-submit-row">
-            {isDownloading ? (
+            <button
+              className="button primary douyin-submit-button"
+              type="submit"
+              disabled={submitting}
+            >
+              {submitting ? (
+                <LoaderCircle className="spin" size={17} />
+              ) : (
+                <ArrowDownToLine size={17} />
+              )}
+              {submitting
+                ? "Đang thêm vào hàng đợi"
+                : isDownloading
+                  ? `Thêm ${detectedUrls.length || "video"} vào hàng đợi`
+                  : `Tải ${detectedUrls.length ? `${detectedUrls.length} video` : "video Douyin/Bilibili"}`}
+            </button>
+            {isDownloading && (
               <button
                 className="button douyin-cancel-button"
                 type="button"
                 onClick={handleCancelBatch}
               >
                 <CircleX size={16} /> Hủy hàng đợi
-              </button>
-            ) : (
-              <button
-                className="button primary douyin-submit-button"
-                type="submit"
-                disabled={submitting}
-              >
-                {submitting ? (
-                  <LoaderCircle className="spin" size={17} />
-                ) : (
-                  <ArrowDownToLine size={17} />
-                )}
-                {submitting
-                  ? "Đang tạo hàng đợi"
-                  : `Tải ${detectedUrls.length ? `${detectedUrls.length} video` : "video Douyin/Bilibili"}`}
               </button>
             )}
           </div>
@@ -488,31 +566,22 @@ export function DouyinPage({
               <span className="douyin-step">02</span>
               <div>
                 <h2 id="douyin-queue-title">
-                  {batchJob ? "Hàng đợi tải" : "Video gần đây"}
+                  Hàng đợi tải
                 </h2>
                 <p>
-                  {batchJob
-                    ? `${batchJob.totalItems} mục trong phiên này`
-                    : `${historyItems.length} video đã lưu cục bộ`}
+                  {displayItems.length} video đã lưu cục bộ
                 </p>
               </div>
             </div>
             <div className="douyin-queue-tools">
-              {canCloseBatch && (
-                <button
-                  className="button small ghost"
-                  type="button"
-                  onClick={() => setBatchJob(undefined)}
-                >
-                  Xem lịch sử
-                </button>
-              )}
-              {!batchJob && historyItems.length > 0 && (
+              {!isDownloading && displayItems.length > 0 && (
                 <button
                   className="button small ghost"
                   type="button"
                   onClick={() => {
+                    displayItems.forEach((item) => deletedItemIdsRef.current.add(item.id));
                     setHistoryItems([]);
+                    setBatchJob(undefined);
                     onNotice("Đã xóa danh sách video gần đây.", "success");
                   }}
                 >
@@ -578,6 +647,8 @@ export function DouyinPage({
               {displayItems.map((item) => {
                 const isWorking =
                   item.status === "resolving" || item.status === "downloading";
+                const canDeleteItem =
+                  item.status === "completed" || item.status === "failed" || item.status === "cancelled";
                 return (
                   <article
                     className={`douyin-item status-${item.status}`}
@@ -614,6 +685,15 @@ export function DouyinPage({
                       <div className="douyin-item-meta">
                         {item.author && <span>{item.author}</span>}
                         {item.platform && <span>{item.platform === "bilibili" ? "Bilibili" : "Douyin"}</span>}
+                        {item.status === "downloading" && formatBytes(item.downloadedBytes) && (
+                          <span>{formatBytes(item.downloadedBytes)} / {formatBytes(item.totalBytes) || "chưa rõ"}</span>
+                        )}
+                        {item.status === "downloading" && formatBytes(item.downloadSpeedBytesPerSecond) && (
+                          <span>{formatBytes(item.downloadSpeedBytesPerSecond)}/s</span>
+                        )}
+                        {item.status === "downloading" && formatEta(item.etaSeconds) && (
+                          <span>{formatEta(item.etaSeconds)}</span>
+                        )}
                         {formatBytes(item.fileSize) && (
                           <span>{formatBytes(item.fileSize)}</span>
                         )}
@@ -636,6 +716,18 @@ export function DouyinPage({
                         <div className="douyin-item-error" role="alert">
                           <CircleX size={14} />
                           {item.error}
+                        </div>
+                      )}
+
+                      {(item.status === "pending" || isWorking) && batchJob && (
+                        <div className="douyin-item-actions">
+                          <button
+                            className="button small ghost"
+                            type="button"
+                            onClick={() => handleCancelItem(item)}
+                          >
+                            <CircleX size={13} /> Hủy video này
+                          </button>
                         </div>
                       )}
 
@@ -681,6 +773,16 @@ export function DouyinPage({
                           >
                             <Download size={13} /> Lưu MP4
                           </button>
+                          <button
+                            className="button small ghost"
+                            type="button"
+                            onClick={() => handleDownloadAnotherQuality(item)}
+                          >
+                            <RefreshCw size={13} />
+                            {item.platform === "bilibili"
+                              ? `Tải lại bản ${item.bilibiliQuality === 16 ? "720p" : "360p"}`
+                              : "Tải lại từ link"}
+                          </button>
                           {item.coverUrl && (
                             <a
                               className="button small ghost"
@@ -689,15 +791,11 @@ export function DouyinPage({
                               <Download size={13} /> Tải thumbnail
                             </a>
                           )}
-                          {!batchJob && (
+                          {canDeleteItem && (
                             <button
                               className="douyin-delete-item"
                               type="button"
-                              onClick={() =>
-                                setHistoryItems((items) =>
-                                  items.filter((entry) => entry.id !== item.id),
-                                )
-                              }
+                              onClick={() => handleDeleteItem(item)}
                               aria-label={`Xóa ${item.title || "video"} khỏi danh sách`}
                             >
                               <Trash2 size={14} />

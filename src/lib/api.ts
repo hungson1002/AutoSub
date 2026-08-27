@@ -582,10 +582,13 @@ export const api = {
       `/api/dubbing/jobs/${encodeURIComponent(id)}/cancel`,
       { method: "POST" },
     ),
-  retryFailedDubbingJob: (id: string) =>
+  retryFailedDubbingJob: (
+    id: string,
+    cues: Array<Pick<SubtitleCue, "id" | "startMs" | "endMs" | "originalText" | "translatedText"> & { text: string; previousText?: string; nextText?: string }> = [],
+  ) =>
     request<DubbingJobStatus>(
       `/api/dubbing/jobs/${encodeURIComponent(id)}/retry-failed`,
-      { method: "POST" },
+      { method: "POST", ...(cues.length ? { body: JSON.stringify({ cues }) } : {}) },
     ),
   regenerateDubbingCue: (
     id: string,
@@ -875,6 +878,16 @@ export const api = {
     request<DouyinBatchJob>(`/api/douyin/batch/${encodeURIComponent(id)}`, {
       signal,
     }),
+  appendDouyinBatch: (id: string, urls: string[], bilibiliQuality: 64 | 16 = 64) =>
+    request<DouyinBatchJob>(`/api/douyin/batch/${encodeURIComponent(id)}/items`, {
+      method: "POST",
+      body: JSON.stringify({ urls, bilibiliQuality }),
+    }),
+  cancelDouyinBatchItem: (batchId: string, itemId: string) =>
+    request<{ ok: boolean; batchId: string; itemId: string }>(
+      `/api/douyin/batch/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}/cancel`,
+      { method: "POST" },
+    ),
   cancelDouyinBatch: (id: string) =>
     request<{ ok: boolean; batchId: string }>(
       `/api/douyin/batch/${encodeURIComponent(id)}/cancel`,

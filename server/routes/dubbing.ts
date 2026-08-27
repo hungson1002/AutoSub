@@ -95,7 +95,8 @@ export async function dubbingRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/dubbing/jobs/:id/retry-failed', async (request, reply) => {
-    try { return reply.send(await retryFailedDubbingJob(idFrom(request))); }
+    const body = (request.body as { cues?: Parameters<typeof retryFailedDubbingJob>[1] } | undefined) || {};
+    try { return reply.send(await retryFailedDubbingJob(idFrom(request), Array.isArray(body.cues) ? body.cues : [])); }
     catch (error) { return sendRouteError(reply, error, 'Không thể chạy lại các cue lỗi.'); }
   });
 

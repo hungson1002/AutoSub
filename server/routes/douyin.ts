@@ -6,6 +6,8 @@ import {
   createBatchJob,
   getBatchJob,
   cancelBatchJob,
+  appendToBatchJob,
+  cancelBatchItem,
 } from '../services/douyinDownloader';
 import { closeDouyinExtractor } from '../services/douyinExtractor';
 
@@ -139,6 +141,25 @@ export async function douyinRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: 'Không tìm thấy batch job.' });
     }
     return reply.send(job);
+  });
+
+  app.post('/api/douyin/batch/:id/items', async (request, reply) => {
+    const id = String((request.params as { id?: string }).id || '');
+    const body = (request.body as { urls?: string[]; text?: string; bilibiliQuality?: number } | undefined) || {};
+    const urls = Array.isArray(body.urls)
+      ? body.urls.flatMap((url) => extractDouyinUrls(url))
+      : extractDouyinUrls(body.text || '');
+    if (urls.length === 0) return reply.code(400).send({ error: 'Danh sách link thêm vào đang trống hoặc không hợp lệ.' });
+    const job = appendToBatchJob(id, urls, body.bilibiliQuality === 16 ? 16 : 64);
+    if (!job) return reply.code(404).send({ error: 'Không tìm thấy hàng đợi đang hoạt động.' });
+    return reply.code(202).send(job);
+  });
+
+  app.post('/api/douyin/batch/:id/items/:itemId/cancel', async (request, reply) => {
+    const params = request.params as { id?: string; itemId?: string };
+    const cancelled = cancelBatchItem(String(params.id || ''), String(params.itemId || ''));
+    if (!cancelled) return reply.code(404).send({ error: 'Video không còn trong hàng đợi hoặc đã xử lý xong.' });
+    return reply.send({ ok: true, batchId: params.id, itemId: params.itemId });
   });
 
   // Cancel batch download

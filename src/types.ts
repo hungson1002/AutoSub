@@ -462,6 +462,8 @@ export interface DouyinBatchItem {
   progressPercent: number;
   downloadedBytes: number;
   totalBytes: number;
+  downloadSpeedBytesPerSecond?: number;
+  etaSeconds?: number;
   error?: string;
   uploadId?: string;
   storedPath?: string;

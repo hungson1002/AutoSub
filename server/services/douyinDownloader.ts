@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createUploadSession, safeUploadName } from './uploads';
 import { extractDouyinMedia } from './douyinExtractor';
 import { isBilibiliUrl, resolveBilibiliUrl, type BilibiliQuality } from './bilibiliExtractor';
+import { run } from './ffmpeg';
 
 export function extractDouyinUrls(text: string): string[] {
   if (!text) return [];
@@ -149,6 +150,41 @@ async function validateDownloadedVideo(filePath: string, downloadedBytes: number
   }
 }
 
+async function downloadWithFfmpegReconnect(
+  url: string,
+  targetFilePath: string,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  onProgress: (downloaded: number) => void,
+) {
+  const extraHeaders = Object.entries(headers)
+    .filter(([name]) => name.toLowerCase() !== 'user-agent')
+    .map(([name, value]) => `${name}: ${value}\r\n`)
+    .join('');
+  let progressBuffer = '';
+  await run('ffmpeg', [
+    '-y', '-hide_banner', '-loglevel', 'error', '-nostats',
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_at_eof', '1',
+    '-reconnect_on_network_error', '1',
+    '-reconnect_on_http_error', '4xx,5xx',
+    '-reconnect_max_retries', '20',
+    '-reconnect_delay_max', '10',
+    '-reconnect_delay_total_max', '180',
+    '-user_agent', headers['User-Agent'] || 'Mozilla/5.0',
+    ...(extraHeaders ? ['-headers', extraHeaders] : []),
+    '-i', url,
+    '-map', '0', '-c', 'copy',
+    '-progress', 'pipe:2',
+    targetFilePath,
+  ], signal, (chunk) => {
+    progressBuffer = (progressBuffer + chunk).slice(-4096);
+    for (const match of progressBuffer.matchAll(/total_size=(\d+)/g)) onProgress(Number(match[1]));
+  });
+  return (await stat(targetFilePath)).size;
+}
+
 export type DouyinItemState = 'pending' | 'resolving' | 'downloading' | 'completed' | 'failed' | 'cancelled';
 
 export interface DouyinBatchItem {
@@ -166,6 +202,8 @@ export interface DouyinBatchItem {
   progressPercent: number;
   downloadedBytes: number;
   totalBytes: number;
+  downloadSpeedBytesPerSecond?: number;
+  etaSeconds?: number;
   error?: string;
   uploadId?: string;
   storedPath?: string;
@@ -186,11 +224,44 @@ export interface DouyinBatchJob {
 
 const batchJobs = new Map<string, DouyinBatchJob>();
 const activeControllers = new Map<string, AbortController>();
+const activeItemControllers = new Map<string, AbortController>();
 
 const MAX_BATCH_CONCURRENCY = 3;
 const PARALLEL_CHUNKS_PER_FILE = 6;
 const RANGE_REQUEST_BYTES = 8 * 1024 * 1024;
 const BILIBILI_RANGE_REQUEST_BYTES = 64 * 1024 * 1024;
+
+function updateBatchSummary(job: DouyinBatchJob) {
+  job.completedItems = job.items.filter((item) => item.status === 'completed').length;
+  job.failedItems = job.items.filter((item) => item.status === 'failed').length;
+  const hasActiveItems = job.items.some((item) => item.status === 'pending' || item.status === 'resolving' || item.status === 'downloading');
+  if (hasActiveItems) job.status = 'running';
+  else if (job.failedItems > 0 && job.completedItems > 0) job.status = 'completed_with_errors';
+  else if (job.failedItems > 0) job.status = 'failed';
+  else job.status = 'completed';
+  job.updatedAt = new Date().toISOString();
+}
+
+function startAddedItemImmediately(job: DouyinBatchJob, item: DouyinBatchItem) {
+  const itemController = new AbortController();
+  activeItemControllers.set(item.id, itemController);
+  const batchSignal = activeControllers.get(job.id)?.signal;
+  const signal = batchSignal ? AbortSignal.any([batchSignal, itemController.signal]) : itemController.signal;
+  job.status = 'running';
+  void (async () => {
+    try {
+      await processDownloadItem(item, signal);
+    } catch (error) {
+      if (item.status !== 'cancelled') {
+        item.status = 'failed';
+        item.error = error instanceof Error ? error.message : 'Lỗi tải video.';
+      }
+    } finally {
+      activeItemControllers.delete(item.id);
+      updateBatchSummary(job);
+    }
+  })();
+}
 
 export function recommendedBilibiliConnections(totalBytes: number) {
   if (!Number.isFinite(totalBytes) || totalBytes <= 0) return 6;
@@ -232,6 +303,21 @@ export function getBatchJob(batchId: string): DouyinBatchJob | undefined {
   return batchJobs.get(batchId);
 }
 
+export function appendToBatchJob(batchId: string, urls: string[], bilibiliQuality: BilibiliQuality = 64): DouyinBatchJob | undefined {
+  const job = batchJobs.get(batchId);
+  if (!job || job.status === 'cancelled') return undefined;
+  const items = urls
+    .map((url): DouyinBatchItem => ({
+      id: randomUUID(), originalUrl: url.trim(), bilibiliQuality,
+      status: 'pending', progressPercent: 0, downloadedBytes: 0, totalBytes: 0,
+    }));
+  job.items.push(...items);
+  job.totalItems = job.items.length;
+  job.updatedAt = new Date().toISOString();
+  if (job.status !== 'queued') items.forEach((item) => startAddedItemImmediately(job, item));
+  return job;
+}
+
 export function cancelBatchJob(batchId: string): boolean {
   const job = batchJobs.get(batchId);
   if (!job) return false;
@@ -247,6 +333,19 @@ export function cancelBatchJob(batchId: string): boolean {
       item.status = 'cancelled';
     }
   }
+  return true;
+}
+
+export function cancelBatchItem(batchId: string, itemId: string): boolean {
+  const job = batchJobs.get(batchId);
+  const item = job?.items.find((entry) => entry.id === itemId);
+  if (!job || !item || item.status === 'completed' || item.status === 'failed' || item.status === 'cancelled') return false;
+  item.status = 'cancelled';
+  item.error = undefined;
+  item.progressPercent = 0;
+  activeItemControllers.get(itemId)?.abort();
+  activeItemControllers.delete(itemId);
+  job.updatedAt = new Date().toISOString();
   return true;
 }
 
@@ -267,12 +366,7 @@ async function startBatchProcessing(batchId: string) {
 
     if (currentIndex >= job.items.length) {
       if (activeCount === 0) {
-        job.status = job.failedItems > 0 && job.completedItems > 0
-          ? 'completed_with_errors'
-          : job.failedItems === job.totalItems
-            ? 'failed'
-            : 'completed';
-        job.updatedAt = new Date().toISOString();
+        updateBatchSummary(job);
         activeControllers.delete(batchId);
       }
       return;
@@ -280,19 +374,23 @@ async function startBatchProcessing(batchId: string) {
 
     const itemIndex = currentIndex++;
     const item = job.items[itemIndex];
+    if (item.status !== 'pending') {
+      void runNext();
+      return;
+    }
     activeCount++;
+    const itemController = new AbortController();
+    activeItemControllers.set(item.id, itemController);
 
     try {
-      await processDownloadItem(item, controller.signal);
-      if (item.status === 'completed') job.completedItems++;
-      else if (item.status === 'failed') job.failedItems++;
+      await processDownloadItem(item, AbortSignal.any([controller.signal, itemController.signal]));
     } catch (error) {
       item.status = 'failed';
       item.error = error instanceof Error ? error.message : 'Lỗi tải video.';
-      job.failedItems++;
     } finally {
+      activeItemControllers.delete(item.id);
       activeCount--;
-      job.updatedAt = new Date().toISOString();
+      updateBatchSummary(job);
       if (!controller.signal.aborted && (job.status as DouyinBatchJob['status']) !== 'cancelled') {
         void runNext();
       }
@@ -320,29 +418,62 @@ export async function downloadTurboStream(
   rangeRequestBytes = RANGE_REQUEST_BYTES,
 ): Promise<number> {
   const concurrency = Math.min(maxConcurrency, Math.max(1, Math.floor(totalBytes / (2 * 1024 * 1024))));
-  const fileHandle = await open(targetFilePath, 'w+');
 
-  try {
-    if (totalBytes <= 0 || totalBytes < 4 * 1024 * 1024) {
-      // Single connection high-speed stream
-      const res = await fetch(url, { method: 'GET', headers, signal });
-      const problem = douyinResponseProblem(res);
-      if (problem) throw new Error(problem);
+  const downloadSingleStream = async () => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal.aborted) throw new Error('Đã hủy tải video.');
+      try {
+        const res = await fetch(url, { method: 'GET', headers, signal });
+        const problem = douyinResponseProblem(res);
+        if (problem) throw new Error(problem);
 
-      let downloadedBytes = 0;
-      const progressLimiter = new Transform({
-        transform(chunk: Buffer, _encoding, callback) {
-          downloadedBytes += chunk.length;
-          onProgress(downloadedBytes);
-          callback(null, chunk);
-        },
-      });
+        let downloadedBytes = 0;
+        const progressLimiter = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            downloadedBytes += chunk.length;
+            onProgress(downloadedBytes);
+            callback(null, chunk);
+          },
+        });
 
-      const nodeReadable = Readable.fromWeb(res.body as any);
-      await pipeline(nodeReadable, progressLimiter, createWriteStream(targetFilePath));
-      return downloadedBytes;
+        const nodeReadable = Readable.fromWeb(res.body as any);
+        await pipeline(nodeReadable, progressLimiter, createWriteStream(targetFilePath));
+        return downloadedBytes;
+      } catch (error) {
+        if (signal.aborted) throw new Error('Đã hủy tải video.');
+        lastError = error;
+        await rm(targetFilePath, { force: true }).catch(() => undefined);
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 1_000));
+      }
     }
+    const detail = lastError instanceof Error ? lastError.message : 'kết nối bị đóng';
+    throw new Error(`Kết nối CDN bị ngắt khi đang tải. Đã tự thử lại 3 lần: ${detail}`);
+  };
 
+  if (totalBytes <= 0 || totalBytes < 4 * 1024 * 1024) {
+    return downloadSingleStream();
+  }
+
+  let supportsRanges = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const probe = await fetch(url, {
+      method: 'GET',
+      headers: { ...headers, Range: 'bytes=0-0' },
+      signal,
+    });
+    supportsRanges = probe.status === 206;
+    await probe.body?.cancel().catch(() => undefined);
+    if (supportsRanges) break;
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  if (!supportsRanges) {
+    return downloadSingleStream();
+  }
+
+  const fileHandle = await open(targetFilePath, 'w+');
+  try {
     // Parallel multi-part download
     await fileHandle.truncate(totalBytes);
     const chunkSize = Math.ceil(totalBytes / concurrency);
@@ -361,6 +492,7 @@ export async function downloadTurboStream(
         while (chunkOffset <= end) {
           if (signal.aborted) throw new Error('Đã hủy tải video.');
           const requestEnd = Math.min(end, chunkOffset + rangeRequestBytes - 1);
+          const requestStart = chunkOffset;
           try {
             const res = await fetch(url, {
               method: 'GET',
@@ -394,7 +526,10 @@ export async function downloadTurboStream(
             retryCount = 0;
           } catch (error) {
             if (signal.aborted) throw new Error('Đã hủy tải video.');
-            retryCount += 1;
+            // Some Bilibili CDNs repeatedly close a valid range response after
+            // only a few hundred KiB. Continue from the bytes already written;
+            // count only attempts that made no forward progress as failures.
+            retryCount = chunkOffset > requestStart ? 0 : retryCount + 1;
             if (retryCount >= 6) {
               const message = error instanceof Error ? error.message : 'kết nối bị ngắt';
               throw new Error(`Kết nối CDN bị ngắt nhiều lần: ${message}`);
@@ -405,7 +540,12 @@ export async function downloadTurboStream(
       })());
     }
 
-    await Promise.all(workerTasks);
+    const results = await Promise.allSettled(workerTasks);
+    const failedResult = results.find((result) => result.status === 'rejected');
+    if (failedResult) {
+      await fileHandle.close().catch(() => undefined);
+      return downloadSingleStream();
+    }
     return totalDownloaded;
   } finally {
     await fileHandle.close().catch(() => undefined);
@@ -482,6 +622,7 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
     if (signal.aborted) break;
 
     try {
+      const downloadStartedAt = Date.now();
       // Check content-length via fast probe
       let targetBytes = info.expectedBytes || 0;
       if (!targetBytes) {
@@ -507,6 +648,11 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
         signal,
         (current) => {
           item.downloadedBytes = current;
+          const elapsedSeconds = Math.max(0.5, (Date.now() - downloadStartedAt) / 1000);
+          item.downloadSpeedBytesPerSecond = Math.round(current / elapsedSeconds);
+          item.etaSeconds = item.totalBytes > current && item.downloadSpeedBytesPerSecond > 0
+            ? Math.round((item.totalBytes - current) / item.downloadSpeedBytesPerSecond)
+            : undefined;
           if (item.totalBytes > 0) {
             item.progressPercent = Math.min(98, 10 + Math.round((current / item.totalBytes) * 88));
           } else {
@@ -523,8 +669,26 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
       downloadSuccess = true;
       break;
     } catch (err) {
-      lastError = err instanceof Error ? err.message : 'Lỗi kết nối máy chủ video.';
       await rm(targetFilePath, { force: true }).catch(() => undefined);
+      if (!signal.aborted) {
+        try {
+          downloadedBytes = await downloadWithFfmpegReconnect(
+            url, targetFilePath, downloadHeaders, signal,
+            (current) => {
+              item.downloadedBytes = current;
+              if (item.totalBytes > 0) item.progressPercent = Math.min(98, 10 + Math.round((current / item.totalBytes) * 88));
+            },
+          );
+          await validateDownloadedVideo(targetFilePath, downloadedBytes, item.totalBytes);
+          downloadSuccess = true;
+          break;
+        } catch (fallbackError) {
+          lastError = fallbackError instanceof Error ? fallbackError.message : 'Lỗi kết nối máy chủ video.';
+          await rm(targetFilePath, { force: true }).catch(() => undefined);
+        }
+      } else {
+        lastError = err instanceof Error ? err.message : 'Đã hủy tải video.';
+      }
     }
   }
 
@@ -556,6 +720,7 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
 
     item.status = 'completed';
     item.progressPercent = 100;
+    item.etaSeconds = 0;
     item.uploadId = uploadId;
     item.storedPath = record.storedPath;
     item.filename = safeFilename;

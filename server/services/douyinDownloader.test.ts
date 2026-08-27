@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   cancelBatchJob,
+  cancelBatchItem,
   createBatchJob,
+  appendToBatchJob,
   downloadTurboStream,
   douyinResponseProblem,
   extractDouyinUrls,
@@ -51,6 +53,18 @@ test('createBatchJob creates and tracks batch state', () => {
   const cancelled = cancelBatchJob(job.id);
   assert.equal(cancelled, true);
   assert.equal(job.status, 'cancelled');
+});
+
+test('batch queue accepts new links and cancels one pending item', () => {
+  const job = createBatchJob(['https://v.douyin.com/iQueue1/'], { autoStart: false });
+  const updated = appendToBatchJob(job.id, ['https://v.douyin.com/iQueue2/'], 16);
+  assert.ok(updated);
+  assert.equal(updated.totalItems, 2);
+  assert.equal(updated.items[1].bilibiliQuality, 16);
+  assert.equal(cancelBatchItem(job.id, updated.items[1].id), true);
+  assert.equal(updated.items[1].status, 'cancelled');
+  const withDuplicate = appendToBatchJob(job.id, ['https://v.douyin.com/iQueue1/'], 64);
+  assert.equal(withDuplicate?.totalItems, 3);
 });
 
 test('Bilibili turbo profile uses more connections for ordinary files and backs off for huge files', () => {
@@ -110,6 +124,39 @@ test('MP4 signature validation checks the ftyp box', () => {
   assert.equal(isLikelyMp4Header(Buffer.from('<html>blocked</html>')), false);
 });
 
+test('single-stream downloader retries when the CDN terminates the response', async () => {
+  const originalFetch = globalThis.fetch;
+  const bytes = Buffer.alloc(2 * 1024 * 1024, 13);
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts++;
+    if (attempts === 1) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes.subarray(0, 128 * 1024));
+          controller.error(new Error('terminated'));
+        },
+      }), { status: 200, headers: { 'content-type': 'video/mp4' } });
+    }
+    return new Response(bytes, { status: 200, headers: { 'content-type': 'video/mp4' } });
+  };
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'autosub-single-retry-'));
+  const target = path.join(tempDir, 'video.mp4');
+  try {
+    const downloaded = await downloadTurboStream(
+      'https://cdn.example/video.mp4', target, bytes.length, {},
+      new AbortController().signal, () => undefined,
+    );
+    assert.equal(downloaded, bytes.length);
+    assert.equal(attempts, 2);
+    assert.deepEqual(await readFile(target), bytes);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('parallel downloader resumes a Bilibili range after a terminated stream', async () => {
   const originalFetch = globalThis.fetch;
   const totalBytes = 6 * 1024 * 1024;
@@ -158,6 +205,131 @@ test('parallel downloader resumes a Bilibili range after a terminated stream', a
     assert.deepEqual(await readFile(target), bytes);
     assert.equal(throttled, true);
     assert.equal(interrupted, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('parallel downloader keeps resuming while every terminated range makes progress', async () => {
+  const originalFetch = globalThis.fetch;
+  const totalBytes = 6 * 1024 * 1024;
+  const bytes = Buffer.alloc(totalBytes, 17);
+  const partialBytes = 256 * 1024;
+  let partialResponses = 0;
+
+  globalThis.fetch = async (_input, init) => {
+    const range = new Headers(init?.headers).get('range');
+    assert.ok(range);
+    const match = range.match(/^bytes=(\d+)-(\d+)$/);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (start === 0 && end === 0) return new Response(bytes.subarray(0, 1), { status: 206 });
+
+    const responseEnd = Math.min(end + 1, start + partialBytes);
+    const body = bytes.subarray(start, responseEnd);
+    if (responseEnd <= end) {
+      partialResponses++;
+      let delivered = false;
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (!delivered) {
+            delivered = true;
+            controller.enqueue(body);
+          } else {
+            controller.error(new Error('terminated'));
+          }
+        },
+      }), { status: 206 });
+    }
+    return new Response(body, { status: 206 });
+  };
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'autosub-bilibili-repeated-resume-'));
+  const target = path.join(tempDir, 'video.mp4');
+  try {
+    const downloaded = await downloadTurboStream(
+      'https://cdn.example/video.mp4', target, totalBytes, {},
+      new AbortController().signal, () => undefined, 2, 2 * 1024 * 1024,
+    );
+    assert.equal(downloaded, totalBytes);
+    assert.ok(partialResponses > 6);
+    assert.deepEqual(await readFile(target), bytes);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('parallel downloader falls back to a full stream when the CDN rejects ranges', async () => {
+  const originalFetch = globalThis.fetch;
+  const totalBytes = 6 * 1024 * 1024;
+  const bytes = Buffer.alloc(totalBytes, 9);
+  let rangeAttempts = 0;
+  let fullDownloads = 0;
+  globalThis.fetch = async (_input, init) => {
+    const range = new Headers(init?.headers).get('range');
+    if (range) {
+      rangeAttempts++;
+      return new Response('service unavailable', { status: 503 });
+    }
+    fullDownloads++;
+    return new Response(bytes, {
+      status: 200,
+      headers: { 'content-type': 'video/mp4', 'content-length': String(bytes.length) },
+    });
+  };
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'autosub-bilibili-fallback-'));
+  const target = path.join(tempDir, 'video.mp4');
+  try {
+    const downloaded = await downloadTurboStream(
+      'https://cdn.example/video.mp4',
+      target,
+      totalBytes,
+      {},
+      new AbortController().signal,
+      () => undefined,
+      3,
+    );
+    assert.equal(downloaded, totalBytes);
+    assert.deepEqual(await readFile(target), bytes);
+    assert.equal(rangeAttempts, 2);
+    assert.equal(fullDownloads, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('parallel downloader falls back when the range probe succeeds but chunk requests fail', async () => {
+  const originalFetch = globalThis.fetch;
+  const totalBytes = 6 * 1024 * 1024;
+  const bytes = Buffer.alloc(totalBytes, 11);
+  let rangeRequests = 0;
+  globalThis.fetch = async (_input, init) => {
+    const range = new Headers(init?.headers).get('range');
+    if (range) {
+      rangeRequests++;
+      if (rangeRequests === 1) return new Response(bytes.subarray(0, 1), { status: 206 });
+      return new Response('service unavailable', { status: 503 });
+    }
+    return new Response(bytes, {
+      status: 200,
+      headers: { 'content-type': 'video/mp4', 'content-length': String(bytes.length) },
+    });
+  };
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'autosub-bilibili-late-fallback-'));
+  const target = path.join(tempDir, 'video.mp4');
+  try {
+    const downloaded = await downloadTurboStream(
+      'https://cdn.example/video.mp4', target, totalBytes, {},
+      new AbortController().signal, () => undefined, 2, totalBytes,
+    );
+    assert.equal(downloaded, totalBytes);
+    assert.deepEqual(await readFile(target), bytes);
   } finally {
     globalThis.fetch = originalFetch;
     await rm(tempDir, { recursive: true, force: true });

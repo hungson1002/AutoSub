@@ -156,10 +156,10 @@ input[type="range"] { width: 100%; accent-color: var(--orange); cursor: pointer;
 .douyin-trust strong, .douyin-trust span { display: block; }
 .douyin-trust strong { color: #dfeae6; font-size: 11px; }
 .douyin-trust span { margin-top: 4px; color: #83988f; font-size: 9px; line-height: 1.45; }
-.douyin-workspace { display: grid; grid-template-columns: minmax(350px, .76fr) minmax(520px, 1.24fr); gap: 16px; align-items: start; }
-.douyin-panel { min-width: 0; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(19,24,32,.86); box-shadow: 0 18px 45px rgba(3,6,10,.13); }
+.douyin-workspace { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+.douyin-panel { min-width: 0; height: 100%; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(19,24,32,.86); box-shadow: 0 18px 45px rgba(3,6,10,.13); }
 .douyin-ingest { padding: 22px; }
-.douyin-queue { min-height: 520px; padding: 22px; }
+.douyin-queue { min-height: 520px; display: flex; flex-direction: column; padding: 22px; }
 .douyin-panel-head { min-height: 44px; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 22px; }
 .douyin-panel-head > div:first-child { min-width: 0; display: flex; align-items: flex-start; gap: 11px; }
 .douyin-panel-head h2, .douyin-panel-head p { margin: 0; }
@@ -219,7 +219,12 @@ input[type="range"] { width: 100%; accent-color: var(--orange); cursor: pointer;
 .douyin-empty > span { width: 50px; height: 50px; display: grid; place-items: center; border: 1px solid #2a3542; border-radius: 12px; color: #687688; background: #171e27; }
 .douyin-empty h3 { margin: 14px 0 5px; color: #dfe5ec; font-size: 13px; }
 .douyin-empty p { margin: 0; color: var(--muted-2); font-size: 10px; }
-.douyin-items { display: grid; gap: 9px; }
+.douyin-items { display: grid; gap: 9px; max-height: 66vh; overflow-y: auto; padding-right: 7px; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: rgba(255,138,69,.68) #101720; }
+.douyin-items::-webkit-scrollbar { width: 8px; }
+.douyin-items::-webkit-scrollbar-track { border: 1px solid #222e3b; border-radius: 999px; background: #101720; }
+.douyin-items::-webkit-scrollbar-thumb { min-height: 48px; border: 2px solid #101720; border-radius: 999px; background: linear-gradient(180deg, #ff8a45, #b85f35); }
+.douyin-items::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #ff9b62, #d06d3d); }
+.douyin-items::-webkit-scrollbar-button { width: 0; height: 0; display: none; }
 .douyin-item { min-width: 0; display: grid; grid-template-columns: 112px minmax(0,1fr); gap: 14px; padding: 12px; border: 1px solid #26303c; border-radius: 10px; background: #171e27; transition: border-color .16s ease, background .16s ease; }
 .douyin-item:hover { border-color: #354354; background: #19212b; }
 .douyin-item.status-completed { box-shadow: inset 2px 0 0 rgba(94,215,162,.7); }

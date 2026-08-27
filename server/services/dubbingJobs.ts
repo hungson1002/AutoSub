@@ -1054,7 +1054,16 @@ class DubbingRunner {
         const pending = cues.filter((cue) => cue.status === 'pending');
         if (!pending.length) {
           if (cues.some((cue) => cue.status === 'failed')) {
-            await this.commit((job) => { job.status = 'completed_with_errors'; job.warnings = [`${cues.filter((cue) => cue.status === 'failed').length} cue failed and must be retried.`]; });
+            const failedCount = cues.filter((cue) => cue.status === 'failed').length;
+            const successfulCount = cues.length - failedCount;
+            const result = successfulCount > 0 ? await this.buildTimeline(cues) : undefined;
+            await this.commit((job) => {
+              job.status = 'completed_with_errors';
+              job.result = result;
+              job.warnings = [successfulCount > 0
+                ? `${failedCount} cue failed and must be retried. Dub track was created from the remaining ${successfulCount} cues.`
+                : `${failedCount} cue failed and must be retried.`];
+            });
             return;
           }
           const result = await this.buildTimeline(cues);
@@ -1115,14 +1124,17 @@ export async function rebuildDubbingJobResult(id: string) {
   await writeJsonAtomic(jobFile(id), job);
   return startDubbingJob(id);
 }
-export async function retryFailedDubbingJob(id: string) {
+export async function retryFailedDubbingJob(id: string, patches: Array<{ id: string } & Partial<Pick<DubbingCueInput, 'startMs' | 'endMs' | 'originalText' | 'translatedText' | 'text' | 'previousText' | 'nextText'>>> = []) {
   const cues = await loadCues(id);
+  const patchesById = new Map(patches.map((patch) => [patch.id, patch]));
   for (const cue of cues) if (cue.status === 'failed') {
     const skipRewrite = cue.skipRewrite || /LLM did not make the sentence shorter/i.test(cue.error || '');
-    await saveCue(id, { ...cue, status: 'pending', error: undefined, errorStage: undefined, skipRewrite, attempts: cue.attempts + 1 });
+    const patch = patchesById.get(cue.id);
+    const { id: _id, ...inputPatch } = patch || { id: cue.id };
+    await saveCue(id, { ...cue, input: { ...cue.input, ...inputPatch }, status: 'pending', error: undefined, errorStage: undefined, skipRewrite, attempts: cue.attempts + 1 });
   }
   const job = await readDubbingJob(id);
-  job.status = 'queued'; job.failedCues = 0; job.warnings = [];
+  job.status = 'queued'; job.failedCues = 0; job.result = undefined; job.warnings = [];
   await writeJsonAtomic(jobFile(id), job);
   return startDubbingJob(id);
 }

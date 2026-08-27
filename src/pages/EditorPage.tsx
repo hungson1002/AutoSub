@@ -385,8 +385,21 @@ export function EditorPage({
               "success",
             );
           } else if (next.status === "completed_with_errors") {
+            const result = next.result ? await api.getDubbingResult(next.id) : undefined;
+            if (disposed) return;
             dubbingTerminalNoticeRef.current = `${next.id}:${next.status}`;
             setDubbingJob(next);
+            if (result) {
+              onCuesChange(applyDubbingMetadata(cues, result.metadata));
+              setDubAudioUrl(
+                `${result.audioUrl}?v=${encodeURIComponent(next.updatedAt)}`,
+              );
+              setDubAudioMix({
+                keepOriginal: next.config.audioMix.keepOriginal,
+                originalVolume: next.config.audioMix.originalVolume,
+                separateVocals: next.config.audioMix.separateVocals,
+              });
+            }
             setRegeneratingCueId(undefined);
             const firstFailure = next.failedCueErrors?.[0];
             const detail = firstFailure
@@ -434,7 +447,7 @@ export function EditorPage({
     };
   }, [dubbingJob?.id, dubbingJob?.status, cues, onCuesChange, onNotice]);
   useEffect(() => {
-    if (!dubbingJob || dubbingJob.status !== "completed" || dubAudioUrl) return;
+    if (!dubbingJob?.result || !["completed", "completed_with_errors"].includes(dubbingJob.status) || dubAudioUrl) return;
     let disposed = false;
     void api
       .getDubbingResult(dubbingJob.id)
@@ -473,6 +486,28 @@ export function EditorPage({
     action: "pause" | "resume" | "cancel" | "retry-failed",
   ) => {
     if (!dubbingJob) return;
+    const retryCues = action === "retry-failed"
+      ? (dubbingJob.failedCueIds || []).flatMap((failedId) => {
+          const cueIndex = cues.findIndex((cue) => cue.id === failedId);
+          const cue = cues[cueIndex];
+          if (!cue) return [];
+          const text = applyPronunciation(cue.translatedText || cue.originalText, pronunciation).trim();
+          return text ? [{
+            id: cue.id,
+            startMs: cue.startMs,
+            endMs: cue.endMs,
+            originalText: cue.originalText,
+            translatedText: cue.translatedText,
+            text,
+            previousText: cues[cueIndex - 1]?.translatedText || cues[cueIndex - 1]?.originalText || "",
+            nextText: cues[cueIndex + 1]?.translatedText || cues[cueIndex + 1]?.originalText || "",
+          }] : [];
+        })
+      : [];
+    if (action === "retry-failed" && retryCues.length !== dubbingJob.failedCues) {
+      onNotice("Cue lỗi vẫn chưa có nội dung subtitle để tạo giọng.", "error");
+      return;
+    }
     try {
       const next =
         action === "pause"
@@ -481,7 +516,7 @@ export function EditorPage({
             ? await api.resumeDubbingJob(dubbingJob.id)
             : action === "cancel"
               ? await api.cancelDubbingJob(dubbingJob.id)
-              : await api.retryFailedDubbingJob(dubbingJob.id);
+              : await api.retryFailedDubbingJob(dubbingJob.id, retryCues);
       setDubbingJob(next);
       if (action === "cancel" && asset?.uploadId)
         storage.removeDubbingJob(asset.uploadId, dubbingJob.id);
@@ -1609,7 +1644,9 @@ export function EditorPage({
         blurRegions={blurRegions}
         dubTrack={dubTrack}
         dubbingJobId={
-          dubbingJob?.status === "completed" ? dubbingJob.id : undefined
+          dubbingJob?.result && ["completed", "completed_with_errors"].includes(dubbingJob.status)
+            ? dubbingJob.id
+            : undefined
         }
         dubbingAudioMix={dubbingJob?.config.audioMix}
         onClose={() => setExportOpen(false)}

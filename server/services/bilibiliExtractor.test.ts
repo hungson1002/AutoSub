@@ -55,6 +55,7 @@ test('resolveBilibiliUrl reads metadata and a public MP4 stream', async () => {
     assert.equal(info.coverUrl, 'https://cdn.example/cover.jpg');
     assert.equal(info.downloadUrl, 'https://cdn.example/video.mp4');
     assert.deepEqual(info.backupUrls, ['https://backup.example/video.mp4']);
+    assert.deepEqual(info.backupUrls, ['https://backup.example/video.mp4']);
     assert.equal(info.expectedBytes, 12_345);
     assert.match(requestedPlayUrl, /[?&]qn=16(?:&|$)/);
   } finally {

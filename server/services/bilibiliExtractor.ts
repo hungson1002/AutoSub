@@ -137,7 +137,9 @@ export async function resolveBilibiliUrl(rawUrl: string, signal?: AbortSignal, q
     message?: string;
     data?: { durl?: BilibiliDurl[]; timelength?: number };
   }>(
-    `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(view.data.bvid)}&cid=${page.cid}&qn=${quality}&fnval=0&fnver=0&fourk=0&platform=html5&high_quality=1`,
+    // Do not send platform=html5: for some long public videos Bilibili then
+    // returns only a truncated Akamai URL and omits the working backup CDN.
+    `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(view.data.bvid)}&cid=${page.cid}&qn=${quality}&fnval=0&fnver=0&fourk=0&high_quality=1`,
     signal,
   );
   const stream = play.data?.durl?.[0];
