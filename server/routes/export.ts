@@ -753,11 +753,20 @@ export async function exportRoutes(app: FastifyInstance) {
         .replace(/\\/g, "/")
         .replace(/:/g, "\\:")
         .replace(/'/g, "\\'");
-      if (options.burnSubtitles === false)
-        filters.push(`[${current}]null[videoout]`);
-      else
+      const scaledOutput = outputSize(
+        options.resolution,
+        options.videoEdit?.aspectRatio,
+      );
+      // Preserve the encoded picture when export only replaces/mixes audio.
+      // This is lossless for video and avoids decoding every frame.
+      const copyVideoStream = options.burnSubtitles === false
+        && filters.length === 0
+        && !scaledOutput;
+      if (!copyVideoStream)
         filters.push(
-          `[${current}]subtitles='${ffmpegPath(assFile)}'${fontDir ? `:fontsdir='${fontDir}'` : ""}[videoout]`,
+          options.burnSubtitles === false
+            ? `[${current}]null[videoout]`
+            : `[${current}]subtitles='${ffmpegPath(assFile)}'${fontDir ? `:fontsdir='${fontDir}'` : ""}[videoout]`,
         );
 
       const audio = buildExportAudioFilter({
@@ -770,19 +779,18 @@ export async function exportRoutes(app: FastifyInstance) {
       });
       if (audio) filters.push(audio);
 
-      args.push("-filter_complex", filters.join(";"), "-map", "[videoout]");
+      if (filters.length) args.push("-filter_complex", filters.join(";"));
+      args.push("-map", copyVideoStream ? "0:v" : "[videoout]");
       if (audio) args.push("-map", "[audioout]");
-      const scaledOutput = outputSize(
-        options.resolution,
-        options.videoEdit?.aspectRatio,
-      );
       if (scaledOutput) args.push("-s", scaledOutput);
       // Keep H.264 compatibility and benchmark the available encoders once per
       // server run. QVBR preserves the requested visual-quality target when
       // AMD AMF wins; otherwise the established x264 path remains unchanged.
       const requestedQuality = String(Math.round(clamp(Number(options.crf ?? 20), 16, 35)));
-      const videoEncoder = await preferredH264Encoder();
-      if (videoEncoder === "h264_amf") {
+      const videoEncoder = copyVideoStream ? undefined : await preferredH264Encoder();
+      if (copyVideoStream) {
+        args.push("-c:v", "copy");
+      } else if (videoEncoder === "h264_amf") {
         args.push(
           "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality",
           "-rc", "qvbr", "-qvbr_quality_level", requestedQuality,
@@ -848,7 +856,7 @@ export async function exportRoutes(app: FastifyInstance) {
       };
       setExportProgress(exportId, {
         percent: Math.max(45, exportProgress.get(exportId || "")?.percent || 0),
-        stage: videoEncoder === "h264_amf" ? "AMD GPU đang render video và âm thanh" : "FFmpeg đang render video và âm thanh",
+        stage: copyVideoStream ? "Đang ghép nhanh audio với video gốc" : videoEncoder === "h264_amf" ? "AMD GPU đang render video và âm thanh" : "FFmpeg đang render video và âm thanh",
         status: "running",
       });
       armStallTimer();
@@ -865,7 +873,7 @@ export async function exportRoutes(app: FastifyInstance) {
             const match = /^out_time_(?:us|ms)=(\d+)/.exec(trimmed);
             if (!match) continue;
             const renderedMs = Number(match[1]) / 1000;
-            const renderer = videoEncoder === "h264_amf" ? "AMD GPU" : "FFmpeg";
+            const renderer = copyVideoStream ? "Ghép nhanh" : videoEncoder === "h264_amf" ? "AMD GPU" : "FFmpeg";
             const stage = renderSpeed
               ? `${renderer} đang render video và âm thanh · ${renderSpeed}`
               : `${renderer} đang render video và âm thanh`;

@@ -199,6 +199,8 @@ const resultDir = (id: string) => path.join(jobDir(id), 'result');
 const jobFile = (id: string) => path.join(jobDir(id), 'job.json');
 const cueFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.json`);
 const audioFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.wav`);
+const timelineRenderConcurrency = () => clamp(Math.round(Number(process.env.AUTOSUB_TIMELINE_CONCURRENCY) || 2), 1, 4);
+const TIMELINE_SEGMENT_CACHE_VERSION = 1;
 
 export const buildTimelineMixFilter = (inputCount: number, durationMs: number) => {
   const count = Math.max(1, Math.floor(inputCount));
@@ -956,41 +958,71 @@ class DubbingRunner {
       endMs: cue.input.endMs,
       audioDurationMs: cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs,
     }))).map((item) => [item.cueId, item]));
+    const metadataWrites: Array<Promise<void>> = [];
+    const metadataWriteSemaphore = new Semaphore(16);
     for (const cue of completed) {
       const plan = planById.get(cue.id);
       if (!plan || !cue.metadata) continue;
+      if (
+        cue.metadata.timelineStartMs === plan.timelineStartMs
+        && cue.metadata.timelineEndMs === plan.timelineEndMs
+        && cue.metadata.timelineShiftMs === plan.timelineShiftMs
+      ) continue;
       cue.metadata = {
         ...cue.metadata,
         timelineStartMs: plan.timelineStartMs,
         timelineEndMs: plan.timelineEndMs,
         timelineShiftMs: plan.timelineShiftMs,
       };
-      await saveCue(this.job.id, cue);
+      metadataWrites.push(metadataWriteSemaphore.use(() => saveCue(this.job.id, cue)));
     }
-    await rm(timelineDir(this.job.id), { recursive: true, force: true });
+    await Promise.all(metadataWrites);
     await mkdir(timelineDir(this.job.id), { recursive: true });
-    const segments: Array<{ file: string; startMs: number; durationMs: number }> = [];
     const batchSize = this.job.config.batchSize;
+    const segmentSemaphore = new Semaphore(timelineRenderConcurrency());
+    const segmentTasks: Array<Promise<{ file: string; startMs: number; durationMs: number }>> = [];
     for (let offset = 0; offset < completed.length; offset += batchSize) {
       const batch = completed.slice(offset, offset + batchSize);
       const firstPlan = planById.get(batch[0].id);
       const segmentStart = offset === 0 ? 0 : firstPlan?.timelineStartMs ?? batch[0].input.startMs;
       const segmentEnd = Math.max(...batch.map((cue) => planById.get(cue.id)?.timelineEndMs ?? cue.input.endMs));
       const durationMs = Math.max(segmentEnd - segmentStart, 100);
-      const args: string[] = ['-y'];
-      const filters: string[] = [];
-      batch.forEach((cue, index) => {
-        const delay = Math.max(0, Math.round((planById.get(cue.id)?.timelineStartMs ?? cue.input.startMs) - segmentStart));
-        const cueDurationMs = cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs;
-        const { fadeInDuration, fadeOutDuration, fadeOutStart } = cueBoundaryFades(cueDurationMs);
-        args.push('-i', path.join(jobDir(this.job.id), cue.audioFile as string));
-        filters.push(`[${index}:a]volume=${clamp(cue.input.volume ?? 1, 0, 2).toFixed(3)},afade=t=in:st=0:d=${fadeInDuration.toFixed(3)},afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDuration.toFixed(3)},adelay=${delay}|${delay}[a${index}]`);
-      });
-      filters.push(buildTimelineMixFilter(batch.length, durationMs));
-      const output = path.join(timelineDir(this.job.id), `segment-${String(segments.length).padStart(5, '0')}.wav`);
-      await run('ffmpeg', [...args, '-filter_complex', filters.join(';'), '-map', '[out]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', output], this.controller.signal);
-      segments.push({ file: output, startMs: segmentStart, durationMs });
+      const segmentIndex = segmentTasks.length;
+      segmentTasks.push(segmentSemaphore.use(async () => {
+        const args: string[] = ['-y'];
+        const filters: string[] = [];
+        const fingerprints = [];
+        for (const [index, cue] of batch.entries()) {
+          const source = path.join(jobDir(this.job.id), cue.audioFile as string);
+          const sourceStat = await stat(source);
+          const delay = Math.max(0, Math.round((planById.get(cue.id)?.timelineStartMs ?? cue.input.startMs) - segmentStart));
+          const cueDurationMs = cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs;
+          const fades = cueBoundaryFades(cueDurationMs);
+          const volume = clamp(cue.input.volume ?? 1, 0, 2).toFixed(3);
+          args.push('-i', source);
+          filters.push(`[${index}:a]volume=${volume},afade=t=in:st=0:d=${fades.fadeInDuration.toFixed(3)},afade=t=out:st=${fades.fadeOutStart.toFixed(3)}:d=${fades.fadeOutDuration.toFixed(3)},adelay=${delay}|${delay}[a${index}]`);
+          fingerprints.push([cue.id, sourceStat.size, sourceStat.mtimeMs, delay, cueDurationMs, volume, fades]);
+        }
+        filters.push(buildTimelineMixFilter(batch.length, durationMs));
+        const output = path.join(timelineDir(this.job.id), `segment-${String(segmentIndex).padStart(5, '0')}.wav`);
+        const cacheFile = `${output}.json`;
+        const signature = createHash('sha256').update(JSON.stringify([TIMELINE_SEGMENT_CACHE_VERSION, segmentStart, durationMs, fingerprints])).digest('hex');
+        const cached = await readJson<{ signature: string }>(cacheFile).catch(() => undefined);
+        if (cached?.signature === signature && (await stat(output).catch(() => undefined))?.isFile()) {
+          return { file: output, startMs: segmentStart, durationMs };
+        }
+        const temporary = `${output}.${process.pid}.${Date.now()}.tmp.wav`;
+        try {
+          await run('ffmpeg', [...args, '-filter_complex', filters.join(';'), '-map', '[out]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', temporary], this.controller.signal);
+          await replacePreparedFile(temporary, output);
+          await writeJsonAtomic(cacheFile, { signature });
+        } finally {
+          await rm(temporary, { force: true });
+        }
+        return { file: output, startMs: segmentStart, durationMs };
+      }));
     }
+    const segments = await Promise.all(segmentTasks);
     const rawFinalPath = path.join(resultDir(this.job.id), 'dub-track-raw.wav');
     const finalPath = path.join(resultDir(this.job.id), 'dub-track.wav');
     const masteredTemporary = `${finalPath}.${process.pid}.${Date.now()}.master.wav`;
@@ -1056,13 +1088,10 @@ class DubbingRunner {
           if (cues.some((cue) => cue.status === 'failed')) {
             const failedCount = cues.filter((cue) => cue.status === 'failed').length;
             const successfulCount = cues.length - failedCount;
-            const result = successfulCount > 0 ? await this.buildTimeline(cues) : undefined;
             await this.commit((job) => {
               job.status = 'completed_with_errors';
-              job.result = result;
-              job.warnings = [successfulCount > 0
-                ? `${failedCount} cue failed and must be retried. Dub track was created from the remaining ${successfulCount} cues.`
-                : `${failedCount} cue failed and must be retried.`];
+              job.result = undefined;
+              job.warnings = [`${failedCount} cue failed and must be retried. ${successfulCount} completed cue${successfulCount === 1 ? '' : 's'} were kept.`];
             });
             return;
           }
