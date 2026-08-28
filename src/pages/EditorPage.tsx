@@ -483,7 +483,7 @@ export function EditorPage({
   ]);
 
   const dubbingJobAction = async (
-    action: "pause" | "resume" | "cancel" | "retry-failed",
+    action: "pause" | "resume" | "cancel" | "retry-failed" | "rebuild",
   ) => {
     if (!dubbingJob) return;
     const retryCues = action === "retry-failed"
@@ -516,11 +516,19 @@ export function EditorPage({
             ? await api.resumeDubbingJob(dubbingJob.id)
             : action === "cancel"
               ? await api.cancelDubbingJob(dubbingJob.id)
-              : await api.retryFailedDubbingJob(dubbingJob.id, retryCues);
+              : action === "rebuild"
+                ? await api.rebuildDubbingJobResult(dubbingJob.id)
+                : await api.retryFailedDubbingJob(dubbingJob.id, retryCues);
       setDubbingJob(next);
       if (action === "cancel" && asset?.uploadId)
         storage.removeDubbingJob(asset.uploadId, dubbingJob.id);
       if (action === "retry-failed") dubbingTerminalNoticeRef.current = "";
+      if (action === "rebuild") {
+        setDubAudioUrl(undefined);
+        setDubAudioMix(undefined);
+        dubbingTerminalNoticeRef.current = "";
+        onNotice("Đang dựng lại dub track từ cache, không gọi lại TTS.", "success");
+      }
     } catch (error) {
       onNotice(
         friendlyErrorMessage(error, "Không thể điều khiển dubbing job."),

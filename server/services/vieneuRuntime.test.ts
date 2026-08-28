@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { listVieneuPresetVoices, vieneuPresetVoiceName } from '../adapters/vieneuLocal';
-import { buildVieneuPauseRepairFilter, parseVieneuInternalSilences, usesShortUtteranceQualityPass, vieneuHesitationScore } from './vieneuRuntime';
+import { buildVieneuPauseRepairFilter, parseVieneuInternalSilences, prepareVieneuSpeechText, usesShortUtteranceQualityPass, vieneuHesitationScore } from './vieneuRuntime';
 
 test('VieNeu exposes the built-in preset catalog alongside clone voices', () => {
   const voices = listVieneuPresetVoices();
@@ -39,6 +39,13 @@ test('VieNeu short-utterance repair does not flatten multi-sentence narration', 
   assert.equal(usesShortUtteranceQualityPass('Mọi ánh mắt lập tức hướng về Peter.'), true);
   assert.equal(usesShortUtteranceQualityPass('Peter quay lại. Ned bước vào.'), false);
   assert.equal(usesShortUtteranceQualityPass('Một câu rất dài '.repeat(20)), false);
+});
+
+test('VieNeu speech text keeps expressive punctuation and completes bare cues', () => {
+  assert.equal(prepareVieneuSpeechText('  Anh đi đâu vậy?  '), 'Anh đi đâu vậy?');
+  assert.equal(prepareVieneuSpeechText('Tuyệt quá!'), 'Tuyệt quá!');
+  assert.equal(prepareVieneuSpeechText('Xin chào mọi người'), 'Xin chào mọi người.');
+  assert.equal(prepareVieneuSpeechText('Chờ một chút…'), 'Chờ một chút…');
 });
 
 test('VieNeu pause repair removes only the middle of a measured silence', () => {

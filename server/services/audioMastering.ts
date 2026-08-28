@@ -3,12 +3,12 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { run, workdir } from './ffmpeg';
 
-export const DUB_MASTERING_VERSION = 3;
+export const DUB_MASTERING_VERSION = 4;
 export const DUB_TARGET_LUFS = -16;
 const DUB_TARGET_LRA = 11;
 const DUB_TARGET_TRUE_PEAK = -2.0;
 const loudnessBase = `loudnorm=I=${DUB_TARGET_LUFS}:LRA=${DUB_TARGET_LRA}:TP=${DUB_TARGET_TRUE_PEAK.toFixed(1)}`;
-export const DUB_LOUDNESS_FILTER = `${loudnessBase},alimiter=limit=0.794:level=false`;
+export const DUB_LOUDNESS_FILTER = `${loudnessBase},alimiter=limit=0.794:level=false:latency=true`;
 
 type LoudnessMeasurements = {
   input_i: string;
@@ -28,7 +28,7 @@ function parseLoudnessMeasurements(stderr: string): LoudnessMeasurements {
 }
 
 export function buildLinearLoudnessFilter(measured: LoudnessMeasurements) {
-  return `${loudnessBase}:measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}:linear=true,alimiter=limit=0.794:level=false`;
+  return `${loudnessBase}:measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}:linear=true,alimiter=limit=0.794:level=false:latency=true`;
 }
 
 export async function masterDubFile(input: string, output: string, signal?: AbortSignal) {

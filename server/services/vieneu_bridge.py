@@ -132,8 +132,8 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
             # like a faint doubled/reverberant voice on short cues.
             apply_watermark=False,
             temperature=temperature,
-            top_k=20,
-            top_p=0.90,
+            top_k=25,
+            top_p=0.95,
             repetition_penalty=1.2,
         )
         tts.save(audio, str(output))

@@ -590,6 +590,11 @@ export const api = {
       `/api/dubbing/jobs/${encodeURIComponent(id)}/retry-failed`,
       { method: "POST", ...(cues.length ? { body: JSON.stringify({ cues }) } : {}) },
     ),
+  rebuildDubbingJobResult: (id: string) =>
+    request<DubbingJobStatus>(
+      `/api/dubbing/jobs/${encodeURIComponent(id)}/rebuild`,
+      { method: "POST" },
+    ),
   regenerateDubbingCue: (
     id: string,
     cue: Pick<

@@ -29,7 +29,7 @@ async function waitForTerminal(id: string) {
 test('timeline mix preserves cue gain instead of normalizing it by batch size', () => {
   const filter = buildTimelineMixFilter(29, 79_180);
   assert.match(filter, /amix=inputs=29:duration=longest:dropout_transition=0:normalize=0/);
-  assert.match(filter, /alimiter=limit=0\.891:level=false/);
+  assert.match(filter, /alimiter=limit=0\.891:level=false:latency=true/);
   assert.match(filter, /apad=whole_dur=79\.180,atrim=end=79\.180/);
   assert.doesNotMatch(filter, /,apad,/);
 });
@@ -56,9 +56,9 @@ test('stem mix combines selected source stems only once before ducking under dub
 test('cue boundaries keep only click-safe edge silence and do not delay audible speech', () => {
   assert.equal((speechTrimFilter.match(/start_silence=0\.01/g) || []).length, 2);
   const fades = cueBoundaryFades(3_066);
-  assert.equal(fades.fadeInDuration, 0.008);
-  assert.equal(fades.fadeOutDuration, 0.008);
-  assert.ok(Math.abs(fades.fadeOutStart - 3.058) < 0.000_001);
+  assert.equal(fades.fadeInDuration, 0.012);
+  assert.equal(fades.fadeOutDuration, 0.012);
+  assert.ok(Math.abs(fades.fadeOutStart - 3.054) < 0.000_001);
 });
 
 test('nearby cues borrow only a short pause and do not make the whole speech block race', () => {

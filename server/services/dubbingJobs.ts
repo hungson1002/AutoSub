@@ -163,7 +163,7 @@ const DEFAULTS = {
 // Do not reuse audio generated before CapCut request serialization and stable
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
-const TTS_CACHE_VERSION = 'tts-v10-clean-speech-fit';
+const TTS_CACHE_VERSION = 'tts-v11-clear-expressive-speech';
 const SPEECH_PREP_VERSION = 'speech-v2-tight-edges';
 export const ADAPTIVE_FIT_VERSION = 11;
 
@@ -200,22 +200,22 @@ const jobFile = (id: string) => path.join(jobDir(id), 'job.json');
 const cueFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.json`);
 const audioFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.wav`);
 const timelineRenderConcurrency = () => clamp(Math.round(Number(process.env.AUTOSUB_TIMELINE_CONCURRENCY) || 2), 1, 4);
-const TIMELINE_SEGMENT_CACHE_VERSION = 1;
+const TIMELINE_SEGMENT_CACHE_VERSION = 2;
 
 export const buildTimelineMixFilter = (inputCount: number, durationMs: number) => {
   const count = Math.max(1, Math.floor(inputCount));
   const mixed = Array.from({ length: count }, (_value, index) => `[a${index}]`).join('');
   const duration = Math.max(durationMs, 100);
   const seconds = (duration / 1000).toFixed(3);
-  return `${mixed}amix=inputs=${count}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.891:level=false,apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB[out]`;
+  return `${mixed}amix=inputs=${count}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.891:level=false:latency=true,apad=whole_dur=${seconds},atrim=end=${seconds},asetpts=N/SR/TB[out]`;
 };
 
 export const cueBoundaryFades = (durationMs: number) => {
   const safeDurationMs = Math.max(1, Number(durationMs) || 1);
   // The cached TTS is already clean PCM. A true micro-fade is enough to avoid
   // a discontinuity at digital silence without swallowing the first consonant.
-  const fadeInDuration = Math.min(0.008, Math.max(0.002, safeDurationMs / 8_000));
-  const fadeOutDuration = Math.min(0.008, Math.max(0.002, safeDurationMs / 8_000));
+  const fadeInDuration = Math.min(0.012, Math.max(0.002, safeDurationMs / 8_000));
+  const fadeOutDuration = Math.min(0.012, Math.max(0.002, safeDurationMs / 8_000));
   return {
     fadeInDuration,
     fadeOutDuration,

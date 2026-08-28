@@ -24,11 +24,16 @@ export type VieneuInternalSilence = { startMs: number; endMs: number; durationMs
 const VIENEU_HESITATION_MIN_MS = 160;
 const VIENEU_NATURAL_PAUSE_MS = 95;
 const VIENEU_EDGE_GUARD_MS = 80;
-// Lower sampling keeps short subtitle cues from developing unstable tails or
-// repeated phonemes. A second, colder pass is used when the first pass has a
-// measurable hesitation problem.
-const VIENEU_PRIMARY_TEMPERATURE = 0.42;
-const VIENEU_RETRY_TEMPERATURE = 0.35;
+// Keep enough variation for natural emphasis while retaining a colder fallback
+// for short cues that develop unstable pauses or repeated phonemes.
+const VIENEU_PRIMARY_TEMPERATURE = 0.55;
+const VIENEU_RETRY_TEMPERATURE = 0.42;
+
+export function prepareVieneuSpeechText(text: string) {
+  const content = text.normalize('NFC').replace(/\s+/g, ' ').trim();
+  if (!content || /[.!?…]["'’”)]*$/.test(content)) return content;
+  return `${content}.`;
+}
 
 export function parseVieneuInternalSilences(stderr: string, durationMs: number, edgeGuardMs = VIENEU_EDGE_GUARD_MS): VieneuInternalSilence[] {
   const pauses: VieneuInternalSilence[] = [];
@@ -317,7 +322,7 @@ async function vieneuAudioQuality(file: string, signal?: AbortSignal) {
 export type VieneuVoiceInput = { referencePath?: string; presetName?: string };
 
 export async function synthesizeWithVieneu(text: string, voice: VieneuVoiceInput | string, speed = 1, signal?: AbortSignal) {
-  const content = text.trim();
+  const content = prepareVieneuSpeechText(text);
   const voiceInput: VieneuVoiceInput = typeof voice === 'string' ? { referencePath: voice } : voice;
   if (!voiceInput.referencePath && !voiceInput.presetName) throw new ProviderError('VieNeu TTS requires a preset voice or reference file.', 400);
   if (!content) throw new ProviderError('Nội dung VieNeu TTS đang trống.', 400);

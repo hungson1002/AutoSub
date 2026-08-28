@@ -16,6 +16,7 @@ import {
   legacyTrackJob,
   openDubbingAudio,
   pauseDubbingJob,
+  rebuildDubbingJobResult,
   resumeDubbingJob,
   regenerateDubbingCue,
   retryFailedDubbingJob,
@@ -98,6 +99,11 @@ export async function dubbingRoutes(app: FastifyInstance) {
     const body = (request.body as { cues?: Parameters<typeof retryFailedDubbingJob>[1] } | undefined) || {};
     try { return reply.send(await retryFailedDubbingJob(idFrom(request), Array.isArray(body.cues) ? body.cues : [])); }
     catch (error) { return sendRouteError(reply, error, 'Không thể chạy lại các cue lỗi.'); }
+  });
+
+  app.post('/api/dubbing/jobs/:id/rebuild', async (request, reply) => {
+    try { return reply.send(await rebuildDubbingJobResult(idFrom(request))); }
+    catch (error) { return sendRouteError(reply, error, 'KhĂ´ng thá»ƒ dá»±ng láº¡i dub track tá»« cache.'); }
   });
 
   app.post('/api/dubbing/jobs/:id/cues/:cueId/regenerate', async (request, reply) => {
