@@ -28,7 +28,14 @@ export function parseSubtitle(text: string, fileName = ''): SubtitleCue[] {
   return cues;
 }
 
-export function cuesToSrt(cues: SubtitleCue[], translated = false) { return cues.filter((cue) => cue.enabled).map((cue, index) => `${index + 1}\n${formatTime(cue.startMs)} --> ${formatTime(cue.endMs)}\n${translated ? (cue.translatedText || cue.originalText) : cue.originalText}\n`).join('\n'); }
+export function cuesToSrt(cues: SubtitleCue[], translated = false) {
+  const enabled = cues.filter((cue) => cue.enabled);
+  return enabled.map((cue, index) => {
+    const next = enabled[index + 1];
+    const endMs = next && cue.endMs > next.startMs ? Math.max(cue.startMs, next.startMs) : cue.endMs;
+    return `${index + 1}\n${formatTime(cue.startMs)} --> ${formatTime(endMs)}\n${translated ? (cue.translatedText || cue.originalText) : cue.originalText}\n`;
+  }).join('\n');
+}
 
 const assTime = (ms: number) => { const safe = Math.max(0, Math.round(ms)); const h = Math.floor(safe / 3600000); const m = Math.floor((safe % 3600000) / 60000); const s = Math.floor((safe % 60000) / 1000); const cs = Math.floor((safe % 1000) / 10); return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`; };
 const assColor = (hex: string) => { const rgb = hex.replace('#', '').length === 6 ? hex.replace('#', '') : 'ffffff'; return `&H00${rgb.slice(4, 6)}${rgb.slice(2, 4)}${rgb.slice(0, 2)}`.toUpperCase(); };

@@ -5,7 +5,7 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { ADAPTIVE_FIT_VERSION, buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFades, dubbingRewriteWordLimit, effectiveTtsConcurrency, fallbackTempoFilter, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, parseAudioIntegrity, planAdaptiveCueTempos, planDubbingTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, shouldAttemptDubbingRewrite, shouldFallbackDubbingRewrite, speechTrimFilter, startDubbingJob, tempoFilter, timeStretchIntroducedArtifacts } from './dubbingJobs';
+import { ADAPTIVE_FIT_VERSION, buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFadeFilter, cueBoundaryFades, dubbingRewriteWordLimit, effectiveTtsConcurrency, fallbackTempoFilter, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, parseAudioIntegrity, planAdaptiveCueTempos, planDubbingTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, shouldAttemptDubbingRewrite, shouldFallbackDubbingRewrite, speechTrimFilter, startDubbingJob, tempoFilter, timeStretchIntroducedArtifacts } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
@@ -59,6 +59,7 @@ test('cue boundaries keep only click-safe edge silence and do not delay audible 
   assert.equal(fades.fadeInDuration, 0.012);
   assert.equal(fades.fadeOutDuration, 0.012);
   assert.ok(Math.abs(fades.fadeOutStart - 3.054) < 0.000_001);
+  assert.equal(cueBoundaryFadeFilter(3_066), 'afade=t=in:st=0:d=0.012,areverse,afade=t=in:st=0:d=0.012,areverse');
 });
 
 test('nearby cues borrow only a short pause and do not make the whole speech block race', () => {

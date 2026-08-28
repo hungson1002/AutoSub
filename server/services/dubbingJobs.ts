@@ -200,7 +200,7 @@ const jobFile = (id: string) => path.join(jobDir(id), 'job.json');
 const cueFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.json`);
 const audioFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.wav`);
 const timelineRenderConcurrency = () => clamp(Math.round(Number(process.env.AUTOSUB_TIMELINE_CONCURRENCY) || 2), 1, 4);
-const TIMELINE_SEGMENT_CACHE_VERSION = 2;
+const TIMELINE_SEGMENT_CACHE_VERSION = 3;
 
 export const buildTimelineMixFilter = (inputCount: number, durationMs: number) => {
   const count = Math.max(1, Math.floor(inputCount));
@@ -221,6 +221,13 @@ export const cueBoundaryFades = (durationMs: number) => {
     fadeOutDuration,
     fadeOutStart: Math.max(0, safeDurationMs / 1000 - fadeOutDuration),
   };
+};
+
+export const cueBoundaryFadeFilter = (durationMs: number) => {
+  const fades = cueBoundaryFades(durationMs);
+  // Fade the tail from the actual last sample. A timestamp derived from ffprobe
+  // can be rounded by a few samples and leave a non-zero edge that clicks.
+  return `afade=t=in:st=0:d=${fades.fadeInDuration.toFixed(3)},areverse,afade=t=in:st=0:d=${fades.fadeOutDuration.toFixed(3)},areverse`;
 };
 
 export const buildSeparatedAudioMixFilter = (durationMs: number, originalVolume: number) => {
@@ -1000,7 +1007,7 @@ class DubbingRunner {
           const fades = cueBoundaryFades(cueDurationMs);
           const volume = clamp(cue.input.volume ?? 1, 0, 2).toFixed(3);
           args.push('-i', source);
-          filters.push(`[${index}:a]volume=${volume},afade=t=in:st=0:d=${fades.fadeInDuration.toFixed(3)},afade=t=out:st=${fades.fadeOutStart.toFixed(3)}:d=${fades.fadeOutDuration.toFixed(3)},adelay=${delay}|${delay}[a${index}]`);
+          filters.push(`[${index}:a]volume=${volume},${cueBoundaryFadeFilter(cueDurationMs)},adelay=${delay}|${delay}[a${index}]`);
           fingerprints.push([cue.id, sourceStat.size, sourceStat.mtimeMs, delay, cueDurationMs, volume, fades]);
         }
         filters.push(buildTimelineMixFilter(batch.length, durationMs));

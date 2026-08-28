@@ -3,7 +3,7 @@ import type { AIProvider, DubbingJobStatus, OriginalAudioMode, PronunciationEntr
 import { api, friendlyErrorMessage } from '../lib/api';
 import { AssignmentSummary } from '../components/AssignmentSummary';
 import { Modal } from '../components/Modal';
-import { Check, ChevronDown, CirclePlay, LoaderCircle, Pause, Play, Plus, RotateCcw, Search, Trash2, X } from '../components/Icons';
+import { Bookmark, Check, ChevronDown, CirclePlay, LoaderCircle, Pause, Play, Plus, RotateCcw, Search, Trash2, X } from '../components/Icons';
 import { resolvedProviderType } from '../lib/providers';
 import { RangeInput } from '../components/RangeInput';
 import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
@@ -14,6 +14,14 @@ export type VoiceConfig = { assignment: ProviderAssignment; voice: string; speed
 export type DubbingRunOptions = { audioMix: { mode: OriginalAudioMode; keepOriginal: boolean; originalVolume: number; separateVocals: boolean } };
 
 type VoiceItem = { id: string; name?: string; language?: string; source?: 'preset' | 'clone'; description?: string };
+const voiceBookmarksStorageKey = 'autosub.voice-bookmarks';
+
+function loadVoiceBookmarks() {
+  try {
+    const value = JSON.parse(localStorage.getItem(voiceBookmarksStorageKey) || '[]');
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  } catch { return []; }
+}
 
 export function DubbingModal({ open, providers, assignments, availableAssignments, cues, pronunciation, sourceVideoReady = false, sourceVideoUploading = false, onClose, onPronunciationChange, onRun, onNotice, job, onJobAction }: { open: boolean; providers: AIProvider[]; assignments: Record<VoiceGroup, ProviderAssignment>; availableAssignments: ProviderAssignment[]; cues: SubtitleCue[]; pronunciation: PronunciationEntry[]; sourceVideoReady?: boolean; sourceVideoUploading?: boolean; onClose: () => void; onPronunciationChange: (entries: PronunciationEntry[]) => void; onRun: (configs: Record<VoiceGroup, VoiceConfig>, options: DubbingRunOptions) => void; onNotice?: (message: string, kind?: 'success' | 'error') => void; job?: DubbingJobStatus; onJobAction?: (action: 'pause' | 'resume' | 'cancel' | 'retry-failed' | 'rebuild') => void }) {
   const [active, setActive] = useState<VoiceGroup>('G1');
@@ -23,6 +31,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const [voiceQuery, setVoiceQuery] = useState('');
   const [previewingVoice, setPreviewingVoice] = useState<string>();
   const [loadedVoices, setLoadedVoices] = useState<Record<string, VoiceItem[]>>({});
+  const [voiceBookmarks, setVoiceBookmarks] = useState<string[]>(loadVoiceBookmarks);
   const [configs, setConfigs] = useState<Record<VoiceGroup, VoiceConfig>>(() => ({
     G1: { assignment: assignments.G1, voice: '', speed: 1, volume: 1 },
     G2: { assignment: assignments.G2, voice: '', speed: 1, volume: 1 },
@@ -32,11 +41,13 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const [originalVolume, setOriginalVolume] = useState(0.25);
   const [demucsAvailable, setDemucsAvailable] = useState<boolean>();
   const voicePickerRef = useRef<HTMLDivElement>(null);
+  const voiceListRef = useRef<HTMLDivElement>(null);
   const voiceDropdownId = useRef<DropdownId>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const previewRequestRef = useRef(0);
   const previewCacheRef = useRef(new Map<string, Blob>());
+  const previewPendingRef = useRef(new Map<string, Promise<Blob>>());
   const assignmentOptions = availableAssignments.length ? availableAssignments : [assignments.G1];
   const current = configs[active];
   const currentProvider = providers.find((item) => item.id === current.assignment.providerId);
@@ -49,13 +60,25 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const isVieneuLocal = providerType === 'vieneu-local';
   const voiceItems = (isHiiuTts ? (currentProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id })) : currentProvider ? loadedVoices[currentProvider.id] || currentProvider.voices || [] : []) as VoiceItem[];
   const voiceSource = (voice: VoiceItem) => voice.source || (isVieneuLocal ? (voice.id.startsWith('preset:') ? 'preset' : 'clone') : undefined);
-  const filteredVoices = voiceItems.filter((voice) => `${voice.name || ''} ${voice.id} ${voice.language || ''} ${voice.description || ''}`.toLowerCase().includes(voiceQuery.trim().toLowerCase()));
+  const voiceBookmarkKey = (voiceId: string) => `${currentProvider?.id || ''}::${voiceId}`;
+  const isVoiceBookmarked = (voiceId: string) => voiceBookmarks.includes(voiceBookmarkKey(voiceId));
+  const filteredVoices = voiceItems
+    .filter((voice) => `${voice.name || ''} ${voice.id} ${voice.language || ''} ${voice.description || ''}`.toLowerCase().includes(voiceQuery.trim().toLowerCase()))
+    .sort((left, right) => Number(isVoiceBookmarked(right.id)) - Number(isVoiceBookmarked(left.id)));
   const selectedVoice = voiceItems.find((voice) => voice.id === current.voice);
   const sourceAudioEnabled = sourceAudioMode !== 'mute';
   const needsStemMix = sourceAudioMode === 'background';
   const notify = (message: string, kind: 'success' | 'error' = 'success') => onNotice?.(message, kind);
   const patchCurrent = (patch: Partial<VoiceConfig>) => setConfigs((value) => ({ ...value, [active]: { ...value[active], ...patch } }));
   const addPronunciation = () => onPronunciationChange([...pronunciation, { id: crypto.randomUUID(), source: '', reading: '', enabled: true }]);
+  const toggleVoiceBookmark = (voiceId: string) => setVoiceBookmarks((current) => {
+    const key = voiceBookmarkKey(voiceId);
+    const adding = !current.includes(key);
+    const next = adding ? [...current, key] : current.filter((item) => item !== key);
+    try { localStorage.setItem(voiceBookmarksStorageKey, JSON.stringify(next)); } catch { /* Preference remains available for this session. */ }
+    if (adding) window.requestAnimationFrame(() => voiceListRef.current?.scrollTo({ top: 0 }));
+    return next;
+  });
 
   const stopPreview = useCallback(() => {
     previewRequestRef.current += 1;
@@ -109,6 +132,33 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   }, []);
   useEffect(() => listenForOtherDropdowns(voiceDropdownId.current, () => setVoiceOpen(false)), []);
 
+  const previewText = () => isGroq ? 'Hello, this is a voice test.' : 'Xin chào, giọng thử AutoSub.';
+  const previewCacheKey = (voiceId: string) => currentProvider
+    ? [currentProvider.id, current.assignment.model, voiceId, current.speed.toFixed(2), previewText()].join('::')
+    : '';
+  const loadVoicePreview = (voiceId: string) => {
+    if (!currentProvider) return Promise.reject(new Error('Chưa chọn TTS provider.'));
+    const key = previewCacheKey(voiceId);
+    const cached = previewCacheRef.current.get(key);
+    if (cached) return Promise.resolve(cached);
+    const pending = previewPendingRef.current.get(key);
+    if (pending) return pending;
+    const task = api.testVoice(currentProvider, current.assignment.model, voiceId, current.speed, previewText()).then((blob) => {
+      previewCacheRef.current.set(key, blob);
+      while (previewCacheRef.current.size > 24) previewCacheRef.current.delete(previewCacheRef.current.keys().next().value as string);
+      return blob;
+    }).finally(() => previewPendingRef.current.delete(key));
+    previewPendingRef.current.set(key, task);
+    return task;
+  };
+  const primeVoice = (voiceId: string) => { if (voiceId && currentProvider && current.assignment.model) void loadVoicePreview(voiceId).catch(() => undefined); };
+
+  useEffect(() => {
+    if (!voiceOpen || !currentProvider) return;
+    const priorityVoices = voiceItems.filter((voice) => voice.id === current.voice || isVoiceBookmarked(voice.id)).slice(0, 6);
+    priorityVoices.forEach((voice) => primeVoice(voice.id));
+  }, [voiceOpen, currentProvider?.id, current.assignment.model, current.speed, current.voice, voiceBookmarks]);
+
   const playVoice = async (voiceId: string) => {
     if (!current.assignment.providerId || !current.assignment.model) { notify('Cấu hình TTS còn thiếu provider hoặc model.', 'error'); return; }
     if (!voiceId || !currentProvider) { notify('Hãy chọn Voice ID trước khi nghe thử.', 'error'); return; }
@@ -116,15 +166,8 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
     const previewRequest = previewRequestRef.current;
     setPreviewingVoice(voiceId);
     try {
-      const previewText = isGroq ? 'Hello, this is a voice test.' : 'Xin chào, đây là giọng thử.';
-      const cacheKey = [currentProvider.id, current.assignment.model, voiceId, current.speed.toFixed(2), previewText].join('::');
-      let blob = previewCacheRef.current.get(cacheKey);
-      const cached = Boolean(blob);
-      if (!blob) {
-        blob = await api.testVoice(currentProvider, current.assignment.model, voiceId, current.speed, previewText);
-        previewCacheRef.current.set(cacheKey, blob);
-        while (previewCacheRef.current.size > 24) previewCacheRef.current.delete(previewCacheRef.current.keys().next().value as string);
-      }
+      const cached = previewCacheRef.current.has(previewCacheKey(voiceId));
+      const blob = await loadVoicePreview(voiceId);
       if (previewRequestRef.current !== previewRequest) return;
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
@@ -161,17 +204,17 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
           {(isElevenLabs || isHiiuTts || isCapCutTts || isEdgeTts || isVieneuLocal) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
             <div className="voice-picker-control">
               <button type="button" className={`voice-picker-trigger ${voiceOpen ? 'active' : ''}`} onClick={() => { if (!voiceOpen) announceDropdownOpen(voiceDropdownId.current); setVoiceOpen((value) => !value); }}>
-                <span className="voice-picker-star">★</span><span className="voice-picker-selected"><strong>{selectedVoice?.name || current.voice || 'Chọn giọng đọc'}</strong><small>{selectedVoice?.id || 'Mở danh sách voice'}</small></span><ChevronDown size={15} className={voiceOpen ? 'rotated' : ''} />
+                <span className="voice-picker-selected"><strong>{selectedVoice?.name || current.voice || 'Chọn giọng đọc'}</strong><small>{selectedVoice?.id || 'Mở danh sách voice'}</small></span><ChevronDown size={15} className={voiceOpen ? 'rotated' : ''} />
               </button>
               <button type="button" className="voice-picker-play" aria-label="Nghe thử voice đang chọn" disabled={!current.voice || previewingVoice === current.voice} onClick={() => void playVoice(current.voice)}>{previewingVoice === current.voice ? <LoaderCircle size={16} className="spin" /> : <CirclePlay size={18} />}</button>
             </div>
             {voiceOpen && <div className="voice-picker-menu">
               <label className="voice-picker-search"><Search size={15} /><input autoFocus value={voiceQuery} onChange={(event) => setVoiceQuery(event.target.value)} placeholder="Tìm tên hoặc Voice ID..." /></label>
-              <div className="voice-picker-meta">{filteredVoices.length} voice · chọn để dùng, nút play để nghe thử</div>
-              <div className="voice-picker-list">{filteredVoices.length ? filteredVoices.map((voice) => <div className={`voice-picker-option ${voice.id === current.voice ? 'selected' : ''}`} key={voice.id} role="option" aria-selected={voice.id === current.voice}>
-                <button type="button" className="voice-picker-option-main" onClick={() => { patchCurrent({ voice: voice.id, ...(isHiiuTts ? { assignment: { ...current.assignment, model: voice.id } } : {}) }); setVoiceOpen(false); }}><span className="voice-picker-star">★</span><span><strong>{voice.name || voice.id}</strong><small>{voice.description || `${voice.id}${voice.language ? ` · ${voice.language}` : ''}`}</small></span>{voiceSource(voice) && <em className={`voice-picker-source ${voiceSource(voice)}`}>{voiceSource(voice) === 'preset' ? 'CÓ SẴN' : 'CLONE'}</em>}</button>
-                <button type="button" className="voice-picker-option-play" aria-label={`Nghe thử ${voice.name || voice.id}`} onClick={() => void playVoice(voice.id)}>{previewingVoice === voice.id ? <LoaderCircle size={16} className="spin" /> : <CirclePlay size={17} />}</button>
-                {voice.id === current.voice && <Check size={15} className="voice-picker-check" />}
+              <div className="voice-picker-meta">{filteredVoices.length} voice · bookmark lên đầu · nút play để nghe thử</div>
+              <div className="voice-picker-list" ref={voiceListRef}>{filteredVoices.length ? filteredVoices.map((voice) => <div className={`voice-picker-option ${voice.id === current.voice ? 'selected' : ''}`} key={voice.id} role="option" aria-selected={voice.id === current.voice}>
+                <button type="button" className={`voice-picker-bookmark ${isVoiceBookmarked(voice.id) ? 'active' : ''}`} title={isVoiceBookmarked(voice.id) ? 'Bỏ bookmark' : 'Bookmark giọng'} aria-label={isVoiceBookmarked(voice.id) ? `Bỏ bookmark ${voice.name || voice.id}` : `Bookmark ${voice.name || voice.id}`} aria-pressed={isVoiceBookmarked(voice.id)} onClick={() => toggleVoiceBookmark(voice.id)}><Bookmark size={15} fill={isVoiceBookmarked(voice.id) ? 'currentColor' : 'none'} /></button>
+                <button type="button" className="voice-picker-option-main" onClick={() => { patchCurrent({ voice: voice.id, ...(isHiiuTts ? { assignment: { ...current.assignment, model: voice.id } } : {}) }); setVoiceOpen(false); }}><span><strong>{voice.name || voice.id}</strong><small>{voice.description || `${voice.id}${voice.language ? ` · ${voice.language}` : ''}`}</small></span>{voiceSource(voice) && <em className={`voice-picker-source ${voiceSource(voice)}`}>{voiceSource(voice) === 'preset' ? 'CÓ SẴN' : 'CLONE'}</em>}</button>
+                <button type="button" className="voice-picker-option-play" aria-label={`Nghe thử ${voice.name || voice.id}`} onPointerEnter={() => primeVoice(voice.id)} onFocus={() => primeVoice(voice.id)} onClick={() => void playVoice(voice.id)}>{previewingVoice === voice.id ? <LoaderCircle size={16} className="spin" /> : <CirclePlay size={17} />}</button>
               </div>) : <div className="voice-picker-empty">Không tìm thấy voice phù hợp.</div>}</div>
             </div>}
           </div> : isEdgeTts ? <div className="provider-readonly-value"><span>Đang tải danh sách giọng Việt của Edge TTS.</span></div> : isVieneuLocal ? <div className="provider-readonly-value"><span>Chưa có giọng clone. Hãy tạo một hồ sơ trong mục Clone giọng ở thanh bên.</span></div> : isHiiuTts || isCapCutTts ? <div className="provider-readonly-value"><span>Chưa có danh sách giọng. Hãy bấm “Lấy models” ở Cài đặt để tải voice {isCapCutTts ? 'CapCut TTS' : 'HiiuTTS'}.</span></div> : <input value={current.voice} onChange={(event) => patchCurrent({ voice: event.target.value })} placeholder={isGroq ? 'Ví dụ: troy, hannah, austin' : 'Nhập Voice ID của provider'} />}

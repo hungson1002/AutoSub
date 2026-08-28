@@ -548,7 +548,6 @@ input[type="range"] { width: 100%; accent-color: var(--orange); cursor: pointer;
 .voice-picker-play { width: 42px; }
 .voice-picker-play:hover, .voice-picker-option-play:hover { color: #8ff5df; border-color: rgba(85,228,199,.65); background: rgba(85,228,199,.08); }
 .voice-picker-play:disabled { color: var(--muted-2); cursor: not-allowed; }
-.voice-picker-star { flex: none; color: #f4c84d; font-size: 15px; line-height: 1; }
 .voice-picker-selected, .voice-picker-option-main > span:last-child { min-width: 0; display: grid; gap: 3px; }
 .voice-picker-selected strong, .voice-picker-selected small, .voice-picker-option-main strong, .voice-picker-option-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .voice-picker-selected strong, .voice-picker-option-main strong { color: #e9eef5; font-size: 11px; }
@@ -563,10 +562,11 @@ input[type="range"] { width: 100%; accent-color: var(--orange); cursor: pointer;
 .voice-picker-option.selected { background: rgba(255,138,69,.1); box-shadow: inset 2px 0 var(--orange); }
 .voice-picker-option-main { min-width: 0; flex: 1; display: flex; align-items: center; gap: 9px; padding: 3px 0; border: 0; text-align: left; background: transparent; }
 .voice-picker-option-main:hover strong { color: #fff; }
+.voice-picker-bookmark { width: 27px; height: 27px; display: grid; place-items: center; flex: none; padding: 0; color: var(--muted-2); border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
+.voice-picker-bookmark:hover { color: #c7d2df; background: rgba(255,255,255,.05); }.voice-picker-bookmark.active { color: var(--orange); background: var(--orange-soft); }
 .voice-picker-source { flex: none; margin-left: auto; padding: 3px 5px; border: 1px solid rgba(85,228,199,.38); border-radius: 999px; color: #63e5cd; font: 8px Consolas, monospace; font-style: normal; letter-spacing: .04em; }
 .voice-picker-source.clone { border-color: rgba(255,138,69,.45); color: #ffad7b; }
 .voice-picker-option-play { width: 30px; height: 30px; }
-.voice-picker-check { flex: none; color: #55e4c7; }
 .voice-picker-empty { padding: 22px 12px; color: var(--muted); font-size: 10px; text-align: center; }
 .spin { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
