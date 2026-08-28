@@ -1,22 +1,65 @@
 import { spawn } from 'node:child_process';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { ProviderError } from '../adapters/errors';
+import { workdir } from './ffmpeg';
 
 type BridgeRequest = Record<string, unknown>;
 type BridgeResponse = { ok?: boolean; error?: string; [key: string]: unknown };
 
 const bridgeScript = path.join(process.cwd(), 'server', 'services', 'capcut_tts_bridge.py');
+const requirementsFile = path.join(process.cwd(), 'requirements-capcut-tts.txt');
+const runtimeRoot = path.join(workdir, 'capcut-tts', 'runtime');
+const runtimePython = process.platform === 'win32'
+  ? path.join(runtimeRoot, 'Scripts', 'python.exe')
+  : path.join(runtimeRoot, 'bin', 'python');
 
 export function capCutBridgeEnvironment(source: NodeJS.ProcessEnv = process.env) {
   return { ...source, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
 }
 
-function commands() {
+function systemPythonCommands() {
   const configured = process.env.AUTOSUB_CAPCUT_PYTHON?.trim();
-  if (configured) return [{ command: configured, args: [bridgeScript] }];
+  if (configured) return [{ command: configured, args: [] }];
   return process.platform === 'win32'
-    ? [{ command: 'py', args: ['-3', bridgeScript] }, { command: 'python', args: [bridgeScript] }]
-    : [{ command: 'python3', args: [bridgeScript] }, { command: 'python', args: [bridgeScript] }];
+    ? [{ command: 'py', args: ['-3'] }, { command: 'python', args: [] }]
+    : [{ command: 'python3', args: [] }, { command: 'python', args: [] }];
+}
+
+function runProcess(command: string, args: string[], timeoutMs = 15 * 60_000) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true, env: capCutBridgeEnvironment(), stdio: 'ignore' });
+    const timer = setTimeout(() => { child.kill(); reject(new Error('Cài CapCut TTS quá thời gian cho phép.')); }, timeoutMs);
+    child.once('error', (error) => { clearTimeout(timer); reject(error); });
+    child.once('close', (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`Lệnh cài CapCut TTS thoát với mã ${code ?? 'unknown'}.`)); });
+  });
+}
+
+let runtimePromise: Promise<string> | undefined;
+
+export function ensureCapCutTtsRuntime() {
+  if (runtimePromise) return runtimePromise;
+  runtimePromise = (async () => {
+    if (process.env.AUTOSUB_CAPCUT_PYTHON?.trim()) {
+      const command = process.env.AUTOSUB_CAPCUT_PYTHON.trim();
+      await runProcess(command, ['-c', 'import capcut_tts_api']);
+      return command;
+    }
+    if ((await stat(runtimePython).catch(() => undefined))?.isFile()) {
+      try { await runProcess(runtimePython, ['-c', 'import capcut_tts_api']); return runtimePython; } catch { /* repair below */ }
+    }
+    let lastError: unknown;
+    for (const candidate of systemPythonCommands()) {
+      try {
+        await runProcess(candidate.command, [...candidate.args, '-m', 'venv', runtimeRoot]);
+        await runProcess(runtimePython, ['-m', 'pip', 'install', '-r', requirementsFile]);
+        await runProcess(runtimePython, ['-c', 'import capcut_tts_api']);
+        return runtimePython;
+      } catch (error) { lastError = error; }
+    }
+    throw new ProviderError('Không thể tự cài CapCut TTS. Hãy kiểm tra Python 3 và kết nối mạng.', 503, lastError instanceof Error ? lastError.message : undefined);
+  })().catch((error) => { runtimePromise = undefined; throw error; });
+  return runtimePromise;
 }
 
 function runBridgeOnce(command: string, args: string[], request: BridgeRequest, signal?: AbortSignal): Promise<BridgeResponse> {
@@ -48,10 +91,9 @@ function runBridgeOnce(command: string, args: string[], request: BridgeRequest, 
 }
 
 export async function runCapCutBridge(request: BridgeRequest, signal?: AbortSignal): Promise<BridgeResponse> {
-  let lastError: unknown;
-  for (const candidate of commands()) {
-    try {
-      const response = await runBridgeOnce(candidate.command, candidate.args, request, signal);
+  const python = await ensureCapCutTtsRuntime();
+  try {
+      const response = await runBridgeOnce(python, [bridgeScript], request, signal);
       if (response.ok === false) {
         const message = String(response.error || 'CapCut bridge thất bại.');
         if (/No module named ['"]capcut_tts_api['"]/.test(message)) {
@@ -61,9 +103,6 @@ export async function runCapCutBridge(request: BridgeRequest, signal?: AbortSign
       }
       return response;
     } catch (error) {
-      lastError = error;
-      if (!(error instanceof Error) || !/ENOENT|spawn .*not found/i.test(error.message)) throw error;
-    }
+      throw error;
   }
-  throw new ProviderError('Chưa cài Python hoặc không tìm thấy Python để chạy CapCut TTS. Hãy cài Python 3.9+ và requirements-capcut-tts.txt.', 503, lastError instanceof Error ? lastError.message : undefined);
 }

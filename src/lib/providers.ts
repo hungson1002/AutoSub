@@ -145,6 +145,13 @@ export function ensureBuiltInProviders(providers: AIProvider[]) {
   return output;
 }
 
+export function isRequiredTtsProvider(provider: Pick<AIProvider, 'id' | 'providerType'>) {
+  return provider.providerType === 'vieneu-local'
+    || provider.id === 'vieneu-local'
+    || provider.providerType === 'capcut-tts'
+    || provider.id === 'capcut-tts-local';
+}
+
 /** Built-in local provider entry. It becomes usable after the bridge dependency is installed. */
 export function createCapCutTtsProvider(): AIProvider {
   return normalizeProvider({

@@ -13,6 +13,8 @@ import { reviewRoutes } from './routes/review';
 import { voiceCloneRoutes } from './routes/voiceClones';
 import { douyinRoutes } from './routes/douyin';
 import { productAdRoutes } from './routes/productAds';
+import { ensureCapCutTtsRuntime } from './services/capcutTtsBridge';
+import { ensureVieneuRuntime } from './services/vieneuRuntime';
 
 // The multipart plugin enforces the actual per-file limit. Leave a small amount
 // of room here for multipart headers and boundaries so a file exactly at 4 GiB
@@ -57,3 +59,10 @@ app.setErrorHandler((error, _request, reply) => {
 const port = Number(process.env.AUTOSUB_PORT || 8787);
 await app.listen({ port, host: '127.0.0.1' });
 console.log(`AutoSub backend listening on http://127.0.0.1:${port}`);
+void Promise.allSettled([ensureCapCutTtsRuntime(), ensureVieneuRuntime()]).then((results) => {
+  results.forEach((result, index) => {
+    const name = index === 0 ? 'CapCut TTS' : 'VieNeu';
+    if (result.status === 'fulfilled') app.log.info(`${name} runtime sẵn sàng.`);
+    else app.log.warn(`${name} chưa tự cài được: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+  });
+});

@@ -94,7 +94,7 @@ export const storage = {
   saveProviders: (v: AIProvider[]) =>
     write(
       keys.providers,
-      v.map((provider) => normalizeProvider(provider)),
+      ensureBuiltInProviders(v.map((provider) => normalizeProvider(provider))),
     ),
   settings: () =>
     normalizeSettings(
