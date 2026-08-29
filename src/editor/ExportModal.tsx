@@ -161,7 +161,7 @@ export function ExportModal({
           // and create the same two-speaker echo as the old preview.
           keepAudio: hasDub ? false : true,
           originalVolume: dubbingAudioMix?.originalVolume ?? 0.25,
-          burnSubtitles: true,
+          burnSubtitles: Boolean(style.visible),
           separateVocals: false,
           blurRegions: exportBlurRegions,
           videoEdit,
