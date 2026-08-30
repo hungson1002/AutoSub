@@ -52,6 +52,7 @@ import {
 } from "../components/TranslationSetupModal";
 import {
   cuesToAss,
+  cuesForDubbingTimeline,
   cuesToSrt,
   downloadText,
   parseSubtitle,
@@ -101,18 +102,11 @@ function applyDubbingMetadata(
   return cues.map((cue) => {
     const item = metadataById.get(cue.id);
     if (!item) return cue;
-    const timelineStartMs = Number.isFinite(item.timelineStartMs)
-      ? item.timelineStartMs
-      : cue.startMs;
-    const timelineEndMs = Number.isFinite(item.timelineEndMs)
-      ? item.timelineEndMs
-      : cue.endMs;
     return {
       ...cue,
-      startMs: timelineStartMs as number,
-      endMs: Math.max((timelineStartMs as number) + 1, timelineEndMs as number),
       // Dubbing metadata must never overwrite the user's subtitle wording.
-      // The spoken result is tracked separately on the cue for preview/export.
+      // Source timestamps also stay canonical. Preview/export read the expanded
+      // dubbing timeline from metadata without feeding it into the next job.
       dubbing: item,
     };
   });
@@ -1105,7 +1099,7 @@ export function EditorPage({
           : undefined,
         model: config?.assignment.model || "",
         voice: config?.voice || "",
-        speed: config?.speed ?? 1,
+        speed: options.slowVideoToMatchSpeech ? 1 : (config?.speed ?? 1),
         volume: config?.volume ?? 1,
       };
     });
@@ -1164,6 +1158,7 @@ export function EditorPage({
           ttsConcurrency: 3,
           llmConcurrency: 2,
           maxRetries: 3,
+          slowVideoToMatchSpeech: options.slowVideoToMatchSpeech,
           audioMix: options.audioMix,
         },
       );
@@ -1195,16 +1190,19 @@ export function EditorPage({
       onNotice(validation.errors[0] || "Subtitle không hợp lệ.", "error");
       return;
     }
+    const useRetimedTimeline = dubbingJob?.config.slowVideoToMatchSpeech === true;
+    const subtitleCues = cuesForDubbingTimeline(cues, useRetimedTimeline);
+    const retimedSuffix = useRetimedTimeline ? "-retimed" : "";
     if (format === "ass")
       downloadText(
-        "autosub.ass",
-        cuesToAss(cues, settings.subtitleStyle),
+        `autosub${retimedSuffix}.ass`,
+        cuesToAss(subtitleCues, settings.subtitleStyle),
         "text/x-ass",
       );
     else
       downloadText(
-        `autosub-${format}.srt`,
-        cuesToSrt(cues, format === "translated"),
+        `autosub-${format}${retimedSuffix}.srt`,
+        cuesToSrt(subtitleCues, format === "translated"),
         "application/x-subrip",
       );
     setSubtitleDownloadOpen(false);
@@ -1461,6 +1459,7 @@ export function EditorPage({
             dubAudioUrl={dubAudioUrl}
             audioMode={dubAudioUrl ? "dubbed" : "original"}
             dubAudioMix={dubAudioMix}
+            slowVideoToMatchSpeech={dubbingJob?.config.slowVideoToMatchSpeech === true}
             seekRequest={seekRequest}
             onTime={reportEditorTime}
             onActiveCueChange={setActiveCueId}
@@ -1528,6 +1527,7 @@ export function EditorPage({
             onRegenerateVoice={regenerateCueVoice}
             regeneratingCueId={regeneratingCueId}
             voiceReady={dubbingJob?.status === "completed"}
+            slowVideoToMatchSpeech={dubbingJob?.config.slowVideoToMatchSpeech === true}
           />
         </div>
         {panel === "style" && (
@@ -1657,6 +1657,7 @@ export function EditorPage({
             : undefined
         }
         dubbingAudioMix={dubbingJob?.config.audioMix}
+        slowVideoToMatchSpeech={dubbingJob?.config.slowVideoToMatchSpeech === true}
         onClose={() => setExportOpen(false)}
         onNotice={onNotice}
       />

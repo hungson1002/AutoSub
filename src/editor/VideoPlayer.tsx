@@ -174,6 +174,7 @@ type Props = {
     originalVolume: number;
     separateVocals?: boolean;
   };
+  slowVideoToMatchSpeech?: boolean;
   seekRequest?: { id: number; timeMs: number };
   onTime?: (ms: number) => void;
   onActiveCueChange?: (id?: string) => void;
@@ -196,6 +197,7 @@ export function VideoPlayer({
   dubAudioUrl,
   audioMode = "original",
   dubAudioMix,
+  slowVideoToMatchSpeech = false,
   seekRequest,
   onTime,
   onActiveCueChange,
@@ -254,7 +256,7 @@ export function VideoPlayer({
     trimStartMs: 0,
   });
   const effectiveVideoEdit = videoEdit || internalVideoEdit;
-  const cueIndex = useMemo(() => buildActiveCueIndex(cues), [cues]);
+  const cueIndex = useMemo(() => buildActiveCueIndex(slowVideoToMatchSpeech ? cues.map((cue) => cue.dubbing && Number.isFinite(cue.dubbing.timelineStartMs) && Number.isFinite(cue.dubbing.timelineEndMs) ? { ...cue, startMs: cue.dubbing.timelineStartMs as number, endMs: cue.dubbing.timelineEndMs as number } : cue) : cues), [cues, slowVideoToMatchSpeech]);
   const [activeCueId, setActiveCueId] = useState<string>();
   const activeCue = useMemo(
     () =>
@@ -262,14 +264,40 @@ export function VideoPlayer({
     [activeCueId, cues],
   );
   const playingDub = audioMode === "dubbed" && Boolean(dubAudioUrl);
+  const retimeCues = useMemo(() => slowVideoToMatchSpeech ? cues.flatMap((cue) => {
+    const item = cue.dubbing;
+    if (!item || !Number.isFinite(item.timelineStartMs)) return [];
+    const durationMs = Math.max(1, item.originalDurationMs);
+    return [{ sourceStartMs: (item.timelineStartMs as number) - (item.timelineShiftMs || 0), durationMs, extensionMs: Math.max(0, item.ttsDurationMs - durationMs) }];
+  }).sort((left, right) => left.sourceStartMs - right.sourceStartMs) : [], [cues, slowVideoToMatchSpeech]);
+  const retimedDurationExtensionMs = useMemo(() => retimeCues.reduce((total, cue) => total + cue.extensionMs, 0), [retimeCues]);
+  const sourceToTimelineMs = useCallback((sourceMs: number) => sourceMs + retimeCues.reduce((offset, cue) => {
+    const sourceEndMs = cue.sourceStartMs + cue.durationMs;
+    if (sourceMs >= sourceEndMs) return offset + cue.extensionMs;
+    if (sourceMs <= cue.sourceStartMs) return offset;
+    return offset + cue.extensionMs * ((sourceMs - cue.sourceStartMs) / cue.durationMs);
+  }, 0), [retimeCues]);
+  const timelineToSourceMs = useCallback((timelineMs: number) => {
+    let accumulatedExtensionMs = 0;
+    for (const cue of retimeCues) {
+      const outputStartMs = cue.sourceStartMs + accumulatedExtensionMs;
+      const outputDurationMs = cue.durationMs + cue.extensionMs;
+      if (timelineMs < outputStartMs) return Math.max(0, timelineMs - accumulatedExtensionMs);
+      if (timelineMs <= outputStartMs + outputDurationMs) return cue.sourceStartMs + ((timelineMs - outputStartMs) * cue.durationMs) / outputDurationMs;
+      accumulatedExtensionMs += cue.extensionMs;
+    }
+    return Math.max(0, timelineMs - accumulatedExtensionMs);
+  }, [retimeCues]);
+  const playbackRateAt = useCallback((sourceMs: number) => {
+    const cue = retimeCues.find((item) => sourceMs >= item.sourceStartMs && sourceMs < item.sourceStartMs + item.durationMs && item.extensionMs > 0);
+    return cue ? Math.max(0.0625, cue.durationMs / (cue.durationMs + cue.extensionMs)) : 1;
+  }, [retimeCues]);
   // The returned dub track is the single source of truth for preview. Playing
   // the source video's dialogue underneath it creates the exact two-speaker
   // echo users hear, especially for older jobs saved with original audio on.
-  const originalMixVolume = playingDub
-    ? 0
-    : dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals
-      ? dubAudioMix.originalVolume
-      : 0;
+  const originalMixVolume = dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals
+    ? dubAudioMix.originalVolume
+    : 0;
   const muteOriginal = playingDub && originalMixVolume <= 0;
   const syncActiveCue = useCallback(
     (nextTimeMs: number) => {
@@ -294,9 +322,9 @@ export function VideoPlayer({
     if (!video || !audio) return;
     audio.pause();
     if (audioMode !== "dubbed" || !dubAudioUrl) return;
-    audio.currentTime = video.currentTime;
+    audio.currentTime = sourceToTimelineMs(video.currentTime * 1000) / 1000;
     if (!video.paused) void audio.play().catch(() => undefined);
-  }, [audioMode, dubAudioUrl]);
+  }, [audioMode, dubAudioUrl, sourceToTimelineMs]);
   useEffect(() => {
     if (dubAudioRef.current) dubAudioRef.current.volume = volume;
   }, [dubAudioUrl, volume]);
@@ -333,9 +361,9 @@ export function VideoPlayer({
     dubAudioRef.current?.pause();
     setPlaying(false);
     setTime(0);
-    setDuration(asset?.durationMs || 0);
+    setDuration((asset?.durationMs || 0) + retimedDurationExtensionMs);
     syncActiveCue(0);
-  }, [asset?.url, asset?.durationMs, syncActiveCue]);
+  }, [asset?.url, asset?.durationMs, syncActiveCue, retimedDurationExtensionMs]);
   useEffect(() => {
     // A new canvas ratio gets a predictable fitted starting view. The user can
     // then zoom and pan it again without carrying offsets from the old frame.
@@ -411,23 +439,26 @@ export function VideoPlayer({
     onActiveCueChange?.(activeCueId);
   }, [activeCueId, onActiveCueChange]);
   useEffect(() => {
-    syncActiveCue((videoRef.current?.currentTime || 0) * 1000);
-  }, [syncActiveCue]);
+    syncActiveCue(sourceToTimelineMs((videoRef.current?.currentTime || 0) * 1000));
+  }, [syncActiveCue, sourceToTimelineMs]);
   useEffect(() => {
     const video = videoRef.current;
     if (!video || typeof video.requestVideoFrameCallback !== "function") return;
     let frameId = 0;
     let cancelled = false;
     const updateActiveCue: VideoFrameRequestCallback = (_now, metadata) => {
-      syncActiveCue(metadata.mediaTime * 1000);
+      const timelineMs = sourceToTimelineMs(metadata.mediaTime * 1000);
+      syncActiveCue(timelineMs);
+      const rate = playbackRateAt(metadata.mediaTime * 1000);
+      if (Math.abs(video.playbackRate - rate) > 0.001) video.playbackRate = rate;
       const audio = dubAudioRef.current;
       if (
         playingDub &&
         audio &&
         !audio.paused &&
-        dubAudioNeedsResync(metadata.mediaTime, audioRefTime(audio))
+        dubAudioNeedsResync(timelineMs / 1000, audioRefTime(audio))
       )
-        audio.currentTime = metadata.mediaTime;
+        audio.currentTime = timelineMs / 1000;
       if (!cancelled)
         frameId = video.requestVideoFrameCallback(updateActiveCue);
     };
@@ -436,17 +467,17 @@ export function VideoPlayer({
       cancelled = true;
       video.cancelVideoFrameCallback(frameId);
     };
-  }, [asset?.url, playingDub, syncActiveCue]);
+  }, [asset?.url, playingDub, syncActiveCue, sourceToTimelineMs, playbackRateAt]);
   useEffect(() => {
     if (!videoRef.current || !seekRequest) return;
-    const next = seekRequest.timeMs / 1000;
+    const next = timelineToSourceMs(seekRequest.timeMs) / 1000;
     setTime(seekRequest.timeMs);
     syncActiveCue(seekRequest.timeMs);
     if (Math.abs(videoRef.current.currentTime - next) > 0.001)
       videoRef.current.currentTime = next;
     if (audioMode === "dubbed" && dubAudioUrl && dubAudioRef.current)
-      dubAudioRef.current.currentTime = next;
-  }, [seekRequest?.id, audioMode, dubAudioUrl, syncActiveCue]);
+      dubAudioRef.current.currentTime = seekRequest.timeMs / 1000;
+  }, [seekRequest?.id, audioMode, dubAudioUrl, syncActiveCue, timelineToSourceMs]);
 
   const toggle = () => {
     if (!videoRef.current) return;
@@ -462,7 +493,7 @@ export function VideoPlayer({
         video.currentTime = effectiveVideoEdit.trimStartMs / 1000;
       if (audioMode === "dubbed" && dubAudioUrl && audio) {
         audio.pause();
-        audio.currentTime = video.currentTime;
+        audio.currentTime = sourceToTimelineMs(video.currentTime * 1000) / 1000;
       }
       void video
         .play()
@@ -474,7 +505,8 @@ export function VideoPlayer({
       setPlaying(false);
     }
   };
-  const reportTime = (next: number) => {
+  const reportTime = (sourceTimeMs: number) => {
+    const next = sourceToTimelineMs(sourceTimeMs);
     setTime(next);
     syncActiveCue(next);
     if (
@@ -489,16 +521,17 @@ export function VideoPlayer({
   };
   const seek = (next: number) => {
     if (!videoRef.current) return;
-    videoRef.current.currentTime = next / 1000;
+    videoRef.current.currentTime = timelineToSourceMs(next) / 1000;
     if (audioMode === "dubbed" && dubAudioUrl && dubAudioRef.current)
       dubAudioRef.current.currentTime = next / 1000;
-    reportTime(next);
+    reportTime(timelineToSourceMs(next));
   };
   const syncVideoDuration = (video: HTMLVideoElement) => {
     const nextDuration = videoDurationMs(video);
     if (nextDuration === undefined) return;
+    const retimedDuration = nextDuration + retimedDurationExtensionMs;
     setDuration((current) =>
-      Math.abs(current - nextDuration) < 0.5 ? current : nextDuration,
+      Math.abs(current - retimedDuration) < 0.5 ? current : retimedDuration,
     );
   };
   const beginRoiDrag = (event: PointerEvent<HTMLElement>, kind: DragKind) => {
@@ -996,7 +1029,7 @@ export function VideoPlayer({
 
   const aspectRatio =
     effectiveVideoEdit.aspectRatio === "original"
-      ? "16 / 9"
+      ? `${videoSize.width} / ${videoSize.height}`
       : effectiveVideoEdit.aspectRatio.replace(":", " / ");
   const canvasWidth =
     effectiveVideoEdit.aspectRatio === "9:16"
@@ -1074,11 +1107,12 @@ export function VideoPlayer({
                       }}
                       onPlaying={(event) => {
                         setPlaying(true);
+                        event.currentTarget.playbackRate = playbackRateAt(event.currentTarget.currentTime * 1000);
                         const audio = dubAudioRef.current;
                         if (!playingDub || !audio) return;
                         audio.pause();
-                        audio.currentTime = event.currentTarget.currentTime;
-                        audio.playbackRate = event.currentTarget.playbackRate;
+                        audio.currentTime = sourceToTimelineMs(event.currentTarget.currentTime * 1000) / 1000;
+                        audio.playbackRate = 1;
                         void audio.play().catch(() => undefined);
                       }}
                       onWaiting={() => dubAudioRef.current?.pause()}
@@ -1087,15 +1121,11 @@ export function VideoPlayer({
                       onSeeked={(event) => {
                         const audio = dubAudioRef.current;
                         if (!playingDub || !audio) return;
-                        audio.currentTime = event.currentTarget.currentTime;
+                        audio.currentTime = sourceToTimelineMs(event.currentTarget.currentTime * 1000) / 1000;
                         if (!event.currentTarget.paused)
                           void audio.play().catch(() => undefined);
                       }}
-                      onRateChange={(event) => {
-                        if (dubAudioRef.current)
-                          dubAudioRef.current.playbackRate =
-                            event.currentTarget.playbackRate;
-                      }}
+                      onRateChange={() => { if (dubAudioRef.current) dubAudioRef.current.playbackRate = 1; }}
                       onPause={() => {
                         dubAudioRef.current?.pause();
                         setPlaying(false);

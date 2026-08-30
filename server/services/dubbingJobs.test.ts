@@ -5,7 +5,7 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { ADAPTIVE_FIT_VERSION, buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFadeFilter, cueBoundaryFades, dubbingRewriteWordLimit, effectiveTtsConcurrency, fallbackTempoFilter, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, parseAudioIntegrity, planAdaptiveCueTempos, planDubbingTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, shouldAttemptDubbingRewrite, shouldFallbackDubbingRewrite, speechTrimFilter, startDubbingJob, tempoFilter, timeStretchIntroducedArtifacts } from './dubbingJobs';
+import { ADAPTIVE_FIT_VERSION, buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, createDubbingJob, cueBoundaryFadeFilter, cueBoundaryFades, dubbingRewriteWordLimit, effectiveTtsConcurrency, fallbackTempoFilter, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, parseAudioIntegrity, planAdaptiveCueTempos, planDubbingTimeline, planSlowVideoTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, shouldAttemptDubbingRewrite, shouldFallbackDubbingRewrite, speechTrimFilter, startDubbingJob, tempoFilter, timeStretchIntroducedArtifacts } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
@@ -107,6 +107,19 @@ test('dialogue clusters spend false subtitle gaps and spread mild tempo without 
   assert.ok(timeline[1].timelineStartMs - timeline[0].timelineEndMs < 300);
   assert.ok(Math.max(...timeline.slice(0, 3).map((cue) => cue.timelineShiftMs)) <= 300);
   assert.ok(timeline[3].timelineStartMs - timeline[2].timelineEndMs >= 1_000);
+});
+
+test('slow-video mode keeps natural speech duration and shifts following cues by video extensions', () => {
+  const timeline = planSlowVideoTimeline([
+    { cueId: 'first', startMs: 1_000, endMs: 2_000, audioDurationMs: 1_600 },
+    { cueId: 'second', startMs: 3_000, endMs: 4_000, audioDurationMs: 800 },
+    { cueId: 'third', startMs: 5_000, endMs: 6_000, audioDurationMs: 1_250 },
+  ]);
+  assert.deepEqual(timeline.map((cue) => ({ id: cue.cueId, start: cue.timelineStartMs, end: cue.timelineEndMs, shift: cue.timelineShiftMs })), [
+    { id: 'first', start: 1_000, end: 2_600, shift: 0 },
+    { id: 'second', start: 3_600, end: 4_600, shift: 600 },
+    { id: 'third', start: 5_600, end: 6_850, shift: 600 },
+  ]);
 });
 
 test('CapCut jobs are serialized and narration is sped up without padding or trimming', async () => {

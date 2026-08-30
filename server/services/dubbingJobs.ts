@@ -35,6 +35,7 @@ export interface DubbingJobConfig {
   ttsConcurrency: number;
   llmConcurrency: number;
   maxRetries: number;
+  slowVideoToMatchSpeech: boolean;
   audioMix: { mode: 'mute' | 'original' | 'background'; keepOriginal: boolean; originalVolume: number; separateVocals: boolean };
   rewriteProviderRef?: string;
   rewriteModel?: string;
@@ -122,6 +123,7 @@ interface CreateJobInput {
   ttsConcurrency?: number;
   llmConcurrency?: number;
   maxRetries?: number;
+  slowVideoToMatchSpeech?: boolean;
   audioMix?: { components?: Partial<LegacySourceAudioComponents>; mode?: 'mute' | 'original' | 'background'; keepOriginal?: boolean; originalVolume?: number; separateVocals?: boolean };
   rewrite?: { provider?: AIProvider; model?: string };
 }
@@ -274,6 +276,22 @@ export function planDubbingTimeline(items: DubbingTimelineItem[], joinedCueGapMs
     previousEndMs = timelineEndMs;
   }
   return planned;
+}
+
+export function planSlowVideoTimeline(items: DubbingTimelineItem[]): PlannedDubbingTimelineItem[] {
+  let accumulatedExtensionMs = 0;
+  return [...items]
+    .sort((left, right) => left.startMs - right.startMs)
+    .map((item) => {
+      const cueDurationMs = Math.max(1, item.endMs - item.startMs);
+      const audioDurationMs = Math.max(1, item.audioDurationMs);
+      const timelineStartMs = item.startMs + accumulatedExtensionMs;
+      const extensionMs = Math.max(0, audioDurationMs - cueDurationMs);
+      const timelineEndMs = timelineStartMs + Math.max(cueDurationMs, audioDurationMs);
+      const planned = { ...item, timelineStartMs, timelineEndMs, timelineShiftMs: accumulatedExtensionMs };
+      accumulatedExtensionMs += extensionMs;
+      return planned;
+    });
 }
 
 export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: number = DEFAULTS.hardSpeedMax, _pressuredMaxSpeed: number = DEFAULTS.pressuredSpeedMax) {
@@ -633,6 +651,7 @@ async function ensurePreparedSpeech(rawPath: string, speechPath: string, signal:
 
 export async function createDubbingJob(input: CreateJobInput) {
   if (!input.cues?.length) throw new Error('Chưa có cue nào để tạo dubbing job.');
+  if (input.slowVideoToMatchSpeech && input.audioMix?.separateVocals) throw new Error('Chế độ video chậm theo cue chưa hỗ trợ tách nhạc nền. Hãy giữ toàn bộ audio gốc hoặc tắt audio gốc.');
   const id = `dub-${Date.now()}-${createHash('sha1').update(`${Math.random()}-${Date.now()}`).digest('hex').slice(0, 8)}`;
   const rewriteProvider = input.rewrite?.provider;
   const rewriteModel = input.rewrite?.model?.trim();
@@ -643,6 +662,7 @@ export async function createDubbingJob(input: CreateJobInput) {
     ttsConcurrency: effectiveTtsConcurrency(input.cues, input.ttsConcurrency),
     llmConcurrency: clamp(Math.round(input.llmConcurrency || DEFAULTS.llmConcurrency), 1, 8),
     maxRetries: clamp(Math.round(input.maxRetries ?? DEFAULTS.maxRetries), 0, 3),
+    slowVideoToMatchSpeech: input.slowVideoToMatchSpeech === true,
     audioMix: normalizeAudioMix(input.audioMix),
     ...(rewriteProviderRef && rewriteModel ? { rewriteProviderRef, rewriteModel } : {}),
   };
@@ -895,13 +915,15 @@ class DubbingRunner {
         adaptiveFitVersion: 0,
       };
     }
-    const adaptiveTempoById = new Map(planAdaptiveCueTempos(completed.map((cue) => ({
+    const adaptiveTempoById = new Map((this.job.config.slowVideoToMatchSpeech
+      ? completed.map((cue) => ({ cueId: cue.id, tempo: 1 }))
+      : planAdaptiveCueTempos(completed.map((cue) => ({
       cueId: cue.id,
       startMs: cue.input.startMs,
       endMs: cue.input.endMs,
       audioDurationMs: cue.metadata?.ttsDurationMs || cue.input.endMs - cue.input.startMs,
       targetDurationMs: cue.metadata?.targetDurationMs || cue.input.endMs - cue.input.startMs,
-    }))).map((item) => [item.cueId, item.tempo]));
+    })))).map((item) => [item.cueId, item.tempo]));
     for (const cue of completed) {
       if (!cue.audioFile || !cue.metadata || cue.metadata.adaptiveFitVersion === ADAPTIVE_FIT_VERSION) continue;
       const tempo = adaptiveTempoById.get(cue.id) || 1;
@@ -959,12 +981,15 @@ class DubbingRunner {
       };
       await saveCue(this.job.id, cue);
     }
-    const planById = new Map(planDubbingTimeline(completed.map((cue) => ({
+    const timelineItems = completed.map((cue) => ({
       cueId: cue.id,
       startMs: cue.input.startMs,
       endMs: cue.input.endMs,
       audioDurationMs: cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs,
-    }))).map((item) => [item.cueId, item]));
+    }));
+    const planById = new Map((this.job.config.slowVideoToMatchSpeech
+      ? planSlowVideoTimeline(timelineItems)
+      : planDubbingTimeline(timelineItems)).map((item) => [item.cueId, item]));
     const metadataWrites: Array<Promise<void>> = [];
     const metadataWriteSemaphore = new Semaphore(16);
     for (const cue of completed) {

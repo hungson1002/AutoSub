@@ -12,18 +12,24 @@ type SubtitleCardProps = {
   onRegenerateVoice?: (cue: SubtitleCue) => void;
   regenerating: boolean;
   voiceReady: boolean;
+  slowVideoToMatchSpeech: boolean;
 };
 
-const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, onChange, onDelete, onRegenerateVoice, regenerating, voiceReady }: SubtitleCardProps) {
+const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, onChange, onDelete, onRegenerateVoice, regenerating, voiceReady, slowVideoToMatchSpeech }: SubtitleCardProps) {
   const stats = subtitleStats(cue);
+  const hasRetimedCue = slowVideoToMatchSpeech
+    && Number.isFinite(cue.dubbing?.timelineStartMs)
+    && Number.isFinite(cue.dubbing?.timelineEndMs);
+  const displayStartMs = hasRetimedCue ? cue.dubbing!.timelineStartMs! : cue.startMs;
+  const displayEndMs = hasRetimedCue ? cue.dubbing!.timelineEndMs! : cue.endMs;
 
   return <article className={`cue-card ${highlighted ? 'selected' : ''} ${cue.enabled ? '' : 'disabled'}`} onClick={() => onSelect(cue.id)}>
     <div className="cue-meta">
       <span className="cue-index">#{String(cue.index).padStart(2, '0')}</span>
       <button type="button" className={`cue-enable ${cue.enabled ? 'active' : ''}`} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { enabled: !cue.enabled }); }}>{cue.enabled ? 'ON' : 'OFF'}</button>
       <button className="cue-delete" onClick={(event) => { event.stopPropagation(); onDelete(cue.id); }} aria-label="Xóa cue"><Trash2 size={14} /></button>
-      <span>{formatClock(cue.startMs)} → {formatClock(cue.endMs)}</span>
-      <small>{stats.duration} ms</small>
+      <span title={hasRetimedCue ? 'Thời gian trên video đã làm chậm' : undefined}>{formatClock(displayStartMs)} → {formatClock(displayEndMs)}</span>
+      <small>{Math.max(0, displayEndMs - displayStartMs)} ms</small>
       {cue.dubbing && <span className="cue-voice-badge">VOICE {cue.dubbing.speedApplied.toFixed(2)}×</span>}
     </div>
     <div className="cue-row">
@@ -35,8 +41,8 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
       <textarea value={cue.translatedText} placeholder="Chưa có bản dịch" onChange={(event) => onChange(cue.id, { translatedText: event.target.value })} onClick={(event) => event.stopPropagation()} />
     </div>
     <div className="cue-bottom">
-      <label>START <input value={cue.startMs} type="number" onChange={(event) => onChange(cue.id, { startMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
-      <label>END <input value={cue.endMs} type="number" onChange={(event) => onChange(cue.id, { endMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
+      <label>{hasRetimedCue ? 'START GỐC' : 'START'} <input value={cue.startMs} type="number" onChange={(event) => onChange(cue.id, { startMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
+      <label>{hasRetimedCue ? 'END GỐC' : 'END'} <input value={cue.endMs} type="number" onChange={(event) => onChange(cue.id, { endMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
       <div className={`cps ${stats.cps >= 20 ? 'danger' : stats.cps >= 17 ? 'warn' : ''}`}>CPS <b>{stats.cps.toFixed(1)}</b></div>
       <div className="voice-pills">
         {(['G1', 'G2', 'G3'] as const).map((group) => <button key={group} className={cue.voiceGroup === group ? 'active' : ''} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { voiceGroup: group }); }}>{group}</button>)}
@@ -49,7 +55,7 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
 const CUE_SLOT_HEIGHT = 232;
 const OVERSCAN_ITEMS = 5;
 
-export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, selectedId, onSelect, onChange, onDelete, onRegenerateVoice, regeneratingCueId, voiceReady = false }: { cues: SubtitleCue[]; activeCueId?: string; selectedId?: string; onSelect: (id: string) => void; onChange: (id: string, patch: Partial<SubtitleCue>) => void; onDelete: (id: string) => void; onRegenerateVoice?: (cue: SubtitleCue) => void; regeneratingCueId?: string; voiceReady?: boolean }) {
+export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, selectedId, onSelect, onChange, onDelete, onRegenerateVoice, regeneratingCueId, voiceReady = false, slowVideoToMatchSpeech = false }: { cues: SubtitleCue[]; activeCueId?: string; selectedId?: string; onSelect: (id: string) => void; onChange: (id: string, patch: Partial<SubtitleCue>) => void; onDelete: (id: string) => void; onRegenerateVoice?: (cue: SubtitleCue) => void; regeneratingCueId?: string; voiceReady?: boolean; slowVideoToMatchSpeech?: boolean }) {
   const listRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<number | undefined>(undefined);
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 600 });
@@ -107,6 +113,7 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
         onRegenerateVoice={onRegenerateVoice}
         regenerating={regeneratingCueId === cue.id}
         voiceReady={voiceReady}
+        slowVideoToMatchSpeech={slowVideoToMatchSpeech}
       /></div>)}
     </div>}
   </div>;

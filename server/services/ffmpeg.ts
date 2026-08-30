@@ -86,10 +86,14 @@ export async function preferredH264Encoder(): Promise<H264Encoder> {
     if (process.platform !== 'win32' && configured !== 'h264_amf') return 'libx264';
     const benchmark = async (encoderArgs: string[]) => {
       const startedAt = performance.now();
-      await run('ffmpeg', [
-        '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=1280x720:r=30', '-t', '2',
-        ...encoderArgs, '-pix_fmt', 'yuv420p', '-f', 'null', '-',
-      ]);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8_000);
+      try {
+        await run('ffmpeg', [
+          '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=1280x720:r=30', '-t', '2',
+          ...encoderArgs, '-pix_fmt', 'yuv420p', '-f', 'null', '-',
+        ], controller.signal);
+      } finally { clearTimeout(timeout); }
       return performance.now() - startedAt;
     };
     try {

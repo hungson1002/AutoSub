@@ -13,7 +13,7 @@ import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { run, ensureWorkdir, preferredH264Encoder } from "../services/ffmpeg";
 import { getDubbingResult } from "../services/dubbingJobs";
-import { buildExportAudioFilter } from "../services/exportAudio";
+import { buildExportAudioFilter, buildRetimedSourceAudioFilter } from "../services/exportAudio";
 import {
   cleanupUploadSession,
   createTemporarySession,
@@ -87,6 +87,88 @@ const uploadError = (error: unknown) =>
 const ffmpegPath = (file: string) =>
   file.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
 const assField = (value: string) => value.replace(/[\r\n,]/g, " ").trim();
+
+async function appendComplexFilter(
+  args: string[],
+  filter: string,
+  directory: string,
+  name: string,
+) {
+  // Windows limits the complete CreateProcess command line to roughly 32 KiB.
+  // A retimed long-form video can contain thousands of cue expressions, so
+  // passing the graph inline makes spawn fail with ENAMETOOLONG before FFmpeg
+  // even starts. FFmpeg's script option keeps the command itself constant.
+  if (process.platform === "win32" && filter.length > 8_000) {
+    const script = path.join(directory, `${name}-filter.ffscript`);
+    await writeFile(script, filter, "utf8");
+    // FFmpeg 7+ replaced the deprecated -filter_complex_script spelling with
+    // the generic file-loading form: -/filter_complex <path>.
+    args.push("-/filter_complex", script);
+    return;
+  }
+  args.push("-filter_complex", filter);
+}
+
+export function buildSlowVideoSetpts(metadata: Array<{
+  originalDurationMs: number;
+  ttsDurationMs: number;
+  timelineStartMs?: number;
+  timelineShiftMs?: number;
+}>) {
+  const terms = metadata.flatMap((cue) => {
+    const duration = Math.max(1, Number(cue.originalDurationMs) || 1) / 1000;
+    const speech = Math.max(1, Number(cue.ttsDurationMs) || 1) / 1000;
+    const extension = Math.max(0, speech - duration);
+    if (extension < 0.001 || !Number.isFinite(cue.timelineStartMs)) return [];
+    const start = Math.max(0, (Number(cue.timelineStartMs) - Number(cue.timelineShiftMs || 0)) / 1000);
+    const end = start + duration;
+    const slope = extension / duration;
+    return [`if(between(PTS*TB,${start.toFixed(6)},${end.toFixed(6)}),(PTS*TB-${start.toFixed(6)})*${slope.toFixed(9)},if(gte(PTS*TB,${end.toFixed(6)}),${extension.toFixed(6)},0))`];
+  });
+  return terms.length ? `setpts='PTS-STARTPTS+(${terms.join('+')})/TB'` : 'setpts=PTS-STARTPTS';
+}
+
+export function buildSlowVideoFilter(
+  input: string,
+  metadata: Array<{
+    originalDurationMs: number;
+    ttsDurationMs: number;
+    timelineStartMs?: number;
+    timelineShiftMs?: number;
+  }>,
+  output = "slowDubVideo",
+) {
+  const slowed = metadata.flatMap((cue) => {
+    const durationMs = Math.max(1, Number(cue.originalDurationMs) || 1);
+    const speechMs = Math.max(1, Number(cue.ttsDurationMs) || 1);
+    if (speechMs <= durationMs || !Number.isFinite(cue.timelineStartMs)) return [];
+    const startMs = Math.max(0, Number(cue.timelineStartMs) - Number(cue.timelineShiftMs || 0));
+    return [{ startMs, endMs: startMs + durationMs, scale: speechMs / durationMs }];
+  }).sort((left, right) => left.startMs - right.startMs);
+  if (!slowed.length) return `[${input}]setpts=PTS-STARTPTS[${output}]`;
+
+  const segments: Array<{ endMs?: number; scale: number }> = [];
+  let cursorMs = 0;
+  for (const cue of slowed) {
+    const startMs = Math.max(cursorMs, cue.startMs);
+    const endMs = Math.max(startMs, cue.endMs);
+    if (startMs > cursorMs) segments.push({ endMs: startMs, scale: 1 });
+    if (endMs > startMs) segments.push({ endMs, scale: cue.scale });
+    cursorMs = endMs;
+  }
+  segments.push({ scale: 1 });
+
+  const timestamps = segments.slice(0, -1).map((segment) => ((segment.endMs || 0) / 1000).toFixed(6)).join("|");
+  const sources = segments.map((_segment, index) => `[retimeVideoSrc${index}]`).join("");
+  const parts = segments.map((_segment, index) => `[retimeVideoPart${index}]`).join("");
+  const filters = [`[${input}]segment=timestamps=${timestamps}${sources}`];
+  segments.forEach((segment, index) => {
+    const scale = Math.abs(segment.scale - 1) < 0.0000005 ? "" : `*${segment.scale.toFixed(9)}`;
+    filters.push(`[retimeVideoSrc${index}]setpts=(PTS-STARTPTS)${scale}[retimeVideoPart${index}]`);
+  });
+  filters.push(`${parts}concat=n=${segments.length}:v=1:a=0[${output}]`);
+  return filters.join(";");
+}
 
 /**
  * The browser can give an uploaded font any CSS family name.  libass cannot:
@@ -245,11 +327,13 @@ export async function exportRoutes(app: FastifyInstance) {
       dubbingJobId?: string;
       trimStartMs?: number;
       trimEndMs?: number;
+      audioSource?: "dub" | "original" | "original-retimed";
     };
     const uploadId =
       typeof body.uploadId === "string" ? body.uploadId.trim() : "";
     const dubbingJobId =
       typeof body.dubbingJobId === "string" ? body.dubbingJobId.trim() : "";
+    const audioSource = body.audioSource || (dubbingJobId ? "dub" : "original");
     const trimStartMs = Math.max(0, Math.round(Number(body.trimStartMs) || 0));
     const trimEndValue = Number(body.trimEndMs);
     const trimEndMs =
@@ -261,11 +345,21 @@ export async function exportRoutes(app: FastifyInstance) {
         .code(400)
         .send({ error: "Điểm kết thúc phải nằm sau điểm bắt đầu." });
     }
+    if (audioSource === "original-retimed" && (trimStartMs > 0 || trimEndMs !== undefined)) {
+      return reply.code(400).send({ error: "Audio gốc đã khớp video chậm chưa hỗ trợ cắt đầu/cuối cùng lúc." });
+    }
 
     let input: string;
     let completedDub = false;
+    let retimeMetadata: Awaited<ReturnType<typeof getDubbingResult>>["metadata"] | undefined;
     try {
-      if (dubbingJobId) {
+      if (audioSource === "original-retimed") {
+        if (!uploadId || !dubbingJobId) throw new Error("Cần video nguồn và dubbing job để xuất audio gốc đã giãn.");
+        input = (await resolveUpload(uploadId)).absolutePath;
+        const result = await getDubbingResult(dubbingJobId);
+        if (!result.job.config.slowVideoToMatchSpeech) throw new Error("Dubbing job này không dùng chế độ làm chậm video theo cue.");
+        retimeMetadata = result.metadata;
+      } else if (dubbingJobId) {
         input = (await getDubbingResult(dubbingJobId)).audioFile;
         completedDub = true;
       } else if (uploadId) {
@@ -302,16 +396,20 @@ export async function exportRoutes(app: FastifyInstance) {
     const output = path.join(exportDir, `${job}.wav`);
     const stagedOutput = path.join(exportDir, `${job}.rendering.wav`);
     const requestAbort = new AbortController();
-    const abortOnClientClose = () => requestAbort.abort();
-    request.raw.once("aborted", abortOnClientClose);
     let responseSent = false;
+    const abortOnClientClose = () => { if (!responseSent) requestAbort.abort(); };
+    request.raw.once("aborted", abortOnClientClose);
+    reply.raw.once("close", abortOnClientClose);
 
     try {
       const args = ["-y", "-i", input];
       if (trimStartMs > 0) args.push("-ss", (trimStartMs / 1000).toFixed(3));
       if (trimEndMs !== undefined)
         args.push("-t", ((trimEndMs - trimStartMs) / 1000).toFixed(3));
-      args.push("-map", "0:a:0", "-vn");
+      if (retimeMetadata) {
+        await appendComplexFilter(args, buildRetimedSourceAudioFilter(retimeMetadata), exportDir, job);
+        args.push("-map", "[retimedOriginal]", "-vn");
+      } else args.push("-map", "0:a:0", "-vn");
       args.push("-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", stagedOutput);
       await run("ffmpeg", args, requestAbort.signal);
       const rendered = await stat(stagedOutput);
@@ -346,6 +444,7 @@ export async function exportRoutes(app: FastifyInstance) {
       return reply.code(500).send({ error: friendly });
     } finally {
       request.raw.off("aborted", abortOnClientClose);
+      reply.raw.off("close", abortOnClientClose);
       await Promise.all(
         [stagedOutput, responseSent ? undefined : output]
           .filter((file): file is string => Boolean(file))
@@ -483,10 +582,16 @@ export async function exportRoutes(app: FastifyInstance) {
     });
     let jobDubPath: string | undefined;
     let jobDubIncludesBackground = false;
+    let jobKeepOriginal = false;
+    let jobOriginalVolume: number | undefined;
+    let slowVideoMetadata: Awaited<ReturnType<typeof getDubbingResult>>['metadata'] | undefined;
     if (options.dubbingJobId) {
       try {
         const result = await getDubbingResult(options.dubbingJobId);
         jobDubPath = result.audioFile;
+        if (result.job.config.slowVideoToMatchSpeech) slowVideoMetadata = result.metadata;
+        jobKeepOriginal = Boolean(result.job.config.audioMix.keepOriginal && !result.job.config.audioMix.separateVocals);
+        jobOriginalVolume = result.job.config.audioMix.originalVolume;
         jobDubIncludesBackground = Boolean(
           result.job.config.audioMix.keepOriginal &&
             result.job.config.audioMix.separateVocals,
@@ -509,10 +614,11 @@ export async function exportRoutes(app: FastifyInstance) {
     const stagedOutput = path.join(uploadDir, `${job}.rendering.mp4`);
     const separationDir = path.join(uploadDir, `${job}-stems`);
     const requestAbort = new AbortController();
-    const abortOnClientClose = () => requestAbort.abort();
-    request.raw.once("aborted", abortOnClientClose);
-    let responseStream: ReturnType<typeof createReadStream> | undefined;
     let responseSent = false;
+    const abortOnClientClose = () => { if (!responseSent) requestAbort.abort(); };
+    request.raw.once("aborted", abortOnClientClose);
+    reply.raw.once("close", abortOnClientClose);
+    let responseStream: ReturnType<typeof createReadStream> | undefined;
 
     try {
       const requestedFamily = fontFamilyFromAss(ass || "");
@@ -544,6 +650,14 @@ export async function exportRoutes(app: FastifyInstance) {
       const regions = options.blurRegions || [];
       const filters: string[] = [];
       let current = "0:v";
+
+      if (slowVideoMetadata?.length) {
+        if (trimStartMs > 0 || trimEndMs !== undefined) {
+          throw new Error("Chế độ làm chậm video theo cue chưa hỗ trợ cắt đầu/cuối cùng lúc. Hãy bỏ phạm vi cắt rồi xuất lại.");
+        }
+        filters.push(buildSlowVideoFilter(current, slowVideoMetadata));
+        current = "slowDubVideo";
+      }
 
       const requestedCrop = options.videoEdit?.crop;
       if (requestedCrop) {
@@ -773,13 +887,17 @@ export async function exportRoutes(app: FastifyInstance) {
         hasDub,
         dubInputIndex,
         backgroundInputIndex,
-        keepAudio: options.keepAudio,
-        originalVolume: options.originalVolume,
+        keepAudio: options.keepAudio || jobKeepOriginal,
+        originalVolume: jobOriginalVolume ?? options.originalVolume,
         jobDubIncludesBackground,
+        originalInputLabel: slowVideoMetadata?.length && (options.keepAudio || jobKeepOriginal) ? "retimedOriginal" : "0:a",
       });
+      if (slowVideoMetadata?.length && (options.keepAudio || jobKeepOriginal)) {
+        filters.unshift(buildRetimedSourceAudioFilter(slowVideoMetadata));
+      }
       if (audio) filters.push(audio);
 
-      if (filters.length) args.push("-filter_complex", filters.join(";"));
+      if (filters.length) await appendComplexFilter(args, filters.join(";"), uploadDir, job);
       args.push("-map", copyVideoStream ? "0:v" : "[videoout]");
       if (audio) args.push("-map", "[audioout]");
       if (scaledOutput) args.push("-s", scaledOutput);
@@ -805,12 +923,6 @@ export async function exportRoutes(app: FastifyInstance) {
       }
       if (audio) args.push("-c:a", "aac", "-shortest");
       else args.push("-an");
-      if (trimDurationSeconds !== undefined)
-        args.push("-t", trimDurationSeconds.toFixed(3));
-      // The file is downloaded only after a successful encode, so a second
-      // full-file faststart relocation is unnecessary. The staged file is
-      // validated and atomically renamed before it is sent to the browser.
-      args.push("-progress", "pipe:2", "-nostats", stagedOutput);
 
       const durationProbe = await run(
         "ffprobe",
@@ -838,6 +950,19 @@ export async function exportRoutes(app: FastifyInstance) {
           sourceDurationMs - trimStartMs,
         ),
       );
+      const retimeExtensionMs = slowVideoMetadata?.reduce(
+        (total, cue) => total + Math.max(0, Number(cue.ttsDurationMs) - Number(cue.originalDurationMs)),
+        0,
+      ) || 0;
+      const renderDurationMs = durationMs + retimeExtensionMs;
+      // Logo inputs loop and padded audio is intentionally unbounded. Always
+      // provide the finite output duration so `-shortest` cannot wait forever
+      // after the source video has ended.
+      args.push("-t", (renderDurationMs / 1000).toFixed(3));
+      // The file is downloaded only after a successful encode, so a second
+      // full-file faststart relocation is unnecessary. The staged file is
+      // validated and atomically renamed before it is sent to the browser.
+      args.push("-progress", "pipe:2", "-nostats", stagedOutput);
       let progressBuffer = "";
       let renderSpeed = "";
       let renderStalled = false;
@@ -879,7 +1004,7 @@ export async function exportRoutes(app: FastifyInstance) {
               : `${renderer} đang render video và âm thanh`;
             setExportProgress(exportId, {
               percent: Math.round(
-                Math.min(96, Math.max(45, 45 + (renderedMs / durationMs) * 51)),
+                Math.min(96, Math.max(45, 45 + (renderedMs / renderDurationMs) * 51)),
               ),
               stage,
               status: "running",
@@ -944,6 +1069,16 @@ export async function exportRoutes(app: FastifyInstance) {
           "FFmpeg tạo file MP4 chưa hoàn chỉnh; AutoSub đã chặn tải file lỗi. Hãy xuất lại video.",
         );
       }
+      const expectedDurationSeconds = renderDurationMs / 1000;
+      const minimumCompleteDuration = Math.max(
+        0,
+        expectedDurationSeconds - Math.max(3, expectedDurationSeconds * 0.001),
+      );
+      if (renderedDuration < minimumCompleteDuration) {
+        throw new Error(
+          `FFmpeg chỉ render được ${renderedDuration.toFixed(1)}s / ${expectedDurationSeconds.toFixed(1)}s; AutoSub đã chặn tải video bị cắt ngắn.`,
+        );
+      }
       setExportProgress(exportId, {
         percent: 99,
         stage: "File hợp lệ, đang hoàn tất tải xuống",
@@ -993,6 +1128,7 @@ export async function exportRoutes(app: FastifyInstance) {
       return reply.code(500).send({ error: friendly });
     } finally {
       request.raw.off("aborted", abortOnClientClose);
+      reply.raw.off("close", abortOnClientClose);
       await Promise.all(
         [assFile, stagedOutput, responseSent ? undefined : output]
           .filter((file): file is string => Boolean(file))

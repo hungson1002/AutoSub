@@ -11,6 +11,7 @@ import { Modal } from "../components/Modal";
 import { Check, Download } from "../components/Icons";
 import {
   cuesToAss,
+  cuesForDubbingTimeline,
   cuesToSrt,
   downloadText,
   validateCues,
@@ -24,8 +25,13 @@ function saveBlob(name: string, blob: Blob) {
   link.href = url;
   link.download = name;
   link.click();
-  URL.revokeObjectURL(url);
+  // Keep the object URL alive while Windows/browser still has a Save As
+  // dialog open. Immediate revocation can discard a large completed download.
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
+
+const renderedVideoName = () =>
+  `autosub-final-${new Date().toISOString().replace(/[:.]/g, "-")}.mp4`;
 
 export function ExportModal({
   open,
@@ -39,6 +45,7 @@ export function ExportModal({
   dubTrack,
   dubbingJobId,
   dubbingAudioMix,
+  slowVideoToMatchSpeech = false,
   onClose,
   onNotice,
 }: {
@@ -57,15 +64,17 @@ export function ExportModal({
     originalVolume: number;
     separateVocals?: boolean;
   };
+  slowVideoToMatchSpeech?: boolean;
   onClose: () => void;
   onNotice?: (message: string, kind?: "success" | "error") => void;
 }) {
   const [format, setFormat] = useState<
-    "translated" | "original" | "ass" | "video" | "audio"
+    "translated" | "original" | "ass" | "video" | "audio" | "retimed-original-audio"
   >("translated");
   const [working, setWorking] = useState(false);
   const [renderProgress, setRenderProgress] = useState<number | undefined>(0);
   const [renderStage, setRenderStage] = useState("Đang chuẩn bị render");
+  const [renderedVideo, setRenderedVideo] = useState<Blob>();
   const hasDub = Boolean(dubTrack || dubbingJobId);
   const controllerRef = useRef<AbortController | undefined>(undefined);
 
@@ -76,17 +85,16 @@ export function ExportModal({
     return validation.valid;
   };
 
-  const download = () => {
+  const download = async () => {
     if (!validateBeforeAction()) return;
     if (format === "video") return;
-    if (format === "ass")
-      downloadText("autosub.ass", cuesToAss(cues, style), "text/x-ass");
-    else
-      downloadText(
-        `autosub-${format}.srt`,
-        cuesToSrt(cues, format === "translated"),
-        "application/x-subrip",
-      );
+    try {
+      const timelineCues = cuesForDubbingTimeline(cues, slowVideoToMatchSpeech);
+      if (format === "ass") downloadText("autosub-retimed.ass", cuesToAss(timelineCues, style), "text/x-ass");
+      else downloadText(`autosub-${format}${slowVideoToMatchSpeech ? '-retimed' : ''}.srt`, cuesToSrt(timelineCues, format === "translated"), "application/x-subrip");
+    } catch (error) {
+      onNotice?.(friendlyErrorMessage(error, "Không thể lấy timeline dubbing để xuất subtitle."), "error");
+    }
   };
 
   const exportVideo = async () => {
@@ -106,7 +114,7 @@ export function ExportModal({
       onNotice?.("Điểm kết thúc phải nằm sau điểm bắt đầu.", "error");
       return;
     }
-    const exportCues = cues
+    const exportCues = cuesForDubbingTimeline(cues, slowVideoToMatchSpeech)
       .filter(
         (cue) =>
           cue.endMs > trimStartMs &&
@@ -172,10 +180,10 @@ export function ExportModal({
         },
         controller.signal,
       );
-      saveBlob("autosub-final.mp4", blob);
+      setRenderedVideo(blob);
+      saveBlob(renderedVideoName(), blob);
       setRenderProgress(100);
-      onNotice?.("Đã render video hoàn chỉnh bằng FFmpeg.", "success");
-      onClose();
+      onNotice?.("Đã render xong. Nếu Windows từ chối ghi file, hãy chọn Tải lại video đã render.", "success");
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError")
         onNotice?.("Đã hủy render video.", "success");
@@ -192,6 +200,7 @@ export function ExportModal({
   };
 
   const exportAudio = async () => {
+    const exportingRetimedOriginal = format === "retimed-original-audio";
     const trimStartMs = Math.max(0, Math.round(videoEdit.trimStartMs || 0));
     const trimEndMs = videoEdit.trimEndMs
       ? Math.round(videoEdit.trimEndMs)
@@ -200,7 +209,7 @@ export function ExportModal({
       onNotice?.("Điểm kết thúc phải nằm sau điểm bắt đầu.", "error");
       return;
     }
-    if (!dubbingJobId && dubTrack?.size) {
+    if (!exportingRetimedOriginal && !dubbingJobId && dubTrack?.size) {
       if (trimStartMs > 0 || trimEndMs !== undefined) {
         onNotice?.(
           "Bản dub cũ không hỗ trợ cắt trực tiếp. Hãy tạo dub job mới hoặc bỏ phạm vi cắt.",
@@ -213,7 +222,7 @@ export function ExportModal({
       onClose();
       return;
     }
-    if (!dubbingJobId && !asset?.uploadId) {
+    if ((!dubbingJobId || exportingRetimedOriginal) && !asset?.uploadId) {
       onNotice?.(
         "Video chưa được lưu trên máy. Hãy chọn lại video và chờ upload hoàn tất.",
         "error",
@@ -227,7 +236,7 @@ export function ExportModal({
     setRenderProgress(undefined);
     setRenderStage(
       dubbingJobId
-        ? "Đang chuẩn bị audio lồng tiếng hiện tại"
+        ? exportingRetimedOriginal ? "Đang kéo giãn audio gốc theo video" : "Đang chuẩn bị audio lồng tiếng hiện tại"
         : "Đang tách audio từ video hiện tại",
     );
     try {
@@ -237,12 +246,15 @@ export function ExportModal({
           dubbingJobId,
           trimStartMs,
           trimEndMs,
+          audioSource: exportingRetimedOriginal ? "original-retimed" : dubbingJobId ? "dub" : "original",
         },
         controller.signal,
       );
-      saveBlob("autosub-current-audio.wav", blob);
+      saveBlob(exportingRetimedOriginal ? "autosub-original-retimed.wav" : "autosub-current-audio.wav", blob);
       onNotice?.(
-        dubbingJobId
+        exportingRetimedOriginal
+          ? "Đã xuất audio gốc khớp timeline video chậm."
+          : dubbingJobId
           ? "Đã tải audio lồng tiếng hiện tại."
           : "Đã tách và tải audio của video hiện tại.",
         "success",
@@ -320,34 +332,49 @@ export function ExportModal({
               <small>.wav</small>
             </button>
           )}
+          {asset && dubbingJobId && slowVideoToMatchSpeech && (
+            <button
+              className={format === "retimed-original-audio" ? "selected" : ""}
+              onClick={() => setFormat("retimed-original-audio")}
+            >
+              <span><Check size={14} /> Audio gốc đã khớp video chậm</span>
+              <small>.wav</small>
+            </button>
+          )}
         </div>
         <div className="modal-actions">
           <button className="button ghost" onClick={onClose}>
             Hủy
           </button>
+          {format === "video" && renderedVideo && (
+            <button className="button ghost" onClick={() => void exportVideo()}>
+              Render lại
+            </button>
+          )}
           <button
             className="button primary"
             disabled={working}
             onClick={() => {
-              if (format === "video") void exportVideo();
-              else if (format === "audio") void exportAudio();
-              else download();
+              if (format === "video" && renderedVideo) saveBlob(renderedVideoName(), renderedVideo);
+              else if (format === "video") void exportVideo();
+              else if (format === "audio" || format === "retimed-original-audio") void exportAudio();
+              else void download();
             }}
           >
             <Download size={15} />{" "}
             {working
-              ? format === "audio"
+              ? format === "audio" || format === "retimed-original-audio"
                 ? "Đang xuất audio…"
                 : "Đang render…"
               : format === "video"
-                ? "Bắt đầu xuất"
+                ? renderedVideo ? "Tải lại video đã render" : "Bắt đầu xuất"
                 : "Tải xuống"}
           </button>
         </div>
       </Modal>
       <ProgressModal
         open={working}
-        title={format === "audio" ? "Đang xuất audio" : "Đang render video"}
+        title={format === "audio" || format === "retimed-original-audio" ? "Đang xuất audio" : "Đang render video"}
         message={renderStage}
         value={renderProgress}
         onCancel={() => {

@@ -101,7 +101,7 @@ export function friendlyErrorMessage(
     return "API key không có quyền dùng model hoặc endpoint này.";
   if (
     status === 404 ||
-    /not found|unknown model|unsupported endpoint/i.test(raw)
+    /unknown model|model.{0,30}not found|endpoint.{0,30}(not found|unsupported)|unsupported endpoint/i.test(raw)
   )
     return "Không tìm thấy endpoint hoặc model. Hãy kiểm tra Base URL và model trong Cài đặt.";
   if (
@@ -538,6 +538,7 @@ export const api = {
       ttsConcurrency?: number;
       llmConcurrency?: number;
       maxRetries?: number;
+      slowVideoToMatchSpeech?: boolean;
       audioMix?: {
         mode: import("../types").OriginalAudioMode;
         keepOriginal: boolean;
@@ -717,6 +718,7 @@ export const api = {
       dubbingJobId?: string;
       trimStartMs?: number;
       trimEndMs?: number;
+      audioSource?: "dub" | "original" | "original-retimed";
     },
     signal?: AbortSignal,
   ) => {

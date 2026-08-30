@@ -118,6 +118,7 @@ export interface DubbingJobStatus {
     ttsConcurrency: number;
     llmConcurrency: number;
     maxRetries: number;
+    slowVideoToMatchSpeech?: boolean;
     audioMix: {
       mode: OriginalAudioMode;
       keepOriginal: boolean;
