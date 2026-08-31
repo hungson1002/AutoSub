@@ -13,6 +13,7 @@ import { reviewRoutes } from './routes/review';
 import { voiceCloneRoutes } from './routes/voiceClones';
 import { douyinRoutes } from './routes/douyin';
 import { productAdRoutes } from './routes/productAds';
+import { aiVideoRoutes } from './routes/aiVideo';
 import { ensureCapCutTtsRuntime } from './services/capcutTtsBridge';
 import { ensureVieneuRuntime } from './services/vieneuRuntime';
 
@@ -49,6 +50,7 @@ await app.register(dubbingRoutes);
 await app.register(exportRoutes);
 await app.register(reviewRoutes);
 await app.register(productAdRoutes);
+await app.register(aiVideoRoutes);
 await app.register(douyinRoutes);
 app.setErrorHandler((error, _request, reply) => {
   app.log.warn(error instanceof Error ? error.message : String(error));

@@ -6,6 +6,7 @@ import { chat, recognizeImage, synthesize } from '../adapters';
 import { resolveProviderType } from '../providers/base';
 import { run, workdir } from './ffmpeg';
 import { resolveUpload } from './uploads';
+import { generateGoogleFlowPreview } from './googleFlow';
 
 export interface CreateProductAdJobInput {
   imageUploadIds: string[];
@@ -99,6 +100,37 @@ async function durationMs(file: string) {
   const seconds = Number(result.stdout.trim());
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error(`Không đọc được thời lượng ${path.basename(file)}.`);
   return Math.round(seconds * 1000);
+}
+
+type ProductAdVideoProbe = {
+  format?: { duration?: string };
+  streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
+};
+
+export function assessProductAdVideoQuality(probe: ProductAdVideoProbe, blackDurations: number[], targetDurationSeconds: number) {
+  const video = probe.streams?.find((stream) => stream.codec_type === 'video');
+  const audio = probe.streams?.find((stream) => stream.codec_type === 'audio');
+  const durationSeconds = Number(probe.format?.duration);
+  if (!video || !video.width || !video.height) throw new Error('Video đầu ra không có luồng hình hợp lệ.');
+  if (!audio) throw new Error('Video đầu ra không có luồng âm thanh.');
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('Không đọc được thời lượng video đầu ra.');
+  if (video.height <= video.width) throw new Error(`Video đầu ra sai tỷ lệ dọc (${video.width}×${video.height}).`);
+  const ratio = durationSeconds / Math.max(1, targetDurationSeconds);
+  if (ratio < 0.5 || ratio > 1.5) throw new Error(`Video đầu ra dài ${Math.round(durationSeconds)} giây, lệch quá xa mục tiêu ${targetDurationSeconds} giây.`);
+  const longestBlackSeconds = Math.max(0, ...blackDurations.filter(Number.isFinite));
+  if (longestBlackSeconds >= 3) throw new Error(`Phát hiện đoạn hình đen kéo dài ${longestBlackSeconds.toFixed(1)} giây.`);
+  const warnings: string[] = [];
+  if (Math.abs(ratio - 1) > 0.2) warnings.push(`Video thực tế dài ${Math.round(durationSeconds)} giây so với mục tiêu ${targetDurationSeconds} giây.`);
+  if (longestBlackSeconds >= 1.5) warnings.push(`Phát hiện đoạn hình gần như đen dài ${longestBlackSeconds.toFixed(1)} giây.`);
+  return { durationMs: Math.round(durationSeconds * 1000), width: video.width, height: video.height, warnings };
+}
+
+async function inspectProductAdVideo(file: string, targetDurationSeconds: number, signal: AbortSignal) {
+  const probeResult = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type,width,height', '-of', 'json', file], signal);
+  const probe = JSON.parse(probeResult.stdout) as ProductAdVideoProbe;
+  const blackResult = await run('ffmpeg', ['-hide_banner', '-v', 'info', '-i', file, '-vf', 'blackdetect=d=1.5:pix_th=0.02:pic_th=0.98', '-an', '-f', 'null', '-'], signal);
+  const blackDurations = [...blackResult.stderr.matchAll(/black_duration:([0-9.]+)/g)].map((match) => Number(match[1]));
+  return assessProductAdVideoQuality(probe, blackDurations, targetDurationSeconds);
 }
 
 function throwIfCancelled(signal: AbortSignal) {
@@ -414,16 +446,15 @@ async function executeProductAdJob(id: string, input: CreateProductAdJobInput, s
     const scenes = await synthesizeScenes(input, id, plan, signal);
     throwIfCancelled(signal);
     const result = await renderProductAd(input, id, images, scenes, signal);
-    const ratio = result.durationMs / Math.max(1, input.targetDurationSeconds * 1000);
+    await patchJob(id, { status: 'rendering', stage: 'Đang kiểm tra chất lượng kỹ thuật video', progressPercent: 96 });
+    const quality = await inspectProductAdVideo(result.videoFile, input.targetDurationSeconds, signal);
     const current = jobs.get(id) || await readJob(id);
     await patchJob(id, {
       status: 'completed',
-      stage: 'Đã dựng xong video quảng cáo sản phẩm',
+      stage: 'Đã dựng và kiểm tra xong video quảng cáo sản phẩm',
       progressPercent: 100,
-      result,
-      warnings: Math.abs(ratio - 1) > 0.2
-        ? [...current.warnings, `Giọng đọc thực tế dài ${Math.round(result.durationMs / 1000)} giây so với mục tiêu ${input.targetDurationSeconds} giây.`]
-        : current.warnings,
+      result: { ...result, durationMs: quality.durationMs },
+      warnings: [...current.warnings, ...quality.warnings],
     });
   } catch (error) {
     if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
@@ -437,7 +468,7 @@ async function executeProductAdJob(id: string, input: CreateProductAdJobInput, s
 }
 
 export async function createProductAdJob(input: CreateProductAdJobInput) {
-  const outputMode: ProductAdOutputMode = input?.outputMode === 'render' ? 'render' : 'veo3-script';
+  const outputMode: ProductAdOutputMode = 'render';
   const productName = String(input?.productName || '').replace(/\s+/g, ' ').trim().slice(0, 160);
   const productDescription = String(input?.productDescription || '').trim().slice(0, 8_000);
   const imageUploadIds = [...new Set(Array.isArray(input?.imageUploadIds) ? input.imageUploadIds.map(String).filter(Boolean) : [])].slice(0, 8);
@@ -470,7 +501,6 @@ export async function createProductAdJob(input: CreateProductAdJobInput) {
       'Khi đăng, hãy giữ công bố liên kết tiếp thị liên kết ở caption hoặc công cụ disclosure của nền tảng.',
     ],
   };
-  if (outputMode === 'veo3-script') job.warnings[1] = 'Gói này chỉ tạo prompt và lời thoại cho Veo 3; AutoSub chưa gửi yêu cầu render video tới provider.';
   await saveJob(job);
   const controller = new AbortController();
   controllers.set(id, controller);
@@ -487,6 +517,28 @@ export async function createProductAdJob(input: CreateProductAdJobInput) {
   };
   void executeProductAdJob(id, normalized, controller.signal);
   return job;
+}
+
+export async function createProductAdFlowPreview(id: string) {
+  const job = await readJob(id);
+  const clip = job.veo3Pack?.clips[0];
+  if (!clip) throw new Error('Job chưa có prompt Veo 3 để tạo video Flow.');
+  const controller = new AbortController();
+  controllers.set(id, controller);
+  await patchJob(id, { status: 'rendering', stage: 'Google Flow đang tạo video AI thử nghiệm', progressPercent: 55, error: undefined });
+  try {
+    await mkdir(path.dirname(resultFile(id)), { recursive: true });
+    const flow = await generateGoogleFlowPreview(clip.prompt, resultFile(id));
+    const quality = await inspectProductAdVideo(resultFile(id), 4, controller.signal);
+    return await patchJob(id, {
+      status: 'completed', stage: `Đã tạo video AI bằng ${flow.model}`, progressPercent: 100,
+      result: { videoFile: resultFile(id), subtitleFile: '', durationMs: quality.durationMs },
+      warnings: [...job.warnings, ...quality.warnings],
+    });
+  } catch (error) {
+    await patchJob(id, { status: 'failed', stage: 'Tạo video AI Google Flow thất bại', error: summarizeProductAdError(error) });
+    throw error;
+  } finally { controllers.delete(id); }
 }
 
 export async function getProductAdJob(id: string) {

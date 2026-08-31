@@ -51,6 +51,18 @@ const thumbnailProxyUrl = (item: DouyinBatchItem, download = false) => {
   return `http://127.0.0.1:8787/api/douyin/thumbnail?${query.toString()}`;
 };
 
+type DouyinDiscoveryItem = {
+  url: string;
+  videoId: string;
+  title: string;
+  author: string;
+  coverUrl?: string;
+  duration?: number;
+  downloadUrl: string;
+};
+
+const discoveryThumbnailUrl = (item: DouyinDiscoveryItem) => `http://127.0.0.1:8787/api/douyin/thumbnail?${new URLSearchParams({ url: item.coverUrl || '' }).toString()}`;
+
 function formatDuration(seconds?: number) {
   if (seconds === undefined) return undefined;
   const safeSeconds = Math.max(0, Math.round(seconds));
@@ -89,6 +101,9 @@ export function DouyinPage({
   const [submitting, setSubmitting] = useState(false);
   const [bilibiliQuality, setBilibiliQuality] = useState<BilibiliQuality>(64);
   const [submitError, setSubmitError] = useState("");
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryItems, setDiscoveryItems] = useState<DouyinDiscoveryItem[]>([]);
+  const [selectedDiscoveryUrls, setSelectedDiscoveryUrls] = useState<Set<string>>(new Set());
   const [pollError, setPollError] = useState("");
   const [historyItems, setHistoryItems] = useState<DouyinBatchItem[]>(() => {
     try {
@@ -109,12 +124,15 @@ export function DouyinPage({
     batchJobRef.current = batchJob;
   }, [batchJob]);
 
+
   useEffect(() => {
     const matches = inputText.match(VIDEO_SOURCE_URL_PATTERN) || [];
     const cleaned = Array.from(
       new Set(matches.map((url) => url.replace(/[),;。，！？\s]+$/, ""))),
     );
     setDetectedUrls(cleaned);
+    setDiscoveryItems([]);
+    setSelectedDiscoveryUrls(new Set());
     if (cleaned.length > 0) setSubmitError("");
   }, [inputText]);
 
@@ -245,7 +263,8 @@ export function DouyinPage({
 
   const handleStartBatch = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (detectedUrls.length === 0) {
+    const urlsToQueue = discoveryItems.length ? Array.from(selectedDiscoveryUrls) : detectedUrls;
+    if (urlsToQueue.length === 0) {
       setSubmitError("Chưa tìm thấy link Douyin hoặc Bilibili hợp lệ trong nội dung đã dán.");
       inputRef.current?.focus();
       return;
@@ -255,8 +274,8 @@ export function DouyinPage({
     setSubmitting(true);
     try {
       const job = activeBatchId
-        ? await api.appendDouyinBatch(activeBatchId, detectedUrls, bilibiliQuality)
-        : await api.startDouyinBatch(detectedUrls, bilibiliQuality);
+        ? await api.appendDouyinBatch(activeBatchId, urlsToQueue, bilibiliQuality)
+        : await api.startDouyinBatch(urlsToQueue, bilibiliQuality);
       setBatchJob(job);
       if (!activeBatchId) setActiveBatchId(job.id);
       setInputText("");
@@ -327,6 +346,21 @@ export function DouyinPage({
     window.setTimeout(() => inputRef.current?.focus(), 0);
   };
 
+  const handleDiscover = async () => {
+    if (!detectedUrls.length) { setSubmitError('Hãy dán ít nhất một link Douyin hoặc Bilibili công khai.'); inputRef.current?.focus(); return; }
+    setDiscovering(true); setSubmitError('');
+    try {
+      const result = await api.parseDouyinUrls(detectedUrls, true);
+      const items = (result.items || []).flatMap((entry, index) => entry.success && entry.info ? [{ ...entry.info, url: result.urls[index] || entry.info.url }] : []);
+      setDiscoveryItems(items);
+      setSelectedDiscoveryUrls(new Set(items.map((item) => item.url)));
+      const failed = (result.items || []).length - items.length;
+      if (!items.length) throw new Error('Không đọc được thông tin video nào từ các link đã dán.');
+      onNotice(`Đã hiển thị ${items.length} video${failed ? `, ${failed} link không đọc được` : ''}.`, failed ? 'error' : 'success');
+    } catch (error) { const message = friendlyErrorMessage(error, 'Không thể hiển thị danh sách video.'); setSubmitError(message); onNotice(message, 'error'); }
+    finally { setDiscovering(false); }
+  };
+
   const handleCancelItem = async (item: DouyinBatchItem) => {
     if (!batchJob?.id) return;
     try {
@@ -385,8 +419,7 @@ export function DouyinPage({
             Thu video Douyin &amp; Bilibili. <span>Sẵn sàng để dựng.</span>
           </h1>
           <p>
-            Dán link chia sẻ Douyin hoặc Bilibili, AutoSub lấy bản MP4 công khai và đưa thẳng
-            vào quy trình hậu kỳ.
+            Dán link chia sẻ Douyin hoặc Bilibili, AutoSub lấy bản MP4 công khai và đưa thẳng vào quy trình hậu kỳ.
           </p>
         </div>
         <div className="douyin-trust" aria-label="Thông tin xử lý">
@@ -493,6 +526,17 @@ export function DouyinPage({
             </div>
           )}
 
+          {discoveryItems.length > 0 && <section className="douyin-discovery" aria-label="Danh sách video đã nhận diện">
+            <div className="douyin-discovery-head"><div><strong>Video đã nhận diện</strong><small>{selectedDiscoveryUrls.size}/{discoveryItems.length} video được chọn</small></div><button type="button" className="button small ghost" onClick={() => setSelectedDiscoveryUrls(selectedDiscoveryUrls.size === discoveryItems.length ? new Set() : new Set(discoveryItems.map((item) => item.url)))}>{selectedDiscoveryUrls.size === discoveryItems.length ? 'Bỏ chọn tất cả' : 'Chọn tất cả'}</button></div>
+            <div className="douyin-discovery-grid">{discoveryItems.map((item) => { const selected = selectedDiscoveryUrls.has(item.url); return <article key={item.url} className={selected ? 'is-selected' : ''}>
+              <button type="button" className="douyin-discovery-card" aria-pressed={selected} onClick={() => setSelectedDiscoveryUrls((current) => { const next = new Set(current); if (next.has(item.url)) next.delete(item.url); else next.add(item.url); return next; })}>
+                <div className="douyin-discovery-cover">{item.coverUrl ? <img src={discoveryThumbnailUrl(item)} alt="" loading="lazy" /> : <Film size={24} />}<span className="douyin-discovery-check">{selected ? <Check size={12} /> : null}</span>{item.duration !== undefined && <small>{formatDuration(item.duration)}</small>}</div>
+                <div className="douyin-discovery-copy"><strong>{item.title || `Douyin ${item.videoId}`}</strong><span>{item.author || 'Douyin Creator'}</span></div>
+              </button>
+              <a className="douyin-discovery-preview" href={item.downloadUrl} target="_blank" rel="noreferrer"><CirclePlay size={12} /> Xem thử</a>
+            </article>; })}</div>
+          </section>}
+
           {submitError && (
             <div
               id="douyin-input-error"
@@ -505,6 +549,7 @@ export function DouyinPage({
           )}
 
           <div className="douyin-submit-row">
+            <button className="button ghost" type="button" disabled={discovering || submitting || !detectedUrls.length} onClick={() => void handleDiscover()}>{discovering ? <LoaderCircle className="spin" size={16} /> : <CirclePlay size={16} />} {discovering ? 'Đang đọc video…' : 'Hiển thị video'}</button>
             <button
               className="button primary douyin-submit-button"
               type="submit"
@@ -519,7 +564,7 @@ export function DouyinPage({
                 ? "Đang thêm vào hàng đợi"
                 : isDownloading
                   ? `Thêm ${detectedUrls.length || "video"} vào hàng đợi`
-                  : `Tải ${detectedUrls.length ? `${detectedUrls.length} video` : "video Douyin/Bilibili"}`}
+                  : `Tải ${discoveryItems.length ? `${selectedDiscoveryUrls.size} video đã chọn` : detectedUrls.length ? `${detectedUrls.length} video` : "video Douyin/Bilibili"}`}
             </button>
             {isDownloading && (
               <button

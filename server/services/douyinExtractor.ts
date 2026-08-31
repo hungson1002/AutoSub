@@ -531,6 +531,39 @@ export async function extractDouyinMedia(videoId: string, isNote = false, signal
   return media;
 }
 
+export async function searchDouyinMedia(keyword: string, limit = 24, cookie = '', signal?: AbortSignal) {
+  const query = keyword.trim().slice(0, 80);
+  if (!query) throw new Error('Hãy nhập từ khóa tìm kiếm Douyin.');
+  return withContextSlot(async () => {
+    const browser = await sharedBrowser();
+    const context = await browser.newContext({ locale: 'zh-CN', timezoneId: 'Asia/Shanghai', viewport: { width: 1365, height: 900 }, userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36` });
+    const cookies = cookie.split(';').flatMap((part) => {
+      const separator = part.indexOf('=');
+      if (separator <= 0) return [];
+      const name = part.slice(0, separator).trim();
+      const value = part.slice(separator + 1).trim();
+      return name && value ? [{ name, value, domain: '.douyin.com', path: '/' }] : [];
+    });
+    if (cookies.length) await context.addCookies(cookies);
+    const page = await context.newPage();
+    const found = new Map<string, DouyinDetail>();
+    const collect = (payload: any) => {
+      const candidates: any[] = [];
+      const visit = (node: any) => { if (!node || typeof node !== 'object') return; if (Array.isArray(node)) { node.forEach(visit); return; } if (node.aweme_info) candidates.push(node.aweme_info); if (node.aweme_id && node.video) candidates.push(node); Object.values(node).forEach(visit); };
+      visit(payload);
+      for (const item of candidates) if (item?.aweme_id && item?.video && !found.has(String(item.aweme_id))) found.set(String(item.aweme_id), item as DouyinDetail);
+    };
+    page.on('response', async (response) => { if (!/\/aweme\/v1\/web\/(?:general\/)?search\//.test(response.url())) return; try { collect(await response.json()); } catch {} });
+    try {
+      await page.route('**/*', async (route) => ['media', 'font'].includes(route.request().resourceType()) ? route.abort() : route.continue());
+      await page.goto(`${DOUYIN_PAGE_ORIGIN}/search/${encodeURIComponent(query)}?type=video`, { waitUntil: 'domcontentloaded', timeout: 35_000 });
+      for (let step = 0; step < 5 && found.size < limit; step += 1) { await page.mouse.wheel(0, 1400); await page.waitForTimeout(1800); }
+      if (!found.size) throw new Error('Douyin không trả kết quả công khai hoặc đang yêu cầu xác minh trình duyệt.');
+      return Array.from(found.entries()).slice(0, Math.max(1, Math.min(48, limit))).flatMap(([videoId, detail]) => { try { return [{ ...douyinMediaFromDetail(videoId, detail), originalUrl: `${DOUYIN_PAGE_ORIGIN}/video/${videoId}` }]; } catch { return []; } });
+    } finally { await context.close().catch(() => undefined); }
+  });
+}
+
 export async function closeDouyinExtractor() {
   const pending = browserPromise;
   browserPromise = undefined;

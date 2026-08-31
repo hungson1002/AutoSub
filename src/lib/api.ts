@@ -1,5 +1,6 @@
 import type {
   AIModel,
+  AiVideoJobStatus,
   AIProvider,
   AIVoice,
   BlurRegion,
@@ -17,6 +18,7 @@ import type {
   SubtitleCue,
   SubtitleStyle,
   VoiceCloneProfile,
+  FlowVideoModel,
 } from "../types";
 import { cuesToAss } from "./subtitles";
 
@@ -45,6 +47,8 @@ export const reviewVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/review/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
 export const productAdVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/product-ads/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
+export const aiVideoUrl = (jobId: string, download = false) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/video${download ? '?download=1' : ''}`;
+export const aiVideoClipUrl = (jobId: string, sceneIndex: number, download = false) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/clips/${sceneIndex}${download ? '?download=1' : ''}`;
 
 export type StoredMediaResult = {
   uploadId: string;
@@ -794,6 +798,12 @@ export const api = {
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}`, { signal }),
   cancelProductAdJob: (id: string) =>
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+  createProductAdFlowPreview: (id: string) =>
+    request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/flow-preview`, { method: "POST" }),
+  createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FlowVideoModel; aspectRatio: '9:16' | '16:9'; script: { provider: AIProvider; model: string }; flowCredentials: { nanoApiKey: string; veoToken: string; veoCookie: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
+  getAiVideoJob: (id: string, signal?: AbortSignal) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}`, { signal }),
+  cancelAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+  resumeAiVideoJob: (id: string, flowCredentials: { nanoApiKey: string; veoToken: string; veoCookie: string }, model: FlowVideoModel) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ flowCredentials, model }) }),
   getReviewJob: (id: string, signal?: AbortSignal) =>
     request<ReviewJobStatus>(`/api/review/jobs/${encodeURIComponent(id)}`, {
       signal,

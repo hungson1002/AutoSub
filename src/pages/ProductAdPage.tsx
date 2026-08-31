@@ -52,7 +52,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
   const [offer, setOffer] = useState('');
   const [callToAction, setCallToAction] = useState('Xem sản phẩm ở liên kết được gắn');
   const [platform, setPlatform] = useState<ProductAdPlatform>('both');
-  const [outputMode, setOutputMode] = useState<ProductAdOutputMode>('veo3-script');
+  const [outputMode] = useState<ProductAdOutputMode>('render');
   const [targetDuration, setTargetDuration] = useState(30);
   const [tone, setTone] = useState('UGC chân thật, nhanh gọn, không khoa trương');
   const [customPrompt, setCustomPrompt] = useState('');
@@ -251,6 +251,16 @@ export function ProductAdPage({ providers, settings, onNotice }: {
     catch { onNotice('Không thể sao chép prompt Veo 3.', 'error'); }
   };
 
+  const createFlowPreview = async () => {
+    if (!job?.id) return;
+    setStarting(true);
+    try {
+      setJob(await api.createProductAdFlowPreview(job.id));
+      onNotice('Đã tạo video AI thử nghiệm bằng Google Flow.');
+    } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo video Google Flow.'), 'error'); }
+    finally { setStarting(false); }
+  };
+
   const jobRunning = Boolean(job && activeStates.has(job.status));
   const running = starting || jobRunning;
   const uploading = images.some((image) => image.status === 'uploading');
@@ -289,9 +299,8 @@ export function ProductAdPage({ providers, settings, onNotice }: {
         </section>
 
         <section className="review-panel">
-          <div className="section-title"><span>04 · ĐẦU RA QUẢNG CÁO</span><small>{outputMode === 'veo3-script' ? `${veoClipCount} prompt · tối đa 10 giây/clip` : 'Xuất MP4 dọc 720 × 1280'}</small></div>
-          <div className="field"><span>Kiểu đầu ra</span><SelectField ariaLabel="Kiểu đầu ra quảng cáo" value={outputMode} onChange={(value) => setOutputMode(value as ProductAdOutputMode)} options={[{ value: 'veo3-script', label: 'Gói prompt Veo 3', description: 'Chia thành clip tối đa 10 giây, không render video' }, { value: 'render', label: 'MP4 từ ảnh + giọng đọc', description: 'Dùng ảnh sản phẩm, TTS và FFmpeg như hiện tại' }]} /></div>
-          {outputMode === 'veo3-script' && <div className="product-veo-mode-note"><WandSparkles size={15} /><span>Video {targetDuration} giây sẽ được chia thành <strong>{veoClipCount} prompt Veo 3</strong>{targetDuration % 10 ? `; clip cuối dài ${targetDuration % 10} giây` : ''}. Mỗi prompt có 4 micro-shot và khóa hình dáng sản phẩm; tiêu đề cùng voice được giữ riêng để AutoSub hậu kỳ.</span></div>}
+          <div className="section-title"><span>04 · ĐẦU RA QUẢNG CÁO</span><small>Xuất MP4 dọc 720 × 1280</small></div>
+          <div className="product-veo-mode-note"><WandSparkles size={15} /><span>AutoSub sẽ tạo lời đọc, dựng chuyển động từ ảnh sản phẩm, đốt phụ đề nếu bật và xuất trực tiếp video MP4 hoàn chỉnh.</span></div>
           <div className="two-fields"><div className="field"><span>Nền tảng</span><SelectField ariaLabel="Nền tảng đăng" value={platform} onChange={(value) => setPlatform(value as ProductAdPlatform)} options={[{ value: 'both', label: 'TikTok + YouTube Shorts' }, { value: 'tiktok', label: 'TikTok' }, { value: 'youtube-shorts', label: 'YouTube Shorts' }]} /></div><div className="field"><span>Phong cách</span><SelectField ariaLabel="Phong cách quảng cáo" value={tone} onChange={setTone} options={['UGC chân thật, nhanh gọn, không khoa trương', 'Review trực diện, tập trung tính năng', 'Kể chuyện vấn đề → giải pháp', 'Năng động, nhiều hook ngắn'].map((value) => ({ value, label: value }))} /></div></div>
           <div className="field"><span>Thời lượng mục tiêu <b className="value-badge">{targetDuration} giây</b></span><RangeInput min={10} max={60} step={5} value={targetDuration} onChange={(event) => setTargetDuration(Number(event.target.value))} /></div>
           <div className="field"><span>Yêu cầu bổ sung <small>· không bắt buộc</small></span><textarea value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} placeholder="Ví dụ: mở đầu bằng vấn đề điện thoại rơi khi xem phim trên giường…" /></div>
@@ -310,7 +319,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
             {jobRunning && <button type="button" className="button small ghost danger review-cancel" onClick={() => void cancelJob()}><X size={14} /> Hủy job</button>}
             {job.status === 'failed' && <div className="product-ad-retry"><button type="button" className="button primary" disabled={!canRetry || starting} onClick={() => void startJob()}>{starting ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />} {starting ? 'Đang thử lại…' : 'Thử lại'}</button><small>{canRetry ? 'Dùng lại ảnh và toàn bộ cấu hình hiện tại.' : 'Hãy chọn lại ảnh sản phẩm để thử lại.'}</small></div>}
             {job.status === 'completed' && job.result && <div className="review-result product-ad-video"><video controls playsInline preload="metadata" src={productAdVideoUrl(job.id)} /><div className="review-result-meta"><div><span>Thời lượng</span><strong>{formatDuration(job.result.durationMs)}</strong></div><div><span>Số cảnh</span><strong>{job.plan?.scenes.length || 0}</strong></div><a className="button primary" href={productAdVideoUrl(job.id, true)}><Download size={14} /> Tải MP4</a></div></div>}
-            {job.status === 'completed' && job.veo3Pack && <section className="product-veo-pack"><div className="product-veo-pack-heading"><div><strong>{job.veo3Pack.clips.length} prompt Veo 3 · {job.veo3Pack.totalDurationSeconds} giây</strong><small>Mỗi clip tối đa {job.veo3Pack.clipLimitSeconds} giây · 4 micro-shot · chữ và voice hậu kỳ · khung {job.veo3Pack.aspectRatio}</small></div><button type="button" className="button primary small" onClick={() => void copyVeoPrompts()}>Sao chép toàn bộ</button></div><div className="product-veo-prompt-list">{job.veo3Pack.clips.map((clip) => <article key={clip.id}><header><span>CLIP {String(clip.index).padStart(2, '0')}</span><strong>{clip.durationSeconds} giây</strong><small>{clip.startSeconds}s → {clip.endSeconds}s · Ảnh {clip.imageIndex + 1}</small></header><pre>{clip.prompt}</pre><button type="button" className="button small ghost" onClick={() => void copyVeoPrompts(clip.prompt)}>Sao chép prompt này</button></article>)}</div></section>}
+            {job.status === 'completed' && job.veo3Pack && <section className="product-veo-pack"><div className="product-veo-pack-heading"><div><strong>{job.veo3Pack.clips.length} prompt Veo 3 · {job.veo3Pack.totalDurationSeconds} giây</strong><small>Mỗi clip tối đa {job.veo3Pack.clipLimitSeconds} giây · 4 micro-shot · chữ và voice hậu kỳ · khung {job.veo3Pack.aspectRatio}</small></div><div><button type="button" className="button primary small" disabled={starting} onClick={() => void createFlowPreview()}>{starting ? 'Flow đang tạo…' : 'Tạo thử video Flow 4s'}</button> <button type="button" className="button small" onClick={() => void copyVeoPrompts()}>Sao chép toàn bộ</button></div></div><div className="product-veo-prompt-list">{job.veo3Pack.clips.map((clip) => <article key={clip.id}><header><span>CLIP {String(clip.index).padStart(2, '0')}</span><strong>{clip.durationSeconds} giây</strong><small>{clip.startSeconds}s → {clip.endSeconds}s · Ảnh {clip.imageIndex + 1}</small></header><pre>{clip.prompt}</pre><button type="button" className="button small ghost" onClick={() => void copyVeoPrompts(clip.prompt)}>Sao chép prompt này</button></article>)}</div></section>}
             {job.plan && <details className="review-plan" open={job.status === 'completed'}><summary>Kịch bản, caption và danh sách cảnh</summary><div className="review-plan-heading"><strong>{job.plan.title}</strong><p>{job.plan.caption}</p><p><b>Disclosure:</b> {job.plan.disclosure}</p><p>{job.plan.hashtags.join(' ')}</p><button type="button" className="button small ghost product-caption-copy" onClick={() => void copyCaption()}>Sao chép caption</button></div><div className="product-ad-scene-list">{job.plan.scenes.map((scene, index) => <article key={scene.id}><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{scene.headline}</strong><p>{scene.narration}</p></div><small>Ảnh {scene.imageIndex + 1}</small></article>)}</div></details>}
             {job.warnings.length > 0 && <div className="product-ad-warning-list">{job.warnings.map((warning) => <p key={warning}><ShieldCheck size={13} /> {warning}</p>)}</div>}
           </>}

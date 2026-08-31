@@ -1,7 +1,7 @@
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import type { CreateProductAdJobInput } from '../services/productAdJobs';
-import { cancelProductAdJob, createProductAdJob, getProductAdJob, getProductAdResult } from '../services/productAdJobs';
+import { cancelProductAdJob, createProductAdFlowPreview, createProductAdJob, getProductAdJob, getProductAdResult } from '../services/productAdJobs';
 
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
@@ -23,6 +23,11 @@ export async function productAdRoutes(app: FastifyInstance) {
   app.post('/api/product-ads/jobs/:id/cancel', async (request, reply) => {
     try { return await cancelProductAdJob(String((request.params as { id?: string }).id || '')); }
     catch (error) { return sendRouteError(reply, error, 'Không thể hủy product ad job.'); }
+  });
+
+  app.post('/api/product-ads/jobs/:id/flow-preview', async (request, reply) => {
+    try { return reply.code(202).send(await createProductAdFlowPreview(String((request.params as { id?: string }).id || ''))); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể tạo video Google Flow.'); }
   });
 
   app.get('/api/product-ads/jobs/:id/video', async (request, reply) => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildVeo3PromptPack, parseProductAdPlan, summarizeProductAdError } from './productAdJobs';
+import { assessProductAdVideoQuality, buildVeo3PromptPack, parseProductAdPlan, summarizeProductAdError } from './productAdJobs';
 
 test('parseProductAdPlan normalizes a usable short-form plan', () => {
   const narration = 'Sản phẩm này giúp giữ điện thoại ổn định khi xem video, có thể điều chỉnh góc nhìn và sử dụng thuận tiện trên bàn làm việc mỗi ngày.';
@@ -53,6 +53,28 @@ test('summarizeProductAdError removes the FFmpeg build banner', () => {
     'Fontconfig error: Cannot load default config file',
   ].join('\n'));
   assert.equal(summarizeProductAdError(error), 'Fontconfig error: Cannot load default config file');
+});
+
+test('assessProductAdVideoQuality accepts a healthy vertical video', () => {
+  const result = assessProductAdVideoQuality({
+    format: { duration: '9.8' },
+    streams: [
+      { codec_type: 'video', width: 720, height: 1280 },
+      { codec_type: 'audio' },
+    ],
+  }, [], 10);
+  assert.deepEqual(result, { durationMs: 9800, width: 720, height: 1280, warnings: [] });
+});
+
+test('assessProductAdVideoQuality rejects broken output before completion', () => {
+  assert.throws(() => assessProductAdVideoQuality({
+    format: { duration: '10' },
+    streams: [{ codec_type: 'video', width: 1280, height: 720 }, { codec_type: 'audio' }],
+  }, [], 10), /sai tỷ lệ dọc/);
+  assert.throws(() => assessProductAdVideoQuality({
+    format: { duration: '10' },
+    streams: [{ codec_type: 'video', width: 720, height: 1280 }, { codec_type: 'audio' }],
+  }, [3.2], 10), /hình đen/);
 });
 
 test('buildVeo3PromptPack splits duration into clips no longer than 10 seconds', () => {
