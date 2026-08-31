@@ -62,7 +62,30 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
   return keepAudio ? `[${originalInputLabel}]anull[audioout]` : "";
 }
 
-type RetimeCue = { originalDurationMs: number; ttsDurationMs: number; timelineStartMs?: number; timelineShiftMs?: number };
+export type RetimeCue = { originalDurationMs: number; ttsDurationMs: number; timelineStartMs?: number; timelineShiftMs?: number };
+
+export const retimedWindows = (metadata: RetimeCue[]) => {
+  const candidates = metadata.flatMap((cue) => {
+    const durationMs = Math.max(1, Number(cue.originalDurationMs) || 1);
+    const speechMs = Math.max(1, Number(cue.ttsDurationMs) || 1);
+    if (speechMs <= durationMs || !Number.isFinite(cue.timelineStartMs)) return [];
+    const startMs = Math.max(0, Number(cue.timelineStartMs) - Number(cue.timelineShiftMs || 0));
+    return [{ startMs, endMs: startMs + durationMs, scale: speechMs / durationMs }];
+  }).sort((left, right) => left.startMs - right.startMs);
+  let cursorMs = 0;
+  return candidates.flatMap((cue) => {
+    const startMs = Math.max(cursorMs, cue.startMs);
+    const endMs = Math.max(startMs, cue.endMs);
+    cursorMs = endMs;
+    return endMs > startMs ? [{ startMs, endMs, scale: cue.scale }] : [];
+  });
+};
+
+export const retimedDurationMs = (sourceDurationMs: number, metadata: RetimeCue[]) =>
+  Math.max(1, sourceDurationMs) + retimedWindows(metadata).reduce(
+    (total, cue) => total + (cue.endMs - cue.startMs) * (cue.scale - 1),
+    0,
+  );
 
 const atempoChain = (rate: number) => {
   const filters: string[] = [];
@@ -72,21 +95,17 @@ const atempoChain = (rate: number) => {
   return filters.join(",") || "anull";
 };
 
-export function buildRetimedSourceAudioFilter(metadata: RetimeCue[], input = "0:a", output = "retimedOriginal") {
-  const slowed = metadata.flatMap((cue) => {
-    const durationMs = Math.max(1, Number(cue.originalDurationMs) || 1);
-    const speechMs = Math.max(1, Number(cue.ttsDurationMs) || 1);
-    if (speechMs <= durationMs || !Number.isFinite(cue.timelineStartMs)) return [];
-    const startMs = Math.max(0, Number(cue.timelineStartMs) - Number(cue.timelineShiftMs || 0));
-    return [{ startMs, endMs: startMs + durationMs, rate: durationMs / speechMs }];
-  }).sort((left, right) => left.startMs - right.startMs);
-  if (!slowed.length) return `[${input}]anull[${output}]`;
+export function buildRetimedSourceAudioFilter(metadata: RetimeCue[], input = "0:a", output = "retimedOriginal", targetDurationMs?: number) {
+  const slowed = retimedWindows(metadata).map((cue) => ({ ...cue, rate: 1 / cue.scale }));
+  const finish = (source: string) => Number.isFinite(targetDurationMs) && Number(targetDurationMs) > 0
+    ? `${source}apad,atrim=end=${(Number(targetDurationMs) / 1000).toFixed(6)}[${output}]`
+    : `${source}anull[${output}]`;
+  if (!slowed.length) return finish(`[${input}]`);
 
   const segments: Array<{ startMs: number; endMs?: number; rate: number }> = [];
   let cursorMs = 0;
   for (const cue of slowed) {
-    const startMs = Math.max(cursorMs, cue.startMs);
-    const endMs = Math.max(startMs, cue.endMs);
+    const { startMs, endMs } = cue;
     if (startMs > cursorMs) segments.push({ startMs: cursorMs, endMs: startMs, rate: 1 });
     if (endMs > startMs) segments.push({ startMs, endMs, rate: cue.rate });
     cursorMs = endMs;
@@ -102,6 +121,8 @@ export function buildRetimedSourceAudioFilter(metadata: RetimeCue[], input = "0:
   segments.forEach((segment, index) => {
     filters.push(`[retimeSrc${index}]asetpts=PTS-STARTPTS,${atempoChain(segment.rate)}[retimePart${index}]`);
   });
-  filters.push(`${parts}concat=n=${segments.length}:v=0:a=1[${output}]`);
+  const joined = targetDurationMs ? "retimedOriginalJoined" : output;
+  filters.push(`${parts}concat=n=${segments.length}:v=0:a=1[${joined}]`);
+  if (targetDurationMs) filters.push(finish(`[${joined}]`));
   return filters.join(";");
 }

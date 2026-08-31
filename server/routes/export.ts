@@ -13,7 +13,7 @@ import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { run, ensureWorkdir, preferredH264Encoder } from "../services/ffmpeg";
 import { getDubbingResult } from "../services/dubbingJobs";
-import { buildExportAudioFilter, buildRetimedSourceAudioFilter } from "../services/exportAudio";
+import { buildExportAudioFilter, buildRetimedSourceAudioFilter, retimedDurationMs, retimedWindows } from "../services/exportAudio";
 import {
   cleanupUploadSession,
   createTemporarySession,
@@ -138,20 +138,13 @@ export function buildSlowVideoFilter(
   }>,
   output = "slowDubVideo",
 ) {
-  const slowed = metadata.flatMap((cue) => {
-    const durationMs = Math.max(1, Number(cue.originalDurationMs) || 1);
-    const speechMs = Math.max(1, Number(cue.ttsDurationMs) || 1);
-    if (speechMs <= durationMs || !Number.isFinite(cue.timelineStartMs)) return [];
-    const startMs = Math.max(0, Number(cue.timelineStartMs) - Number(cue.timelineShiftMs || 0));
-    return [{ startMs, endMs: startMs + durationMs, scale: speechMs / durationMs }];
-  }).sort((left, right) => left.startMs - right.startMs);
+  const slowed = retimedWindows(metadata);
   if (!slowed.length) return `[${input}]setpts=PTS-STARTPTS[${output}]`;
 
   const segments: Array<{ endMs?: number; scale: number }> = [];
   let cursorMs = 0;
   for (const cue of slowed) {
-    const startMs = Math.max(cursorMs, cue.startMs);
-    const endMs = Math.max(startMs, cue.endMs);
+    const { startMs, endMs } = cue;
     if (startMs > cursorMs) segments.push({ endMs: startMs, scale: 1 });
     if (endMs > startMs) segments.push({ endMs, scale: cue.scale });
     cursorMs = endMs;
@@ -407,7 +400,10 @@ export async function exportRoutes(app: FastifyInstance) {
       if (trimEndMs !== undefined)
         args.push("-t", ((trimEndMs - trimStartMs) / 1000).toFixed(3));
       if (retimeMetadata) {
-        await appendComplexFilter(args, buildRetimedSourceAudioFilter(retimeMetadata), exportDir, job);
+        const durationProbe = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", input], requestAbort.signal);
+        const sourceDurationMs = Math.max(1, Number(durationProbe.stdout.trim()) * 1000);
+        const targetDurationMs = retimedDurationMs(sourceDurationMs, retimeMetadata);
+        await appendComplexFilter(args, buildRetimedSourceAudioFilter(retimeMetadata, "0:a", "retimedOriginal", targetDurationMs), exportDir, job);
         args.push("-map", "[retimedOriginal]", "-vn");
       } else args.push("-map", "0:a:0", "-vn");
       args.push("-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", stagedOutput);
@@ -950,11 +946,9 @@ export async function exportRoutes(app: FastifyInstance) {
           sourceDurationMs - trimStartMs,
         ),
       );
-      const retimeExtensionMs = slowVideoMetadata?.reduce(
-        (total, cue) => total + Math.max(0, Number(cue.ttsDurationMs) - Number(cue.originalDurationMs)),
-        0,
-      ) || 0;
-      const renderDurationMs = durationMs + retimeExtensionMs;
+      const renderDurationMs = slowVideoMetadata?.length
+        ? retimedDurationMs(durationMs, slowVideoMetadata)
+        : durationMs;
       // Logo inputs loop and padded audio is intentionally unbounded. Always
       // provide the finite output duration so `-shortest` cannot wait forever
       // after the source video has ended.

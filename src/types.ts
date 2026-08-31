@@ -443,7 +443,7 @@ export interface ProductAdJobStatus {
 export type FlowVideoModel = 'Omni Flash' | 'Veo 3.1 - Fast' | 'Veo 3.1 - Lite' | 'Veo 3.1 - Quality' | 'Veo 3.1 - Lite [Lower Priority]';
 export type FlowVideoAspectRatio = '9:16' | '16:9';
 export interface AiVideoScene { index: number; title: string; narration: string; visualPrompt: string; status: 'pending' | 'generating' | 'completed' | 'failed' }
-export interface AiVideoJobStatus { id: string; status: 'queued' | 'planning' | 'generating' | 'composing' | 'completed' | 'failed' | 'cancelled'; stage: string; progressPercent: number; createdAt: string; updatedAt: string; brief: string; durationSeconds: number; model: FlowVideoModel; aspectRatio: FlowVideoAspectRatio; scenes: AiVideoScene[]; result?: { videoFile: string; durationMs: number }; error?: string }
+export interface AiVideoJobStatus { id: string; status: 'queued' | 'planning' | 'generating' | 'composing' | 'completed' | 'failed' | 'cancelled'; stage: string; progressPercent: number; createdAt: string; updatedAt: string; brief: string; durationSeconds: number; model: FlowVideoModel; aspectRatio: FlowVideoAspectRatio; productionBible?: string; scenes: AiVideoScene[]; result?: { videoFile: string; durationMs: number }; error?: string }
 
 export type DouyinItemState =
   | "pending"

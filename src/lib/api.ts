@@ -81,6 +81,7 @@ export function friendlyErrorMessage(
   if (!raw) return fallback;
   const status = typeof typed?.status === "number" ? typed.status : undefined;
   const lower = raw.toLowerCase();
+  if (/google flow|flow client|recaptcha/i.test(raw)) return raw;
   if (/spawn ffprobe enoent|không tìm thấy ffprobe/i.test(raw))
     return "Máy chưa tìm thấy FFprobe nên không thể đọc thời lượng video để xuất file. Hãy cài hoặc khôi phục FFmpeg rồi chạy lại AutoSub.";
   if (/spawn ffmpeg enoent|không tìm thấy ffmpeg/i.test(raw))
@@ -801,9 +802,12 @@ export const api = {
   createProductAdFlowPreview: (id: string) =>
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/flow-preview`, { method: "POST" }),
   createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FlowVideoModel; aspectRatio: '9:16' | '16:9'; script: { provider: AIProvider; model: string }; flowCredentials: { nanoApiKey: string; veoToken: string; veoCookie: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
+  flowBrowserStatus: () => request<{ open: boolean; signedIn: boolean; url: string }>('/api/ai-video/flow-browser/status'),
+  openFlowBrowser: () => request<{ open: boolean; signedIn: boolean; url: string }>('/api/ai-video/flow-browser/open', { method: 'POST' }),
+  closeFlowBrowser: () => request<{ open: boolean; signedIn: boolean; url: string }>('/api/ai-video/flow-browser/close', { method: 'POST' }),
   getAiVideoJob: (id: string, signal?: AbortSignal) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}`, { signal }),
   cancelAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
-  resumeAiVideoJob: (id: string, flowCredentials: { nanoApiKey: string; veoToken: string; veoCookie: string }, model: FlowVideoModel) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ flowCredentials, model }) }),
+  resumeAiVideoJob: (id: string, flowCredentials: { nanoApiKey: string; veoToken: string; veoCookie: string }, model: FlowVideoModel, script: { provider: AIProvider; model: string }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ flowCredentials, model, script }) }),
   getReviewJob: (id: string, signal?: AbortSignal) =>
     request<ReviewJobStatus>(`/api/review/jobs/${encodeURIComponent(id)}`, {
       signal,

@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "AutoSub Flow Bridge",
+  "version": "0.2.1",
+  "description": "Connects the signed-in Google Flow tab to AutoSub running on this computer.",
+  "permissions": ["debugger"],
+  "host_permissions": ["http://127.0.0.1:8787/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{
+    "matches": ["https://labs.google/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }]
+}
