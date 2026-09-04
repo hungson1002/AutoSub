@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   cancelBatchJob,
   cancelBatchItem,
+  convertHevcToH264IfNeeded,
   createBatchJob,
   appendToBatchJob,
   downloadTurboStream,
@@ -16,6 +17,43 @@ import {
   recommendedBilibiliConnections,
 } from './douyinDownloader';
 import { douyinMediaFromDetail } from './douyinExtractor';
+
+test('keeps an existing H.264 MP4 unchanged', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'autosub-h264-compatible-'));
+  const target = path.join(tempDir, 'video.mp4');
+  try {
+    const { run } = await import('./ffmpeg');
+    await run('ffmpeg', [
+      '-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=size=16x16:rate=1',
+      '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', target,
+    ]);
+    const before = await readFile(target);
+    assert.equal(await convertHevcToH264IfNeeded(target), false);
+    assert.deepEqual(await readFile(target), before);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('converts an HEVC MP4 to browser-compatible H.264', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'autosub-hevc-compatible-'));
+  const target = path.join(tempDir, 'video.mp4');
+  try {
+    const { run } = await import('./ffmpeg');
+    await run('ffmpeg', [
+      '-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=size=16x16:rate=1',
+      '-t', '1', '-c:v', 'libx265', '-pix_fmt', 'yuv420p', target,
+    ]);
+    assert.equal(await convertHevcToH264IfNeeded(target), true);
+    const probe = await run('ffprobe', [
+      '-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_name', '-of', 'default=nw=1:nk=1', target,
+    ]);
+    assert.equal(probe.stdout.trim(), 'h264');
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 test('extractDouyinUrls extracts Douyin and Bilibili links from text', () => {
   const sampleText = `

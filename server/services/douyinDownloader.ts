@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { open, rm, stat, writeFile } from 'node:fs/promises';
+import { open, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -147,6 +147,29 @@ async function validateDownloadedVideo(filePath: string, downloadedBytes: number
   const stored = await stat(filePath);
   if (stored.size !== downloadedBytes) {
     throw new Error('Dung lượng video trên đĩa không khớp dữ liệu đã tải.');
+  }
+}
+
+export async function convertHevcToH264IfNeeded(filePath: string, signal?: AbortSignal): Promise<boolean> {
+  const probe = await run('ffprobe', [
+    '-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=codec_name', '-of', 'default=nw=1:nk=1', filePath,
+  ], signal);
+  if (!['hevc', 'h265'].includes(probe.stdout.trim().toLowerCase())) return false;
+
+  const convertedPath = `${filePath}.h264.mp4`;
+  try {
+    await run('ffmpeg', [
+      '-y', '-hide_banner', '-loglevel', 'error', '-i', filePath,
+      '-map', '0:v:0', '-map', '0:a?',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', convertedPath,
+    ], signal);
+    await rm(filePath, { force: true });
+    await rename(convertedPath, filePath);
+    return true;
+  } finally {
+    await rm(convertedPath, { force: true }).catch(() => undefined);
   }
 }
 
@@ -706,6 +729,13 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
   }
 
   try {
+    if (info.platform === 'douyin') {
+      await convertHevcToH264IfNeeded(targetFilePath, signal);
+      downloadedBytes = (await stat(targetFilePath)).size;
+      item.downloadedBytes = downloadedBytes;
+      item.totalBytes = downloadedBytes;
+    }
+
     // Step 3: Write upload.json metadata to integrate seamlessly with AutoSub
     const record = {
       uploadId,

@@ -57,6 +57,8 @@ export function ProductAdPage({ providers, settings, onNotice }: {
   const [tone, setTone] = useState('UGC chân thật, nhanh gọn, không khoa trương');
   const [customPrompt, setCustomPrompt] = useState('');
   const [burnSubtitles, setBurnSubtitles] = useState(true);
+  const [useFlowAgentVisuals, setUseFlowAgentVisuals] = useState(false);
+  const [flowAgent, setFlowAgent] = useState<Awaited<ReturnType<typeof api.flowAgentStatus>>>();
   const [visionAssignment, setVisionAssignment] = useState<ProviderAssignment>(settings.assignments.vision);
   const [scriptAssignment, setScriptAssignment] = useState<ProviderAssignment>(settings.assignments.translation);
   const [ttsAssignment, setTtsAssignment] = useState<ProviderAssignment>(settings.assignments.tts);
@@ -98,6 +100,12 @@ export function ProductAdPage({ providers, settings, onNotice }: {
   }, []);
 
   useEffect(() => { imagesRef.current = images; }, [images]);
+  useEffect(() => {
+    let mounted = true;
+    const refresh = () => void api.flowAgentStatus().then((status) => { if (mounted) setFlowAgent(status); }).catch(() => { if (mounted) setFlowAgent(undefined); });
+    refresh(); const timer = window.setInterval(refresh, 5000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
   useEffect(() => () => {
     uploadControllersRef.current.forEach((controller) => controller.abort());
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url));
@@ -202,6 +210,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
     if (!productName.trim() || productDescription.trim().length < 20) { onNotice('Hãy nhập tên và mô tả sản phẩm ít nhất 20 ký tự.', 'error'); return; }
     if (!scriptProvider || !scriptAssignment.model) { onNotice('Cấu hình Script AI còn thiếu.', 'error'); return; }
     if (outputMode === 'render' && (!ttsProvider || !ttsAssignment.model || !voice)) { onNotice('Cấu hình TTS còn thiếu để render MP4.', 'error'); return; }
+    if (useFlowAgentVisuals && !flowAgent?.connected) { onNotice('Flow Agent chưa sẵn sàng. Hãy mở Google Flow và tải lại tab.', 'error'); return; }
     setStarting(true);
     try {
       const created = await api.createProductAdJob({
@@ -217,6 +226,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
         tone,
         customPrompt,
         burnSubtitles,
+        useFlowAgentVisuals,
         vision: visionProvider && visionAssignment.model ? { provider: visionProvider, model: visionAssignment.model } : undefined,
         script: { provider: scriptProvider, model: scriptAssignment.model },
         tts: outputMode === 'render' && ttsProvider ? { provider: ttsProvider, model: ttsAssignment.model, voice, speed: voiceSpeed } : undefined,
@@ -303,10 +313,12 @@ export function ProductAdPage({ providers, settings, onNotice }: {
           <div className="product-veo-mode-note"><WandSparkles size={15} /><span>AutoSub sẽ tạo lời đọc, dựng chuyển động từ ảnh sản phẩm, đốt phụ đề nếu bật và xuất trực tiếp video MP4 hoàn chỉnh.</span></div>
           <div className="two-fields"><div className="field"><span>Nền tảng</span><SelectField ariaLabel="Nền tảng đăng" value={platform} onChange={(value) => setPlatform(value as ProductAdPlatform)} options={[{ value: 'both', label: 'TikTok + YouTube Shorts' }, { value: 'tiktok', label: 'TikTok' }, { value: 'youtube-shorts', label: 'YouTube Shorts' }]} /></div><div className="field"><span>Phong cách</span><SelectField ariaLabel="Phong cách quảng cáo" value={tone} onChange={setTone} options={['UGC chân thật, nhanh gọn, không khoa trương', 'Review trực diện, tập trung tính năng', 'Kể chuyện vấn đề → giải pháp', 'Năng động, nhiều hook ngắn'].map((value) => ({ value, label: value }))} /></div></div>
           <div className="field"><span>Thời lượng mục tiêu <b className="value-badge">{targetDuration} giây</b></span><RangeInput min={10} max={60} step={5} value={targetDuration} onChange={(event) => setTargetDuration(Number(event.target.value))} /></div>
+          <label className="toggle-row compact"><input type="checkbox" checked={useFlowAgentVisuals} onChange={(event) => setUseFlowAgentVisuals(event.target.checked)} /><i /><span>Dùng Flow Agent tạo hình quảng cáo cho từng cảnh</span></label>
+          {useFlowAgentVisuals && <div className="product-veo-mode-note"><ShieldCheck size={15} /><span>{flowAgent?.connected ? 'Flow Agent đã sẵn sàng · Nano Banana 2 sẽ giữ hình dáng sản phẩm từ ảnh gốc.' : 'Flow Agent chưa kết nối. Mở Google Flow và tải lại tab trước khi dựng.'}</span></div>}
           <div className="field"><span>Yêu cầu bổ sung <small>· không bắt buộc</small></span><textarea value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} placeholder="Ví dụ: mở đầu bằng vấn đề điện thoại rơi khi xem phim trên giường…" /></div>
           {outputMode === 'render' && <label className="toggle-row compact"><input type="checkbox" checked={burnSubtitles} onChange={(event) => setBurnSubtitles(event.target.checked)} /><i /><span>Đốt phụ đề tiếng Việt vào video</span></label>}
           <div className="review-safety-note"><ShieldCheck size={16} /><span>AI được yêu cầu không tự bịa giá, ưu đãi, trải nghiệm hoặc công dụng. Bạn vẫn cần duyệt lại kịch bản và giữ disclosure affiliate khi đăng.</span></div>
-          <button type="submit" className="button primary large full" disabled={running || uploading}><WandSparkles size={16} /> {running ? 'Pipeline đang chạy…' : uploading ? 'Đang lưu ảnh…' : outputMode === 'veo3-script' ? 'Tạo gói prompt Veo 3' : 'Tạo video quảng cáo'} <span>→</span></button>
+          <button type="submit" className="button primary large full" disabled={running || uploading || (useFlowAgentVisuals && !flowAgent?.connected)}><WandSparkles size={16} /> {running ? 'Pipeline đang chạy…' : uploading ? 'Đang lưu ảnh…' : useFlowAgentVisuals ? 'Tạo quảng cáo bằng Flow Agent' : 'Tạo video quảng cáo'} <span>→</span></button>
         </section>
       </div>
 

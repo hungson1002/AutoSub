@@ -14,8 +14,14 @@ import { voiceCloneRoutes } from './routes/voiceClones';
 import { douyinRoutes } from './routes/douyin';
 import { productAdRoutes } from './routes/productAds';
 import { aiVideoRoutes } from './routes/aiVideo';
+import { animationStudioRoutes } from './routes/animationStudio';
+import { storageRoutes } from './routes/storage';
 import { ensureCapCutTtsRuntime } from './services/capcutTtsBridge';
 import { ensureVieneuRuntime } from './services/vieneuRuntime';
+import { ensureFlowAgentRuntime } from './services/flowBrowser';
+
+try { process.loadEnvFile?.(); }
+catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
 
 // The multipart plugin enforces the actual per-file limit. Leave a small amount
 // of room here for multipart headers and boundaries so a file exactly at 4 GiB
@@ -51,6 +57,8 @@ await app.register(exportRoutes);
 await app.register(reviewRoutes);
 await app.register(productAdRoutes);
 await app.register(aiVideoRoutes);
+await app.register(animationStudioRoutes);
+await app.register(storageRoutes);
 await app.register(douyinRoutes);
 app.setErrorHandler((error, _request, reply) => {
   app.log.warn(error instanceof Error ? error.message : String(error));
@@ -61,9 +69,9 @@ app.setErrorHandler((error, _request, reply) => {
 const port = Number(process.env.AUTOSUB_PORT || 8787);
 await app.listen({ port, host: '127.0.0.1' });
 console.log(`AutoSub backend listening on http://127.0.0.1:${port}`);
-void Promise.allSettled([ensureCapCutTtsRuntime(), ensureVieneuRuntime()]).then((results) => {
+void Promise.allSettled([ensureCapCutTtsRuntime(), ensureVieneuRuntime(), ensureFlowAgentRuntime()]).then((results) => {
   results.forEach((result, index) => {
-    const name = index === 0 ? 'CapCut TTS' : 'VieNeu';
+    const name = ['CapCut TTS', 'VieNeu', 'Flow Agent'][index];
     if (result.status === 'fulfilled') app.log.info(`${name} runtime sẵn sàng.`);
     else app.log.warn(`${name} chưa tự cài được: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
   });

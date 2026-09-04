@@ -12,6 +12,8 @@ import { DouyinPage } from "./pages/DouyinPage";
 import { ProductAdPage } from "./pages/ProductAdPage";
 import { AutoPipelinePage } from "./pages/AutoPipelinePage";
 import { AiVideoPage } from "./pages/AiVideoPage";
+import { AnimationStudioPage } from "./pages/AnimationStudioPage";
+import { StoragePage } from "./pages/StoragePage";
 import { X, Check } from "./components/Icons";
 import { ensureBuiltInProviders } from "./lib/providers";
 import {
@@ -45,6 +47,7 @@ export default function App() {
   }, [asset]);
   useEffect(() => {
     if (!toast) return;
+    if (toast.kind === "error") return;
     const id = window.setTimeout(() => setToast(undefined), 4300);
     return () => window.clearTimeout(id);
   }, [toast]);
@@ -180,6 +183,8 @@ export default function App() {
           />
         )}
         {page === "ai-video" && <AiVideoPage providers={providers} settings={settings} onNotice={notice} />}
+        {page === "animation-studio" && <AnimationStudioPage providers={providers} settings={settings} onNotice={notice} />}
+        {page === "storage" && <StoragePage onNotice={notice} />}
         {page === "voice-clone" && (
           <VoiceClonePage
             providers={providers}
@@ -219,7 +224,7 @@ export default function App() {
         )}
       </Layout>
       {toast && (
-        <div className={`toast ${toast.kind}`}>
+        <div className={`toast ${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"}>
           <span className="toast-mark">
             {toast.kind === "success" ? <Check size={14} /> : <X size={14} />}
           </span>

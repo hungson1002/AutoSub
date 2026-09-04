@@ -391,10 +391,20 @@ export function DouyinPage({
     seenItemIds.add(item.id);
     return true;
   });
-  const handleDeleteItem = (item: DouyinBatchItem) => {
+  const handleDeleteItem = async (item: DouyinBatchItem) => {
+    const unfinished = item.status === "pending" || item.status === "resolving" || item.status === "downloading";
+    if (unfinished && batchJob?.id) {
+      try {
+        await api.cancelDouyinBatchItem(batchJob.id, item.id);
+      } catch (error) {
+        onNotice(friendlyErrorMessage(error, "Không thể dừng video trước khi xóa."), "error");
+        return;
+      }
+    }
     deletedItemIdsRef.current.add(item.id);
     setHistoryItems((items) => items.filter((entry) => entry.id !== item.id));
     setBatchJob((job) => job ? { ...job, items: job.items.filter((entry) => entry.id !== item.id) } : undefined);
+    onNotice(unfinished ? "Đã dừng và xóa video khỏi danh sách." : "Đã xóa video khỏi danh sách.", "success");
   };
   const processedItems = batchJob
     ? batchJob.completedItems + batchJob.failedItems
@@ -692,8 +702,6 @@ export function DouyinPage({
               {displayItems.map((item) => {
                 const isWorking =
                   item.status === "resolving" || item.status === "downloading";
-                const canDeleteItem =
-                  item.status === "completed" || item.status === "failed" || item.status === "cancelled";
                 return (
                   <article
                     className={`douyin-item status-${item.status}`}
@@ -836,18 +844,17 @@ export function DouyinPage({
                               <Download size={13} /> Tải thumbnail
                             </a>
                           )}
-                          {canDeleteItem && (
-                            <button
-                              className="douyin-delete-item"
-                              type="button"
-                              onClick={() => handleDeleteItem(item)}
-                              aria-label={`Xóa ${item.title || "video"} khỏi danh sách`}
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          )}
                         </div>
                       )}
+                      <button
+                        className="douyin-delete-item"
+                        type="button"
+                        onClick={() => void handleDeleteItem(item)}
+                        aria-label={`${item.status === "pending" || isWorking ? "Dừng và xóa" : "Xóa"} ${item.title || "video"} khỏi danh sách`}
+                        title={item.status === "pending" || isWorking ? "Dừng tải và xóa khỏi danh sách" : "Xóa khỏi danh sách"}
+                      >
+                        <Trash2 size={14} />
+                      </button>
                     </div>
                   </article>
                 );

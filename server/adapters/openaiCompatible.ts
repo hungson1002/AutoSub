@@ -117,7 +117,24 @@ export async function testModel(provider: AIProvider, model: string, capability:
   }
 }
 
-export async function chat(provider: AIProvider, model: string, messages: Array<{ role: 'system' | 'user'; content: string | Array<Record<string, unknown>> }>, signal?: AbortSignal, maxTokens?: number) { const response = await fetch(withAuthQuery(endpoint(provider, 'chat', '/chat/completions'), provider), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, temperature: 0.2, stream: false, ...(maxTokens ? { max_tokens: maxTokens } : {}) }) }); const data = await responseJson(response, provider, 'Provider chat không phản hồi.'); const choices = Array.isArray(data.choices) ? data.choices : []; const content = (choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content; if (typeof content !== 'string') throw new ProviderError('Provider không trả về message content.'); return content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim(); }
+export async function chat(provider: AIProvider, model: string, messages: Array<{ role: 'system' | 'user'; content: string | Array<Record<string, unknown>> }>, signal?: AbortSignal, maxTokens?: number) {
+  const url = withAuthQuery(endpoint(provider, 'chat', '/chat/completions'), provider);
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, temperature: 0.2, stream: false, ...(maxTokens ? { max_tokens: maxTokens } : {}) }) });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    const cause = error && typeof error === 'object' && 'cause' in error ? (error as { cause?: { code?: unknown; message?: unknown } }).cause : undefined;
+    const code = cause?.code ? String(cause.code) : '';
+    const detail = cause?.message ? String(cause.message) : '';
+    throw new ProviderError(`Không thể kết nối provider viết kịch bản “${provider.name}” tại ${url}.${code ? ` Mã mạng: ${code}.` : ''}${detail ? ` ${detail}` : ''}`, 502);
+  }
+  const data = await responseJson(response, provider, 'Provider chat không phản hồi.');
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  const content = (choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content;
+  if (typeof content !== 'string') throw new ProviderError('Provider không trả về message content.');
+  return content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+}
 
 function normalizedTranslationText(text: string) {
   return text.normalize('NFKC').toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');

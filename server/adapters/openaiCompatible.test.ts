@@ -1,7 +1,21 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import type { AIProvider } from '../types';
-import { buildTranslationGuide, listModels, normalizeSttLanguage, synthesize, testModel, transcribe, translateBatch } from './openaiCompatible';
+import { buildTranslationGuide, chat, listModels, normalizeSttLanguage, synthesize, testModel, transcribe, translateBatch } from './openaiCompatible';
+
+test('chat reports the failing script provider and endpoint on network errors', async () => {
+  const originalFetch = globalThis.fetch;
+  const provider: AIProvider = {
+    id: 'offline-provider', name: 'Local Script AI', baseUrl: 'http://127.0.0.1:9999/v1', enabled: true,
+    models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true },
+  };
+  globalThis.fetch = (async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED', message: 'connection refused' } }); }) as typeof fetch;
+  try {
+    await assert.rejects(() => chat(provider, 'model', [{ role: 'user', content: 'hello' }]), /Local Script AI.*127\.0\.0\.1:9999.*ECONNREFUSED/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('normalizes UI language labels to provider language codes', () => {
   assert.equal(normalizeSttLanguage('中文'), 'zh');

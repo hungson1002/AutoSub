@@ -21,6 +21,7 @@ import type {
   FlowVideoModel,
 } from "../types";
 import { cuesToAss } from "./subtitles";
+import type { AnimationAsset, AnimationProject } from "../../shared/animationStudio";
 
 // Large media bypasses Vite's development proxy. JSON requests remain relative.
 const MEDIA_BACKEND_ORIGIN = "http://127.0.0.1:8787";
@@ -29,6 +30,7 @@ export interface TranslationMemoryItem {
   source: string;
   translation: string;
 }
+type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent' };
 export function buildTranslationMemory(cues: SubtitleCue[], cueId: string, limit = 24): TranslationMemoryItem[] {
   const cueIndex = cues.findIndex((cue) => cue.id === cueId);
   const previous = cues
@@ -49,6 +51,7 @@ export const productAdVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/product-ads/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
 export const aiVideoUrl = (jobId: string, download = false) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/video${download ? '?download=1' : ''}`;
 export const aiVideoClipUrl = (jobId: string, sceneIndex: number, download = false) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/clips/${sceneIndex}${download ? '?download=1' : ''}`;
+export const animationAssetUrl = (uploadId: string) => `${MEDIA_BACKEND_ORIGIN}/api/uploads/${encodeURIComponent(uploadId)}/media`;
 
 export type StoredMediaResult = {
   uploadId: string;
@@ -58,6 +61,30 @@ export type StoredMediaResult = {
   size: number;
   sourceMode?: "copied" | "linked";
 };
+
+export interface StorageItem {
+  id: string;
+  categoryId: string;
+  name: string;
+  displayName: string;
+  detail: string;
+  sizeBytes: number;
+  fileCount: number;
+  modifiedAt: string;
+  status?: string;
+  canDelete: boolean;
+  deleteBlockedReason?: string;
+}
+
+export interface StorageSnapshot {
+  workdir: string;
+  totalBytes: number;
+  managedBytes: number;
+  otherBytes: number;
+  itemCount: number;
+  scannedAt: string;
+  categories: Array<{ id: string; label: string; description: string; sizeBytes: number; items: StorageItem[] }>;
+}
 
 type ApiError = Error & { detail?: string; status?: number; code?: string };
 
@@ -82,6 +109,7 @@ export function friendlyErrorMessage(
   const status = typeof typed?.status === "number" ? typed.status : undefined;
   const lower = raw.toLowerCase();
   if (/google flow|flow client|recaptcha/i.test(raw)) return raw;
+  if (/không thể kết nối provider viết kịch bản/i.test(raw)) return raw;
   if (/spawn ffprobe enoent|không tìm thấy ffprobe/i.test(raw))
     return "Máy chưa tìm thấy FFprobe nên không thể đọc thời lượng video để xuất file. Hãy cài hoặc khôi phục FFmpeg rồi chạy lại AutoSub.";
   if (/spawn ffmpeg enoent|không tìm thấy ffmpeg/i.test(raw))
@@ -213,6 +241,35 @@ function decodeBase64Json<T>(value: string | null): T | undefined {
 }
 
 export const api = {
+  inspectStorage: (signal?: AbortSignal) => request<StorageSnapshot>('/api/storage', { signal }),
+  deleteStorageItems: (items: Array<Pick<StorageItem, 'categoryId' | 'name'>>) => request<{ deletedCount: number; freedBytes: number; errors: Array<{ categoryId: string; name: string; error: string }> }>('/api/storage/delete', { method: 'POST', body: JSON.stringify({ items }) }),
+  createAnimationProject: (input: { name: string; width: number; height: number; fps: number }) =>
+    request<AnimationProject>("/api/animation-studio/projects", { method: "POST", body: JSON.stringify(input) }),
+  getAnimationProject: (id: string) => request<AnimationProject>(`/api/animation-studio/projects/${encodeURIComponent(id)}`),
+  saveAnimationProject: (project: AnimationProject) => request<AnimationProject>(`/api/animation-studio/projects/${encodeURIComponent(project.id)}`, { method: "PUT", body: JSON.stringify(project) }),
+  listAnimationProjectVersions: (id: string) => request<Array<{ id: string; createdAt: string; name: string; sceneCount: number }>>(`/api/animation-studio/projects/${encodeURIComponent(id)}/versions`),
+  restoreAnimationProjectVersion: (id: string, versionId: string) => request<AnimationProject>(`/api/animation-studio/projects/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/restore`, { method: "POST" }),
+  directAnimationProject: (input: { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }) =>
+    request<AnimationProject>("/api/animation-studio/direct", { method: "POST", body: JSON.stringify(input) }),
+  batchDirectAnimationProjects: (input: { briefs: string[]; template: AnimationProject; provider: AIProvider; model: string; assetGeneration?: AnimationAssetGeneration }) => request<{ total: number; completed: number; failed: number; results: Array<{ brief: string; status: "completed" | "failed"; project?: AnimationProject; error?: string }> }>("/api/animation-studio/direct-batch", { method: "POST", body: JSON.stringify(input) }),
+  editAnimationScene: (input: { instruction: string; project: AnimationProject; sceneId: string; provider: AIProvider; model: string; mode?: "edit" | "animation" | "visual" }) => request<AnimationProject>("/api/animation-studio/edit", { method: "POST", body: JSON.stringify(input) }),
+  editAnimationProject: (input: { instruction: string; project: AnimationProject; provider: AIProvider; model: string }) => request<AnimationProject>("/api/animation-studio/edit-project", { method: "POST", body: JSON.stringify(input) }),
+  checkAnimationQuality: (project: AnimationProject) => request<{ issues: Array<{ severity: "error" | "warning"; code: string; sceneId: string; layerId?: string; message: string }> }>("/api/animation-studio/quality-check", { method: "POST", body: JSON.stringify(project) }),
+  fixAnimationQuality: (project: AnimationProject) => request<{ project: AnimationProject; fixed: number; remaining: Array<{ severity: "error" | "warning"; code: string; sceneId: string; layerId?: string; message: string }> }>("/api/animation-studio/quality-fix", { method: "POST", body: JSON.stringify(project) }),
+  renderAnimationProject: async (projectId: string, recording: Blob, project?: AnimationProject) => {
+    const renderState = project ? { ...project, createdAt: "", updatedAt: "", assets: project.assets.map((asset) => ({ ...asset, createdAt: "" })) } : { projectId }; const encoded = new TextEncoder().encode(JSON.stringify(renderState)); const digest = await crypto.subtle.digest("SHA-256", encoded); const cacheKey = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const queued = await fetch(`/api/animation-studio/projects/${encodeURIComponent(projectId)}/render-jobs`, { method: "POST", headers: { "Content-Type": "video/webm", "X-Animation-Cache-Key": cacheKey }, body: recording });
+    if (!queued.ok) { const body = await queued.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Không thể xếp render animation."); }
+    const initial = await queued.json() as { id: string }; let job: { status: string; error?: string } = { status: "queued" };
+    for (let attempt = 0; attempt < 900; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); if (job.status === "completed" || job.status === "failed") break; }
+    if (job.status !== "completed") throw new Error(job.error || "Render queue quá thời gian chờ."); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video từ render queue."); return response.blob();
+  },
+  listAnimationRenderJobs: () => request<Array<{ id: string; projectId: string; status: "queued" | "rendering" | "completed" | "failed"; progress: number; cached?: boolean; error?: string; createdAt: string }>>("/api/animation-studio/render-jobs"),
+  listAnimationAssets: (query = "") => request<AnimationAsset[]>(`/api/animation-studio/assets?q=${encodeURIComponent(query)}`),
+  registerAnimationAsset: (asset: AnimationAsset) => request<AnimationAsset>("/api/animation-studio/assets", { method: "POST", body: JSON.stringify(asset) }),
+  updateAnimationAsset: (id: string, change: Partial<Pick<AnimationAsset, "name" | "tags" | "style" | "animations">>) => request<AnimationAsset>(`/api/animation-studio/assets/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(change) }),
+  generateAnimationAsset: (input: { prompt: string; name?: string; type?: AnimationAsset["type"]; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent' }) => request<AnimationAsset>("/api/animation-studio/assets/generate", { method: "POST", body: JSON.stringify(input) }),
+  generateAnimationNarration: (input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number }) => request<AnimationProject>("/api/animation-studio/narration", { method: "POST", body: JSON.stringify(input) }),
   system: () =>
     request<{
       ffmpeg: boolean;
@@ -785,6 +842,7 @@ export const api = {
       tone: string;
       customPrompt?: string;
       burnSubtitles: boolean;
+      useFlowAgentVisuals?: boolean;
       vision?: { provider: AIProvider; model: string };
       script: { provider: AIProvider; model: string };
       tts?: { provider: AIProvider; model: string; voice: string; speed: number };
@@ -801,13 +859,12 @@ export const api = {
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   createProductAdFlowPreview: (id: string) =>
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/flow-preview`, { method: "POST" }),
-  createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FlowVideoModel; aspectRatio: '9:16' | '16:9'; script: { provider: AIProvider; model: string }; flowCredentials: { nanoApiKey: string; veoToken: string; veoCookie: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
-  flowBrowserStatus: () => request<{ open: boolean; signedIn: boolean; url: string }>('/api/ai-video/flow-browser/status'),
-  openFlowBrowser: () => request<{ open: boolean; signedIn: boolean; url: string }>('/api/ai-video/flow-browser/open', { method: 'POST' }),
-  closeFlowBrowser: () => request<{ open: boolean; signedIn: boolean; url: string }>('/api/ai-video/flow-browser/close', { method: 'POST' }),
+  createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FlowVideoModel; aspectRatio: '9:16' | '16:9'; characterReferenceUploadId?: string; script: { provider: AIProvider; model: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
+  flowAgentStatus: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/status'),
+  openFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/open', { method: 'POST' }),
   getAiVideoJob: (id: string, signal?: AbortSignal) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}`, { signal }),
   cancelAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
-  resumeAiVideoJob: (id: string, flowCredentials: { nanoApiKey: string; veoToken: string; veoCookie: string }, model: FlowVideoModel, script: { provider: AIProvider; model: string }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ flowCredentials, model, script }) }),
+  resumeAiVideoJob: (id: string, model: FlowVideoModel, script: { provider: AIProvider; model: string }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ model, script }) }),
   getReviewJob: (id: string, signal?: AbortSignal) =>
     request<ReviewJobStatus>(`/api/review/jobs/${encodeURIComponent(id)}`, {
       signal,

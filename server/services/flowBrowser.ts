@@ -1,76 +1,97 @@
-import { mkdir } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { access } from 'node:fs/promises';
 import path from 'node:path';
-import { chromium, type BrowserContext, type Page } from 'playwright-core';
-import { workdir } from './ffmpeg';
 
-const flowUrl = 'https://labs.google/fx/vi/tools/flow';
-const executablePath = process.env.COCCOC_PATH?.trim() || 'C:\\Program Files\\CocCoc\\Browser\\Application\\browser.exe';
-const profilePath = path.join(workdir, 'flow-browser-profile');
-let contextPromise: Promise<BrowserContext> | undefined;
+const flowUrl = 'https://flow.google.com/';
+const flowAgentUrl = () => String(process.env.FLOW_AGENT_URL || 'http://127.0.0.1:8001').replace(/\/$/, '');
 
-async function context() {
-  if (!contextPromise) {
-    await mkdir(profilePath, { recursive: true });
-    contextPromise = chromium.launchPersistentContext(profilePath, {
-      executablePath,
-      headless: false,
-      viewport: null,
-      args: ['--start-maximized', '--disable-default-apps'],
-    }).then((browserContext) => {
-      browserContext.once('close', () => { contextPromise = undefined; });
-      return browserContext;
-    }).catch((error) => {
-      contextPromise = undefined;
-      throw error;
-    });
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+async function flowAgentIsRunning() {
+  try {
+    const response = await fetch(`${flowAgentUrl()}/health`, { signal: AbortSignal.timeout(1_500) });
+    return response.ok;
+  } catch {
+    return false;
   }
-  return contextPromise;
 }
 
-async function flowPage(browserContext: BrowserContext): Promise<Page> {
-  const existing = browserContext.pages().find((page) => /labs\.google|accounts\.google/.test(page.url()));
-  return existing || browserContext.pages()[0] || browserContext.newPage();
+async function flowExecutable() {
+  const configured = process.env.FLOW_AGENT_EXECUTABLE?.trim();
+  if (configured) {
+    await access(configured);
+    return configured;
+  }
+
+  if (process.platform === 'win32' && process.env.USERPROFILE) {
+    const installed = path.join(process.env.USERPROFILE, '.local', 'bin', 'flow.exe');
+    try {
+      await access(installed);
+      return installed;
+    } catch {
+      // Fall back to PATH below.
+    }
+  }
+
+  return process.platform === 'win32' ? 'flow.exe' : 'flow';
+}
+
+let flowAgentStartup: Promise<{ started: boolean; url: string }> | undefined;
+
+export function ensureFlowAgentRuntime() {
+  if (!flowAgentStartup) {
+    flowAgentStartup = (async () => {
+      if (await flowAgentIsRunning()) return { started: false, url: flowAgentUrl() };
+
+      const executable = await flowExecutable();
+      const child = spawn(executable, [], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      child.unref();
+
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        if (await flowAgentIsRunning()) return { started: true, url: flowAgentUrl() };
+        await delay(250);
+      }
+      throw new Error(`Flow Agent không phản hồi tại ${flowAgentUrl()} sau khi tự khởi động.`);
+    })().finally(() => {
+      flowAgentStartup = undefined;
+    });
+  }
+  return flowAgentStartup;
+}
+
+function operaPath() {
+  const configured = process.env.OPERA_PATH?.trim();
+  if (configured) return configured;
+
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  if (!localAppData) {
+    throw new Error('Không tìm thấy Opera GX. Hãy đặt OPERA_PATH trong .env.');
+  }
+
+  return path.join(localAppData, 'Programs', 'Opera GX', 'opera.exe');
 }
 
 export async function openFlowBrowser() {
-  const browserContext = await context();
-  const page = await flowPage(browserContext);
-  if (!/labs\.google|accounts\.google/.test(page.url())) await page.goto(flowUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  await page.bringToFront();
-  return flowBrowserStatus();
-}
+  await ensureFlowAgentRuntime();
+  const executablePath = operaPath();
+  await access(executablePath).catch(() => {
+    throw new Error(`Không tìm thấy Opera GX tại ${executablePath}. Hãy đặt OPERA_PATH trong .env.`);
+  });
 
-export async function flowBrowserStatus() {
-  if (!contextPromise) return { open: false, signedIn: false, url: '' };
-  try {
-    const browserContext = await contextPromise;
-    const page = await flowPage(browserContext);
-    const url = page.url();
-    const signedIn = /labs\.google\/fx\//.test(url) && !/accounts\.google/.test(url) && await page.locator('body').evaluate((body) => !/đăng nhập|sign in|try google flow|get started/i.test(body.innerText.slice(0, 12000))).catch(() => false);
-    return { open: true, signedIn, url };
-  } catch {
-    contextPromise = undefined;
-    return { open: false, signedIn: false, url: '' };
-  }
-}
+  const child = spawn(executablePath, [flowUrl], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+  });
+  child.unref();
 
-export async function closeFlowBrowser() {
-  const pending = contextPromise;
-  contextPromise = undefined;
-  if (pending) await pending.then((browserContext) => browserContext.close()).catch(() => undefined);
-  return { open: false, signedIn: false, url: '' };
-}
-
-export async function inspectFlowBrowser() {
-  const browserContext = await context();
-  const page = await flowPage(browserContext);
-  const controls = await page.locator('textarea, input, [contenteditable="true"], button').evaluateAll((elements) => elements.slice(0, 120).map((element) => ({
-    tag: element.tagName.toLowerCase(),
-    text: (element.textContent || '').trim().slice(0, 160),
-    ariaLabel: element.getAttribute('aria-label') || '',
-    placeholder: element.getAttribute('placeholder') || '',
-    type: element.getAttribute('type') || '',
-    visible: Boolean((element as any).offsetWidth || (element as any).offsetHeight),
-  })).filter((item) => item.visible));
-  return { url: page.url(), title: await page.title(), controls };
+  return { open: true, browser: 'Opera GX', url: flowUrl };
 }

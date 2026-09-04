@@ -2,6 +2,11 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import { defaultStyle, type AIProvider, type SubtitleCue } from "../types";
 import { api, buildRequestInit, buildTranslationMemory, friendlyErrorMessage } from "./api";
+
+test("preserves actionable script-provider connection errors", () => {
+  const message = "Không thể kết nối provider viết kịch bản “Local AI” tại http://127.0.0.1:9999/v1/chat/completions. Mã mạng: ECONNREFUSED.";
+  assert.equal(friendlyErrorMessage(new Error(message)), message);
+});
 import { LatestUploadGuard } from "./latestUpload";
 import { videoAssetUploadFile } from "./videoAsset";
 

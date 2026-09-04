@@ -6,7 +6,7 @@ import { chat, recognizeImage, synthesize } from '../adapters';
 import { resolveProviderType } from '../providers/base';
 import { run, workdir } from './ffmpeg';
 import { resolveUpload } from './uploads';
-import { generateGoogleFlowPreview } from './googleFlow';
+import { generateGoogleFlowImage, generateGoogleFlowPreview, validateGoogleFlowSession } from './googleFlow';
 
 export interface CreateProductAdJobInput {
   imageUploadIds: string[];
@@ -21,6 +21,7 @@ export interface CreateProductAdJobInput {
   tone: string;
   customPrompt?: string;
   burnSubtitles: boolean;
+  useFlowAgentVisuals?: boolean;
   vision?: { provider: AIProvider; model: string };
   script: { provider: AIProvider; model: string };
   tts?: { provider: AIProvider; model: string; voice: string; speed: number };
@@ -258,7 +259,9 @@ async function synthesizeScenes(input: CreateProductAdJobInput, id: string, plan
   const scenes: NarratedScene[] = [];
   for (let index = 0; index < plan.scenes.length; index += 1) {
     throwIfCancelled(signal);
-    await patchJob(id, { status: 'voicing', stage: `Đang tạo giọng quảng cáo (${index + 1}/${plan.scenes.length})`, progressPercent: Math.round(43 + (index / plan.scenes.length) * 22) });
+    const progressStart = input.useFlowAgentVisuals ? 61 : 43;
+    const progressSpan = input.useFlowAgentVisuals ? 14 : 22;
+    await patchJob(id, { status: 'voicing', stage: `Đang tạo giọng quảng cáo (${index + 1}/${plan.scenes.length})`, progressPercent: Math.round(progressStart + (index / plan.scenes.length) * progressSpan) });
     const rawFile = path.join(directory, `${String(index + 1).padStart(2, '0')}.audio`);
     const wavFile = path.join(directory, `${String(index + 1).padStart(2, '0')}.wav`);
     const audio = await synthesize(tts.provider, tts.model, voice, plan.scenes[index].narration, { speed: clamp(tts.speed, 0.75, 1.5), format: 'wav', signal });
@@ -328,7 +331,31 @@ function concatLine(file: string) {
 
 const ffmpegPath = (file: string) => file.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
 
-async function renderProductAd(input: CreateProductAdJobInput, id: string, images: ProductImage[], scenes: NarratedScene[], signal: AbortSignal) {
+async function generateProductAdVisuals(input: CreateProductAdJobInput, id: string, images: ProductImage[], plan: ProductAdPlan, signal: AbortSignal) {
+  const directory = path.join(jobDirectory(id), 'flow-visuals');
+  await mkdir(directory, { recursive: true });
+  const files: string[] = [];
+  for (let index = 0; index < plan.scenes.length; index += 1) {
+    throwIfCancelled(signal);
+    const scene = plan.scenes[index];
+    const reference = images[scene.imageIndex] || images[0];
+    await patchJob(id, { status: 'rendering', stage: `Flow Agent đang tạo hình quảng cáo (${index + 1}/${plan.scenes.length})`, progressPercent: Math.round(43 + (index / plan.scenes.length) * 18) });
+    const target = path.join(directory, `${String(index + 1).padStart(2, '0')}.png`);
+    const prompt = [
+      'Create a polished photorealistic vertical 9:16 social-commerce advertising still using the attached product image as the strict visual reference.',
+      `Scene goal: ${scene.visualPrompt || scene.headline}.`,
+      `Supporting narration context: ${scene.narration}`,
+      'Preserve the exact product silhouette, proportions, materials, colors, controls, branding and orientation. Do not invent or rewrite product details.',
+      'Use a clear product interaction or benefit-focused composition with realistic lighting and clean safe space for AutoSub overlays.',
+      'No text, captions, prices, logos, watermarks, UI or unrelated products.',
+    ].join('\n');
+    await generateGoogleFlowImage(prompt, target, { model: 'narwhal', size: '1024x1792', referenceImagePath: reference.absolutePath, signal });
+    files.push(target);
+  }
+  return files;
+}
+
+async function renderProductAd(input: CreateProductAdJobInput, id: string, images: ProductImage[], scenes: NarratedScene[], signal: AbortSignal, flowVisuals?: string[]) {
   const directory = jobDirectory(id);
   const clipsDirectory = path.join(directory, 'clips');
   const resultDirectory = path.join(directory, 'result');
@@ -339,7 +366,9 @@ async function renderProductAd(input: CreateProductAdJobInput, id: string, image
   const clips: string[] = [];
   for (let index = 0; index < scenes.length; index += 1) {
     throwIfCancelled(signal);
-    await patchJob(id, { status: 'rendering', stage: `Đang dựng cảnh sản phẩm (${index + 1}/${scenes.length})`, progressPercent: Math.round(67 + (index / scenes.length) * 23) });
+    const progressStart = input.useFlowAgentVisuals ? 76 : 67;
+    const progressSpan = input.useFlowAgentVisuals ? 16 : 23;
+    await patchJob(id, { status: 'rendering', stage: `Đang dựng cảnh sản phẩm (${index + 1}/${scenes.length})`, progressPercent: Math.round(progressStart + (index / scenes.length) * progressSpan) });
     const scene = scenes[index];
     const image = images[scene.imageIndex] || images[0];
     const seconds = Math.max(0.5, scene.audioDurationMs / 1000);
@@ -349,7 +378,7 @@ async function renderProductAd(input: CreateProductAdJobInput, id: string, image
     const clip = path.join(clipsDirectory, `${String(index + 1).padStart(2, '0')}.mp4`);
     const filter = `[0:v]split=2[bg][fg];[bg]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,gblur=sigma=26[bg2];[fg]scale=650:1040:force_original_aspect_ratio=decrease[fg2];[bg2][fg2]overlay=(W-w)/2:(H-h)/2,zoompan=z='min(zoom+0.0006,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=720x1280:fps=30,drawtext=textfile='${ffmpegPath(headlineFile)}'${drawTextFont}:expansion=none:fontcolor=white:fontsize=46:borderw=3:bordercolor=black:box=1:boxcolor=black@0.38:boxborderw=16:x=(w-text_w)/2:y=110,format=yuv420p[v]`;
     await run('ffmpeg', [
-      '-y', '-i', image.absolutePath, '-i', scene.audioFile,
+      '-y', '-i', flowVisuals?.[index] || image.absolutePath, '-i', scene.audioFile,
       '-filter_complex', filter, '-map', '[v]', '-map', '1:a:0', '-t', seconds.toFixed(3),
       '-c:v', 'libx264', '-threads', renderThreads, '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-tag:v', 'avc1',
       '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '192k', '-movflags', '+faststart', clip,
@@ -443,9 +472,10 @@ async function executeProductAdJob(id: string, input: CreateProductAdJobInput, s
       });
       return;
     }
+    const flowVisuals = input.useFlowAgentVisuals ? await generateProductAdVisuals(input, id, images, plan, signal) : undefined;
     const scenes = await synthesizeScenes(input, id, plan, signal);
     throwIfCancelled(signal);
-    const result = await renderProductAd(input, id, images, scenes, signal);
+    const result = await renderProductAd(input, id, images, scenes, signal, flowVisuals);
     await patchJob(id, { status: 'rendering', stage: 'Đang kiểm tra chất lượng kỹ thuật video', progressPercent: 96 });
     const quality = await inspectProductAdVideo(result.videoFile, input.targetDurationSeconds, signal);
     const current = jobs.get(id) || await readJob(id);
@@ -476,6 +506,7 @@ export async function createProductAdJob(input: CreateProductAdJobInput) {
   if (productDescription.length < 20) throw new Error('Mô tả sản phẩm cần ít nhất 20 ký tự để AI không phải bịa thông tin.');
   if (!imageUploadIds.length) throw new Error('Hãy tải lên ít nhất một ảnh sản phẩm.');
   if (!input.script?.provider || !input.script.model) throw new Error('Thiếu Script Provider hoặc model.');
+  if (input.useFlowAgentVisuals) await validateGoogleFlowSession();
   if (outputMode === 'render') {
     if (!input.tts?.provider || !input.tts.model) throw new Error('Thiếu TTS Provider hoặc model.');
     if (resolveProviderType(input.tts.provider) !== 'hiiu-tts' && !input.tts.voice?.trim()) throw new Error('Thiếu Voice ID cho TTS.');
@@ -514,6 +545,7 @@ export async function createProductAdJob(input: CreateProductAdJobInput) {
     targetDurationSeconds: Math.round(clamp(Number(input.targetDurationSeconds), 10, 60)),
     tone: String(input.tone || 'UGC chân thật, nhanh gọn').slice(0, 300),
     burnSubtitles: input.burnSubtitles !== false,
+    useFlowAgentVisuals: input.useFlowAgentVisuals === true,
   };
   void executeProductAdJob(id, normalized, controller.signal);
   return job;

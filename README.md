@@ -27,6 +27,23 @@ Mở `http://localhost:5173`. Backend chạy tại `http://127.0.0.1:8787`.
 
 Thêm provider tại **Cài đặt → AI Providers**, kiểm tra kết nối rồi chọn model phù hợp cho Translation, Vision, STT hoặc TTS.
 
+### Google Flow qua Flow Agent
+
+AI Video Studio dùng [kodelyx/flow-agent](https://github.com/kodelyx/flow-agent) tại `http://127.0.0.1:8001`; AutoSub không còn yêu cầu bạn nhập Flow client key, access token hoặc cookie.
+
+```powershell
+git clone https://github.com/kodelyx/flow-agent.git
+cd flow-agent\flow-agent
+uv tool install --force .
+flow
+```
+
+Sau đó mở `opera://extensions`, bật Developer mode, chọn **Load unpacked** và trỏ tới thư mục `flow-extension` của Flow Agent (trên máy hiện tại: `C:\Users\super\AppData\Local\AutoSub\flow-agent-runtime\flow-extension`). Giữ một tab Google Flow đã đăng nhập. Nút **Mở Google Flow** sẽ dùng phiên Opera GX hiện tại và AI Video Studio sẽ tự hiển thị trạng thái kết nối.
+
+Có thể đổi địa chỉ backend bằng `FLOW_AGENT_URL` trong `.env`; nếu Flow Agent bật `SERVER_API_KEY`, đặt cùng khóa vào `FLOW_AGENT_API_KEY`.
+
+Nếu Opera GX được cài ở vị trí khác, đặt đường dẫn file `opera.exe` bằng `OPERA_PATH` trong `.env`.
+
 ## Kiểm tra
 
 ```powershell

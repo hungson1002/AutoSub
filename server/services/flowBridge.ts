@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 type FlowBridgeControl = { tag: string; text: string; ariaLabel: string; placeholder: string };
 type FlowBridgeHeartbeat = { url?: string; title?: string; controls?: FlowBridgeControl[] };
 let lastHeartbeat: { receivedAt: number; url: string; title: string; controls: FlowBridgeControl[] } | undefined;
-type BridgeCommand = { id: string; prompt: string; outputFile: string; referenceImagePaths?: string[]; recoverLatest?: boolean; delivered: boolean; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
+type BridgeCommand = { id: string; prompt: string; outputFile: string; referenceImagePaths?: string[]; recoverLatest?: boolean; deliveredAt?: number; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 let command: BridgeCommand | undefined;
 
 export function updateFlowBridge(value: FlowBridgeHeartbeat) {
@@ -14,8 +14,10 @@ export function updateFlowBridge(value: FlowBridgeHeartbeat) {
     title: String(value.title || '').slice(0, 300),
     controls: Array.isArray(value.controls) ? value.controls.slice(0, 120) : [],
   };
-  const next = command && !command.delivered ? { id: command.id, prompt: command.prompt, referenceImagePaths: command.referenceImagePaths, recoverLatest: command.recoverLatest } : undefined;
-  if (next && command) command.delivered = true;
+  // Re-deliver after a short lease. The active content script ignores duplicates,
+  // while a reloaded/crashed script can recover the in-flight command.
+  const next = command && (!command.deliveredAt || Date.now() - command.deliveredAt > 10_000) ? { id: command.id, prompt: command.prompt, referenceImagePaths: command.referenceImagePaths, recoverLatest: command.recoverLatest } : undefined;
+  if (next && command) command.deliveredAt = Date.now();
   return { ...flowBridgeStatus(), command: next };
 }
 
@@ -41,7 +43,7 @@ export function generateViaFlowBridge(prompt: string, outputFile: string, signal
       error ? reject(error) : resolve();
     };
     const timer = setTimeout(() => finish(new Error('Google Flow quá thời gian tạo video qua trình duyệt.')), 20 * 60_000);
-    command = { id, prompt, outputFile, referenceImagePaths, recoverLatest, delivered: false, resolve: () => finish(), reject: (error) => finish(error), timer };
+    command = { id, prompt, outputFile, referenceImagePaths, recoverLatest, resolve: () => finish(), reject: (error) => finish(error), timer };
     signal?.addEventListener('abort', () => finish(new DOMException('Đã dừng tác vụ.', 'AbortError')), { once: true });
   });
 }
@@ -51,6 +53,7 @@ export const recoverLatestViaFlowBridge = (outputFile: string, signal?: AbortSig
 export async function completeFlowBridgeVideo(id: string, data: Buffer) {
   if (!command || command.id !== id) throw new Error('Lệnh Flow không còn hiệu lực.');
   if (data.length < 10_000) throw new Error('Flow trả về file video không hợp lệ.');
+  if (!data.subarray(0, 64).includes(Buffer.from('ftyp'))) throw new Error('Media Flow tải về không phải video MP4; AutoSub sẽ không đánh dấu cảnh đã hoàn thành.');
   await writeFile(command.outputFile, data);
   command.resolve();
   return { ok: true };

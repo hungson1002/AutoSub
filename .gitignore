@@ -5,3 +5,5 @@ workdir/
 .env
 __pycache__/
 *.py[cod]
+reports
+public
