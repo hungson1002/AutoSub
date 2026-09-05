@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildAiVideoDirectorPrompt, buildFlowPrompt, isRetryableNoChargeFlowError, parseAiVideoPlan, parseBlurScore } from './aiVideoJobs';
+import { buildAiVideoDirectorPrompt, buildFlowPrompt, buildFlowVideoReferences, isRetryableNoChargeFlowError, parseAiVideoPlan, parseBlurScore } from './aiVideoJobs';
 
 test('parseBlurScore averages FFmpeg blur measurements', () => {
   assert.equal(parseBlurScore('blur mean: 4.0\nblur mean: 6.0'), 5);
@@ -28,6 +28,7 @@ test('director prompt plans professional coverage and respects the selected fram
   assert.match(prompt.system, /2–3 timestamped shots/i);
   assert.match(prompt.system, /180-degree line/i);
   assert.match(prompt.system, /reaction, occlusion and negative space/i);
+  assert.match(prompt.system, /transition.*cut\|continue/i);
   assert.match(prompt.user, /<story_material>/);
 });
 
@@ -68,9 +69,21 @@ test('Flow prompt turns a plan into timed shots with a stable handoff frame', ()
     visualPrompt: 'A restrained close reaction framed through the gate, with shallow depth and natural daylight.',
     status: 'pending',
   }, 2, 8);
-  assert.match(prompt, /START FRAME IS LAW/);
+  assert.match(prompt, /CONTINUOUS ACTION/);
   assert.match(prompt, /TIMED SHOT PLAN/);
   assert.match(prompt, /No spoken dialogue/);
-  assert.match(prompt, /Hold the final readable composition/);
+  assert.match(prompt, /Do not freeze, pose/);
   assert.match(prompt, /No slideshow, dissolve, morph, teleport/);
+});
+
+test('reference strategy uses a start frame only for unbroken action', () => {
+  const scene = {
+    index: 2,
+    title: 'Next beat',
+    narration: '',
+    visualPrompt: 'A sufficiently detailed visual direction for a generated film scene.',
+    status: 'pending' as const,
+  };
+  assert.deepEqual(buildFlowVideoReferences({ ...scene, transition: 'continue' }, 'last-frame.jpg', 'character.jpg'), { startImagePath: 'last-frame.jpg' });
+  assert.deepEqual(buildFlowVideoReferences({ ...scene, transition: 'cut' }, 'last-frame.jpg', 'character.jpg'), { referenceImagePaths: ['character.jpg'] });
 });
