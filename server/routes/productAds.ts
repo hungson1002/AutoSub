@@ -1,7 +1,7 @@
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import type { CreateProductAdJobInput } from '../services/productAdJobs';
-import { cancelProductAdJob, createProductAdFlowPreview, createProductAdJob, getProductAdJob, getProductAdResult } from '../services/productAdJobs';
+import { cancelProductAdJob, createProductAdFlowPreview, createProductAdJob, getProductAdJob, getProductAdResult, getProductAdSubtitleResult, rerenderProductAdSubtitles } from '../services/productAdJobs';
 
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
@@ -30,6 +30,11 @@ export async function productAdRoutes(app: FastifyInstance) {
     catch (error) { return sendRouteError(reply, error, 'Không thể tạo video Google Flow.'); }
   });
 
+  app.post('/api/product-ads/jobs/:id/subtitles', async (request, reply) => {
+    try { return reply.code(202).send(await rerenderProductAdSubtitles(String((request.params as { id?: string }).id || ''), request.body as Parameters<typeof rerenderProductAdSubtitles>[1])); }
+    catch (error) { return sendRouteError(reply, error, 'Không thể áp dụng lại phụ đề.'); }
+  });
+
   app.get('/api/product-ads/jobs/:id/video', async (request, reply) => {
     try {
       const result = await getProductAdResult(String((request.params as { id?: string }).id || ''));
@@ -55,5 +60,15 @@ export async function productAdRoutes(app: FastifyInstance) {
     } catch (error) {
       return sendRouteError(reply, error, 'Video quảng cáo chưa sẵn sàng.', 404);
     }
+  });
+
+  app.get('/api/product-ads/jobs/:id/subtitles.srt', async (request, reply) => {
+    try {
+      const result = await getProductAdSubtitleResult(String((request.params as { id?: string }).id || ''));
+      reply.header('Content-Type', 'application/x-subrip; charset=utf-8');
+      reply.header('Content-Length', String(result.size));
+      reply.header('Content-Disposition', 'attachment; filename="autosub-product-ad.srt"');
+      return reply.send(createReadStream(result.path));
+    } catch (error) { return sendRouteError(reply, error, 'Phụ đề quảng cáo chưa sẵn sàng.', 404); }
   });
 }

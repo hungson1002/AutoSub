@@ -1,5 +1,6 @@
 import type {
   AIModel,
+  AiVideoScene,
   AiVideoJobStatus,
   AIProvider,
   AIVoice,
@@ -49,7 +50,11 @@ export const reviewVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/review/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
 export const productAdVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/product-ads/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
+export const productAdSubtitleUrl = (jobId: string) =>
+  `${MEDIA_BACKEND_ORIGIN}/api/product-ads/jobs/${encodeURIComponent(jobId)}/subtitles.srt`;
 export const aiVideoUrl = (jobId: string, download = false) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/video${download ? '?download=1' : ''}`;
+export const aiVideoCharacterSheetUrl = (jobId: string, characterIndex?: number) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/preproduction/character-sheet${characterIndex ? `?character=${characterIndex}` : ''}`;
+export const aiVideoStoryboardUrl = (jobId: string, sceneIndex: number) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/preproduction/storyboard?scene=${sceneIndex}`;
 export const aiVideoClipUrl = (jobId: string, sceneIndex: number, download = false) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/clips/${sceneIndex}${download ? '?download=1' : ''}`;
 export const animationAssetUrl = (uploadId: string) => `${MEDIA_BACKEND_ORIGIN}/api/uploads/${encodeURIComponent(uploadId)}/media`;
 
@@ -264,11 +269,20 @@ export const api = {
     for (let attempt = 0; attempt < 900; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); if (job.status === "completed" || job.status === "failed") break; }
     if (job.status !== "completed") throw new Error(job.error || "Render queue quá thời gian chờ."); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video từ render queue."); return response.blob();
   },
+  renderAnimationProjectFrameAccurate: async (project: AnimationProject, showSubtitles: boolean) => {
+    const renderState = { ...project, createdAt: "", updatedAt: "", assets: project.assets.map((asset) => ({ ...asset, createdAt: "" })), showSubtitles, engine: "remotion-v1" };
+    const encoded = new TextEncoder().encode(JSON.stringify(renderState)); const digest = await crypto.subtle.digest("SHA-256", encoded); const cacheKey = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const queued = await fetch(`/api/animation-studio/projects/${encodeURIComponent(project.id)}/remotion-render-jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project, showSubtitles, cacheKey }) });
+    if (!queued.ok) { const body = await queued.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Không thể xếp render Remotion."); }
+    const initial = await queued.json() as { id: string }; let job: { status: string; error?: string } = { status: "queued" };
+    for (let attempt = 0; attempt < 1800; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); if (job.status === "completed" || job.status === "failed") break; }
+    if (job.status !== "completed") throw new Error(job.error || "Render Remotion quá thời gian chờ."); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video Remotion."); return response.blob();
+  },
   listAnimationRenderJobs: () => request<Array<{ id: string; projectId: string; status: "queued" | "rendering" | "completed" | "failed"; progress: number; cached?: boolean; error?: string; createdAt: string }>>("/api/animation-studio/render-jobs"),
   listAnimationAssets: (query = "") => request<AnimationAsset[]>(`/api/animation-studio/assets?q=${encodeURIComponent(query)}`),
   registerAnimationAsset: (asset: AnimationAsset) => request<AnimationAsset>("/api/animation-studio/assets", { method: "POST", body: JSON.stringify(asset) }),
   updateAnimationAsset: (id: string, change: Partial<Pick<AnimationAsset, "name" | "tags" | "style" | "animations">>) => request<AnimationAsset>(`/api/animation-studio/assets/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(change) }),
-  generateAnimationAsset: (input: { prompt: string; name?: string; type?: AnimationAsset["type"]; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent' }) => request<AnimationAsset>("/api/animation-studio/assets/generate", { method: "POST", body: JSON.stringify(input) }),
+  generateAnimationAsset: (input: { prompt: string; name?: string; type?: AnimationAsset["type"]; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number }) => request<AnimationAsset>("/api/animation-studio/assets/generate", { method: "POST", body: JSON.stringify(input) }),
   generateAnimationNarration: (input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number }) => request<AnimationProject>("/api/animation-studio/narration", { method: "POST", body: JSON.stringify(input) }),
   system: () =>
     request<{
@@ -840,9 +854,12 @@ export const api = {
       outputMode: ProductAdOutputMode;
       targetDurationSeconds: number;
       tone: string;
+      creativeMode?: 'professional' | 'everyday' | 'ugc' | 'direct-response';
       customPrompt?: string;
       burnSubtitles: boolean;
+      subtitleStyle?: { fontSize: number; positionPercent: number; textColor: string; backgroundColor: string; backgroundOpacity: number; outlineWidth: number; maxCharsPerLine: number; textAlign: 'left' | 'center' | 'right'; bold: boolean };
       useFlowAgentVisuals?: boolean;
+      useFlowAgentMotion?: boolean;
       vision?: { provider: AIProvider; model: string };
       script: { provider: AIProvider; model: string };
       tts?: { provider: AIProvider; model: string; voice: string; speed: number };
@@ -859,11 +876,17 @@ export const api = {
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   createProductAdFlowPreview: (id: string) =>
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/flow-preview`, { method: "POST" }),
-  createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FlowVideoModel; aspectRatio: '9:16' | '16:9'; characterReferenceUploadId?: string; script: { provider: AIProvider; model: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
+  rerenderProductAdSubtitles: (id: string, burnSubtitles: boolean, subtitleStyle: { fontSize: number; positionPercent: number; textColor: string; backgroundColor: string; backgroundOpacity: number; outlineWidth: number; maxCharsPerLine: number; textAlign: 'left' | 'center' | 'right'; bold: boolean }, subtitleTexts?: string[]) =>
+    request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/subtitles`, { method: 'POST', body: JSON.stringify({ burnSubtitles, subtitleStyle, subtitleTexts }) }),
+  createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FlowVideoModel; imageModel?: string; aspectRatio: '9:16' | '16:9'; directionMode?: 'cinematic' | 'documentary' | 'commercial' | 'social-realism'; workflowMode?: 'review-first' | 'direct'; automationMode?: 'automatic' | 'manual'; characterReferenceUploadId?: string; script: { provider: AIProvider; model: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
   flowAgentStatus: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/status'),
   openFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/open', { method: 'POST' }),
   getAiVideoJob: (id: string, signal?: AbortSignal) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}`, { signal }),
   cancelAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+  approveAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
+  updateAiVideoPreproduction: (id: string, input: { productionBible?: string; scene?: Partial<AiVideoScene> & { index: number }; imageModel?: string; model?: FlowVideoModel }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/preproduction`, { method: 'PATCH', body: JSON.stringify(input) }),
+  regenerateAiVideoDesign: (id: string, input: { kind: 'character-sheet' | 'storyboard'; sceneIndex?: number; characterIndex?: number }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/preproduction/regenerate`, { method: 'POST', body: JSON.stringify(input) }),
+  regenerateAiVideoShot: (id: string, sceneIndex: number) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/shots/${sceneIndex}/regenerate`, { method: 'POST', body: '{}' }),
   resumeAiVideoJob: (id: string, model: FlowVideoModel, script: { provider: AIProvider; model: string }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ model, script }) }),
   getReviewJob: (id: string, signal?: AbortSignal) =>
     request<ReviewJobStatus>(`/api/review/jobs/${encodeURIComponent(id)}`, {

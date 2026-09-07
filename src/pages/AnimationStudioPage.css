@@ -1,0 +1,123 @@
+/* Preview owns the workspace; creation settings and motion details are secondary. */
+.animation-studio-page.studio-preview-first {
+  height: 100dvh;
+  min-height: 560px;
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 64px minmax(0, 1fr) 116px;
+}
+.studio-preview-first.setup-open { grid-template-columns: 292px minmax(0, 1fr); }
+.studio-preview-first.timeline-open { grid-template-rows: 64px minmax(0, 1fr) 264px; }
+.studio-preview-first .animation-toolbar { grid-column: 1 / -1; gap: 12px; padding: 10px 18px; }
+.studio-preview-first .animation-project-title { min-width: 0; }
+.studio-preview-first .animation-project-title input { height: 28px; padding: 0; border: 0; background: transparent; }
+.studio-preview-first .animation-toolbar-meta { display: none; }
+.studio-preview-first .animation-toolbar .button { font-size: 12px; white-space: nowrap; }
+.studio-preview-first .animation-toolbar-actions { gap: 6px; }
+.studio-preview-first .animation-toolbar-actions > .button[aria-expanded="true"] { color: #ffc39e; background: #30251f; }
+.animation-file-menu { position: relative; }
+.animation-file-menu summary { display: flex; gap: 5px; align-items: center; padding: 10px; cursor: pointer; color: #acb8c7; font-size: 12px; list-style: none; }
+.animation-file-menu > div { position: absolute; right: 0; top: 100%; z-index: 90; display: grid; padding: 6px; min-width: 130px; border: 1px solid var(--studio-line); border-radius: 8px; background: var(--studio-panel); }
+.animation-setup-panel { grid-column: 1; grid-row: 2 / 4; min-width: 0; overflow: auto; border-right: 1px solid var(--studio-line); background: var(--studio-panel); scrollbar-width: thin; scrollbar-color: #3b4654 transparent; }
+.animation-setup-panel[hidden], .animation-detail-timeline[hidden] { display: none; }
+.studio-preview-first .animation-director-bar { display: flex; flex-direction: column; align-items: stretch; gap: 18px; padding: 20px 16px; background: transparent; }
+.studio-preview-first .animation-director-heading > span { font-size: 15px; }
+.studio-preview-first .animation-director-heading small { color: #9baabc; font-size: 11px; }
+.studio-preview-first .animation-director-prompt .sr-only { position: static; width: auto; height: auto; clip: auto; white-space: normal; display: block; margin-bottom: 8px; color: #b6c1cd; font-size: 12px; }
+.studio-preview-first .animation-director-prompt textarea { height: 116px; min-height: 116px; max-height: 240px; resize: vertical; font-size: 13px; line-height: 1.6; }
+.studio-preview-first .animation-director-options { display: flex; flex-direction: column; align-items: stretch; gap: 14px; }
+.studio-preview-first .animation-duration { display: grid !important; grid-template-columns: 1fr 62px auto; font-size: 12px; }
+.studio-preview-first .animation-duration input { width: 62px; font-size: 13px; }
+.studio-preview-first .animation-director-voice { display: grid !important; gap: 8px !important; font-size: 12px; }
+.studio-preview-first .animation-director-voice select, .studio-preview-first .animation-director-voice input, .studio-preview-first .animation-image-provider { width: 100%; min-width: 0; font-size: 12px; }
+.studio-preview-first .animation-auto-assets, .studio-preview-first .animation-subtitle-toggle { font-size: 12px; min-height: 26px; }
+.studio-preview-first .animation-auto-assets span { display: inline; }
+.studio-preview-first .animation-director-options .button { min-height: 42px; font-size: 12px; margin: 0; width: 100%; white-space: normal; }
+.studio-preview-first .animation-director-options .button.primary { order: 1; }
+.studio-preview-first .animation-director-options .button.animation-flow-motion { order: 2; border-color: rgba(143,132,255,.48); color: #ddd8ff; background: rgba(143,132,255,.11); }
+.studio-preview-first .animation-director-options .button.animation-flow-motion:hover { border-color: rgba(171,162,255,.76); background: rgba(143,132,255,.18); }
+.studio-preview-first .animation-director-options .button.animation-flow-result { order: 3; justify-content: center; border-color: rgba(91,217,159,.42); color: #bdf5d8; background: rgba(91,217,159,.08); text-decoration: none; }
+.studio-preview-first .animation-director-options .button.animation-flow-cancel { order: 3; min-height: 34px; border-color: rgba(238,110,120,.35); color: #ffb6bd; background: rgba(127,35,45,.1); }
+.animation-flow-error { order: 3; margin: 0; padding: 9px 10px; border: 1px solid rgba(238,110,120,.35); border-radius: 7px; color: #ffc2c7; background: rgba(127,35,45,.12); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.studio-preview-first .animation-director-options .button.quiet { order: 4; min-height: 32px; background: transparent; border: 0; }
+.studio-preview-first .animation-director-error { max-height: none; padding: 10px; font-size: 12px; }
+.animation-director-error details { min-width: 0; flex: 1; }
+.animation-director-error summary { cursor: pointer; font-weight: 600; }
+.animation-director-error p { max-height: 180px; overflow: auto; overflow-wrap: anywhere; margin: 10px 0 0; font-size: 12px; }
+.animation-edit-disclosure { border-bottom: 1px solid var(--studio-line); }
+.animation-edit-disclosure > summary { display: flex; align-items: center; justify-content: space-between; padding: 16px; color: #c3cdd8; font-size: 13px; cursor: pointer; list-style: none; }
+.studio-preview-first .animation-ai-edit-bar { flex-wrap: wrap; padding: 0 16px 16px; border: 0; background: transparent; }
+.studio-preview-first .animation-ai-edit-label { display: none; }
+.studio-preview-first .animation-ai-edit-bar > input { flex: 1 0 100%; min-width: 0; font-size: 12px; }
+.studio-preview-first .animation-ai-more > div { position: static; width: 100%; box-shadow: none; }
+.studio-preview-first .animation-ai-more { flex: 1; }
+.studio-preview-first .animation-ai-more summary { font-size: 12px; }
+.studio-preview-first .animation-project-settings { display: grid; padding: 18px 16px; gap: 10px; border: 0; background: transparent; font-size: 12px; color: #b6c1cd; }
+.animation-project-settings > label { display: grid; gap: 8px; }
+.studio-preview-first .animation-style-profile { width: 100%; min-width: 0; height: 38px; border-color: var(--studio-line); font-size: 12px; }
+.studio-preview-first .animation-ratio-buttons button { flex: 1; height: 36px; font-size: 12px; }
+.studio-preview-first .animation-ratio-buttons button[aria-pressed="true"] { color: #ffd3b9; border-color: #ba7448; background: #30251f; }
+.studio-preview-first .animation-voiceover button { width: 100%; height: 36px; font-size: 12px; margin-top: 8px; }
+.studio-preview-first .animation-workspace, .studio-preview-first .animation-workspace:not(.has-selection) { grid-column: -2; grid-row: 2; grid-template-columns: 188px minmax(0, 1fr); }
+.studio-preview-first .animation-workspace.has-selection { grid-template-columns: 188px minmax(0, 1fr) 230px; }
+.studio-preview-first .animation-workspace.has-selection .animation-inspector { display: block; }
+.studio-preview-first .animation-panel-heading > span { font-size: 11px; letter-spacing: .02em; }
+.studio-preview-first .animation-scene-list { max-height: 40%; overflow: auto; }
+.studio-preview-first .animation-scene-list > button { grid-template-columns: 20px minmax(0, 1fr); gap: 6px; padding: 11px 7px; }
+.studio-preview-first .animation-scene-list strong { white-space: normal; font-size: 12px; line-height: 1.45; }
+.studio-preview-first .animation-scene-list small { font-size: 11px; color: #a2afbe; }
+.studio-preview-first .layer-heading { flex-wrap: wrap; padding: 10px; gap: 8px; }
+.studio-preview-first .layer-heading > div { flex-wrap: wrap; }
+.studio-preview-first .animation-layer-list small { display: none; }
+.studio-preview-first .animation-layer-list button { grid-template-columns: 18px minmax(0, 1fr); }
+.studio-preview-first .animation-stage-panel { grid-template-rows: 48px minmax(0, 1fr); }
+.studio-preview-first .animation-stage-controls { gap: 10px; padding: 0 14px; }
+.studio-preview-first .animation-stage-controls label, .studio-preview-first .animation-stage-controls span { font-size: 12px; }
+.studio-preview-first .animation-stage-controls label input { width: 60px; height: 30px; font-size: 12px; }
+.studio-preview-first .animation-stage-controls small { display: none; }
+.studio-preview-first .animation-timeline { grid-column: -2; grid-row: 3; grid-template-rows: 42px minmax(0, 1fr); padding: 0 0 10px; }
+.studio-preview-first.timeline-open .animation-timeline { grid-template-rows: 42px 58px minmax(0, 1fr); }
+.studio-preview-first .animation-timeline-top { padding-right: 172px; }
+.studio-preview-first .animation-timeline-top strong { font-size: 11px; }
+.studio-preview-first .animation-timeline-top span { font-size: 11px; }
+.animation-timeline-toggle { position: absolute; top: 6px; right: 12px; display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 9px; border: 1px solid var(--studio-line); border-radius: 6px; background: var(--studio-raised); color: #c1cbd7; font-size: 12px; }
+.studio-preview-first .animation-sequence-overview { padding: 10px 16px; }
+.studio-preview-first .animation-sequence-lane { min-width: 0; height: 100%; gap: 6px; }
+.studio-preview-first .animation-sequence-lane button { height: 100%; min-width: 110px; max-width: none; flex-basis: 110px; border-radius: 6px; }
+.studio-preview-first .animation-sequence-lane button span { font-size: 12px; }
+.studio-preview-first .animation-sequence-lane button b { font-size: 11px; }
+.animation-detail-timeline { position: relative; min-height: 0; display: grid; grid-template-rows: 24px minmax(0, 1fr); overflow: auto; }
+.studio-preview-first .animation-scrubber { opacity: 1; height: 5px; accent-color: #ff8a45; }
+@media (max-width: 1280px) {
+  .studio-preview-first.setup-open { grid-template-columns: 264px minmax(0, 1fr); }
+  .studio-preview-first .animation-workspace, .studio-preview-first .animation-workspace:not(.has-selection), .studio-preview-first .animation-workspace.has-selection { grid-template-columns: 156px minmax(0, 1fr); }
+  .studio-preview-first .animation-workspace.has-selection { grid-template-rows: minmax(0, 1fr) 180px; }
+  .studio-preview-first .animation-inspector { grid-column: 1 / -1; border-top: 1px solid var(--studio-line); }
+  .studio-preview-first .animation-stage-controls { flex-wrap: wrap; gap: 6px; }
+  .studio-preview-first .animation-stage-controls label { font-size: 11px; }
+  .studio-preview-first .animation-toolbar { flex-wrap: wrap; }
+  .studio-preview-first .animation-project-title { flex-basis: 100%; }
+  .animation-studio-page.studio-preview-first { grid-template-rows: auto minmax(0, 1fr) 116px; }
+  .studio-preview-first.timeline-open { grid-template-rows: auto minmax(0, 1fr) 264px; }
+}
+@media (max-width: 900px) {
+  .animation-studio-page.studio-preview-first, .studio-preview-first.setup-open { display: flex; flex-direction: column; height: auto; min-height: 100dvh; overflow: visible; }
+  .studio-preview-first .animation-toolbar { order: 0; padding: 12px; }
+  .studio-preview-first .animation-project-title { flex-basis: 100%; }
+  .studio-preview-first .animation-toolbar-actions { width: 100%; flex-wrap: wrap; }
+  .studio-preview-first .animation-toolbar-actions .button { flex: 0 1 auto; }
+  .studio-preview-first .animation-workspace { display: flex; flex-direction: column; order: 2; }
+  .studio-preview-first .animation-stage-panel { order: -1; height: 62dvh; min-height: 350px; }
+  .studio-preview-first .animation-left-panel { max-height: 200px; border-bottom: 1px solid var(--studio-line); }
+  .studio-preview-first .animation-scene-list { max-height: none; }
+  .studio-preview-first .animation-inspector { max-height: 280px; }
+  .studio-preview-first .animation-timeline { order: 3; height: 126px; flex: none; }
+  .studio-preview-first.timeline-open .animation-timeline { height: 280px; }
+  .animation-setup-panel { order: 1; flex: none; border-right: 0; overflow: visible; }
+  .studio-preview-first .animation-timeline-top strong { font-size: 10px; }
+  .studio-preview-first .animation-timeline-top span { display: none; }
+  .studio-preview-first .animation-stage-controls { padding: 0 8px; }
+  .studio-preview-first .animation-stage-controls label { margin-left: auto; }
+  .studio-preview-first .animation-stage-controls label input { width: 48px; }
+}
+.studio-preview-first details:not([open]) > :not(summary) { display: none; }

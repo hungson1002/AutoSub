@@ -32,6 +32,15 @@ function contains(layer: SceneLayer, x: number, y: number) {
 
 const imageCache = new Map<string, HTMLImageElement>();
 
+function drawImageCover(context: CanvasRenderingContext2D, image: HTMLImageElement, width: number, height: number) {
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  const scale = Math.max(width / Math.max(1, sourceWidth), height / Math.max(1, sourceHeight));
+  const cropWidth = width / scale;
+  const cropHeight = height / scale;
+  context.drawImage(image, (sourceWidth - cropWidth) / 2, (sourceHeight - cropHeight) / 2, cropWidth, cropHeight, 0, 0, width, height);
+}
+
 export function AnimationCanvas({ scene, assets, width, height, timeMs, selectedLayerId, onSelect, onMove, onCanvasReady, exporting = false, showSubtitles = true }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | undefined>(undefined);
@@ -84,7 +93,10 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
         if (layer.type === 'image' && layer.assetId) {
           const asset = assets.find((item) => item.id === layer.assetId);
           const image = asset ? imageCache.get(asset.uri) : undefined;
-          if (image?.complete) context.drawImage(image, 0, 0, layer.width, layer.height);
+          if (image?.complete) {
+            if (asset?.type === 'background') drawImageCover(context, image, layer.width, layer.height);
+            else context.drawImage(image, 0, 0, layer.width, layer.height);
+          }
           else {
             context.fillStyle = '#1d2834'; context.fillRect(0, 0, layer.width, layer.height);
             if (asset && !image) { const loading = new Image(); loading.onload = resize; loading.src = asset.uri; imageCache.set(asset.uri, loading); }
@@ -106,8 +118,29 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
           context.shadowColor = 'rgba(0, 0, 0, 0.55)';
           context.shadowBlur = 18;
           if (layer.wordTimings?.length) {
-            context.textAlign = 'left'; const gap = context.measureText(' ').width; let x = 0; let y = Math.max(layer.fontSize || 54, layer.height * .3); const lineHeight = (layer.fontSize || 54) * 1.18;
-            for (const timing of layer.wordTimings) { const measured = context.measureText(timing.word).width; if (x + measured > layer.width) { x = 0; y += lineHeight; } context.fillStyle = timeMs >= timing.startMs && timeMs < timing.endMs ? '#ff9a58' : layer.fill || '#ffffff'; context.fillText(timing.word, x, y); x += measured + gap; } context.textAlign = 'start'; context.shadowBlur = 0;
+            const timings = layer.wordTimings;
+            const foundIndex = timings.findIndex((timing) => timeMs < timing.endMs);
+            const activeIndex = foundIndex < 0 ? timings.length - 1 : foundIndex;
+            const cueStart = Math.floor(activeIndex / 7) * 7;
+            const cue = timings.slice(cueStart, cueStart + 7);
+            const gap = context.measureText(' ').width;
+            const lines: typeof cue[] = [[]];
+            let lineWidth = 0;
+            for (const timing of cue) {
+              const measured = context.measureText(timing.word).width;
+              if (lines.at(-1)!.length && lineWidth + gap + measured > layer.width) { lines.push([]); lineWidth = 0; }
+              lines.at(-1)!.push(timing);
+              lineWidth += (lineWidth ? gap : 0) + measured;
+            }
+            const lineHeight = (layer.fontSize || 54) * 1.18;
+            let y = layer.height / 2 - (lines.length - 1) * lineHeight / 2;
+            for (const line of lines) {
+              const totalWidth = line.reduce((total, timing, index) => total + context.measureText(timing.word).width + (index ? gap : 0), 0);
+              let x = (layer.width - totalWidth) / 2;
+              for (const timing of line) { context.fillStyle = timeMs >= timing.startMs && timeMs < timing.endMs ? '#ff9a58' : layer.fill || '#ffffff'; context.fillText(timing.word, x, y); x += context.measureText(timing.word).width + gap; }
+              y += lineHeight;
+            }
+            context.shadowBlur = 0;
           } else {
           const lines = (layer.text || layer.name).split('\n');
           const lineHeight = (layer.fontSize || 54) * 1.06;

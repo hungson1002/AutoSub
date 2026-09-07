@@ -9,7 +9,7 @@ import {
   restoreAnimationProjectVersion,
 } from '../services/animationProjects';
 import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene } from '../services/animationDirector';
-import { enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
+import { enqueueAnimationProjectRender, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
 import { generateAnimationAsset, generateAnimationNarration, getAnimationAssetFile, listAnimationAssets, registerAnimationAsset, resolveAnimationAssets, updateAnimationAsset } from '../services/animationAssets';
 import { autoFixAnimationQuality, checkAnimationQuality } from '../services/animationQuality';
 
@@ -47,6 +47,7 @@ export async function animationStudioRoutes(app: FastifyInstance) {
     } catch (error) { return reply.code(400).send({ error: message(error, 'Không thể render animation.') }); }
   });
   app.post('/api/animation-studio/projects/:id/render-jobs', async (request, reply) => { try { return reply.code(202).send(await enqueueAnimationRender(String((request.params as { id?: string }).id || ''), request.body as Buffer, String(request.headers['x-animation-cache-key'] || ''))); } catch (error) { return reply.code(400).send({ error: message(error, 'Không thể xếp render job.') }); } });
+  app.post('/api/animation-studio/projects/:id/remotion-render-jobs', async (request, reply) => { try { const body = request.body as { project?: unknown; showSubtitles?: boolean; cacheKey?: string }; return reply.code(202).send(await enqueueAnimationProjectRender(String((request.params as { id?: string }).id || ''), body.project as Parameters<typeof enqueueAnimationProjectRender>[1], body.showSubtitles !== false, String(body.cacheKey || ''))); } catch (error) { return reply.code(400).send({ error: message(error, 'Không thể xếp render Remotion.') }); } });
   app.get('/api/animation-studio/render-jobs', async () => listAnimationRenderJobs());
   app.get('/api/animation-studio/render-jobs/:id', async (request, reply) => { try { return getAnimationRenderJob(String((request.params as { id?: string }).id || '')); } catch (error) { return reply.code(404).send({ error: message(error, 'Không tìm thấy render job.') }); } });
   app.get('/api/animation-studio/render-jobs/:id/video', async (request, reply) => { try { const job = getAnimationRenderJob(String((request.params as { id?: string }).id || '')); if (!job.result) throw new Error('Render chưa hoàn tất.'); reply.header('Content-Type', 'video/mp4').header('Content-Length', String(job.result.size)).header('Content-Disposition', 'attachment; filename="autosub-animation.mp4"').header('X-AutoSub-Render-Cache', job.cached ? 'hit' : 'miss'); return reply.send(createReadStream(job.result.path)); } catch (error) { return reply.code(404).send({ error: message(error, 'Video chưa sẵn sàng.') }); } });

@@ -432,6 +432,7 @@ export interface ProductAdJobStatus {
   updatedAt: string;
   productName: string;
   imageNames: string[];
+  imageUploadIds?: string[];
   outputMode: ProductAdOutputMode;
   warnings: string[];
   error?: string;
@@ -442,8 +443,11 @@ export interface ProductAdJobStatus {
 
 export type FlowVideoModel = 'Flow Agent Auto';
 export type FlowVideoAspectRatio = '9:16' | '16:9';
-export interface AiVideoScene { index: number; title: string; narration: string; visualPrompt: string; status: 'pending' | 'generating' | 'completed' | 'failed' }
-export interface AiVideoJobStatus { id: string; status: 'queued' | 'planning' | 'generating' | 'composing' | 'completed' | 'failed' | 'cancelled'; stage: string; progressPercent: number; createdAt: string; updatedAt: string; brief: string; durationSeconds: number; model: FlowVideoModel; aspectRatio: FlowVideoAspectRatio; characterReference?: { filename: string }; productionBible?: string; scenes: AiVideoScene[]; result?: { videoFile: string; durationMs: number }; error?: string }
+export type AiVideoShotSize = 'EWS' | 'WS' | 'MS' | 'MCU' | 'CU' | 'ECU' | 'OTS' | 'POV' | 'INSERT';
+export type AiVideoEditMotivation = 'action' | 'eyeline' | 'sound' | 'reveal' | 'graphic' | 'emotion' | 'scene-change';
+export interface AiVideoScene { index: number; durationSeconds?: number; title: string; narration: string; visualPrompt: string; dramaticBeat?: string; shotSize?: AiVideoShotSize; lensMm?: number; cameraAngle?: string; cameraMovement?: string; editMotivation?: AiVideoEditMotivation; charactersInShot?: string[]; shotPlan?: string; blocking?: string; transition?: 'continue' | 'cut'; continuityIn?: string; continuityOut?: string; soundDesign?: string; keeper?: string; editorHandoff?: string; negativeConstraints?: string; storyboardReady?: boolean; designDirty?: boolean; status: 'pending' | 'generating' | 'completed' | 'failed' }
+export interface AiVideoCharacter { index: number; name: string; description: string; sheetReady?: boolean; designDirty?: boolean }
+export interface AiVideoJobStatus { id: string; status: 'queued' | 'planning' | 'designing' | 'reviewing' | 'generating' | 'composing' | 'completed' | 'failed' | 'cancelled'; stage: string; progressPercent: number; createdAt: string; updatedAt: string; brief: string; durationSeconds: number; shotDurationSeconds?: number; model: FlowVideoModel; imageModel?: string; aspectRatio: FlowVideoAspectRatio; directionMode?: 'cinematic' | 'documentary' | 'commercial' | 'social-realism'; workflowMode?: 'review-first' | 'direct'; automationMode?: 'automatic' | 'manual'; characterReference?: { filename: string }; characters?: AiVideoCharacter[]; characterSheetReady?: boolean; characterDesignDirty?: boolean; productionBible?: string; scenes: AiVideoScene[]; result?: { videoFile: string; durationMs: number }; error?: string }
 
 export type DouyinItemState =
   | "pending"

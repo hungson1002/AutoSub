@@ -3,12 +3,30 @@ import type { AnimationAsset, AnimationCommandType, AnimationProject, CompositeS
 import { ANIMATION_PROJECT_VERSION, defaultTransform } from '../../shared/animationStudio';
 import { AnimationCanvas } from '../animationStudio/AnimationCanvas';
 import { ChevronDown, Download, Image, Layers3, Maximize, Pause, Play, Plus, Save, Settings2, Sparkles, Square, Trash2, Type, Volume2, X } from '../components/Icons';
-import { animationAssetUrl, api, friendlyErrorMessage } from '../lib/api';
+import { aiVideoUrl, animationAssetUrl, api, friendlyErrorMessage } from '../lib/api';
 import { capabilityAssignments } from '../lib/settings';
-import type { AIProvider, AppSettings } from '../types';
+import type { AIProvider, AiVideoJobStatus, AppSettings } from '../types';
+import './AnimationStudioPage.css';
 
 const now = () => new Date().toISOString();
 const makeId = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
+const animationMotionJobStorageKey = 'autosub.animation-motion-job-id';
+const activeMotionStates = new Set<AiVideoJobStatus['status']>(['queued', 'planning', 'generating', 'composing']);
+
+function srtTimestamp(milliseconds: number) {
+  const value = Math.max(0, Math.round(milliseconds));
+  const hours = Math.floor(value / 3_600_000);
+  const minutes = Math.floor(value % 3_600_000 / 60_000);
+  const seconds = Math.floor(value % 60_000 / 1000);
+  const millis = value % 1000;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')},${String(millis).padStart(3, '0')}`;
+}
+
+function subtitleWordTimings(text: string, durationMs: number) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const wordDuration = durationMs / Math.max(1, words.length);
+  return words.map((word, index) => ({ word, startMs: Math.round(index * wordDuration), endMs: Math.round((index + 1) * wordDuration) }));
+}
 
 function demoProject(): AnimationProject {
   const createdAt = now();
@@ -62,7 +80,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [persisted, setPersisted] = useState(false);
   const [brief, setBrief] = useState('Điều gì xảy ra nếu Mặt Trăng biến mất?');
   const [directing, setDirecting] = useState(false);
-  const [targetMinutes, setTargetMinutes] = useState(1);
+  const [targetMinutes, setTargetMinutes] = useState('1');
   const [directorError, setDirectorError] = useState('');
   const [directorWarning, setDirectorWarning] = useState('');
   const [batching, setBatching] = useState(false);
@@ -84,7 +102,11 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [showSubtitles, setShowSubtitles] = useState(true);
   const [presentationOpen, setPresentationOpen] = useState(false);
   const [creatingVoiceover, setCreatingVoiceover] = useState(false);
+  const [motionJob, setMotionJob] = useState<AiVideoJobStatus>();
+  const [startingMotion, setStartingMotion] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(() => window.innerWidth > 900);
+  const [timelineOpen, setTimelineOpen] = useState(false);
   const [versions, setVersions] = useState<Array<{ id: string; createdAt: string; name: string; sceneCount: number }>>([]);
   const [spriteColumns, setSpriteColumns] = useState(4);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -93,6 +115,8 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const startedAt = useRef(0);
   const scene = project.scenes.find((item): item is CompositeScene => item.id === sceneId && item.renderMode === 'composite') || project.scenes.find((item): item is CompositeScene => item.renderMode === 'composite');
   const selectedLayer = scene?.layers.find((layer) => layer.id === selectedLayerId);
+  const subtitleLayer = scene?.layers.find((layer) => layer.type === 'text' && layer.name.startsWith('Voiceover · Subtitle'));
+  const subtitleFontSize = subtitleLayer?.fontSize || Math.max(24, Math.round(Math.min(project.width, project.height) * .032));
   const selectedAsset = selectedLayer?.assetId ? project.assets.find((asset) => asset.id === selectedLayer.assetId) : undefined;
   const selectedCommand = scene?.commands.find((command) => command.id === selectedCommandId);
   const directorAssignment = capabilityAssignments(settings, 'translation')[0];
@@ -113,6 +137,16 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     refresh(); const timer = window.setInterval(refresh, 5000);
     return () => { mounted = false; window.clearInterval(timer); };
   }, []);
+  useEffect(() => {
+    const savedId = localStorage.getItem(animationMotionJobStorageKey);
+    if (savedId) void api.getAiVideoJob(savedId).then(setMotionJob).catch(() => localStorage.removeItem(animationMotionJobStorageKey));
+  }, []);
+  useEffect(() => {
+    if (!motionJob || !activeMotionStates.has(motionJob.status)) return;
+    const controller = new AbortController();
+    const timer = window.setInterval(() => void api.getAiVideoJob(motionJob.id, controller.signal).then(setMotionJob).catch(() => undefined), 1500);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [motionJob?.id, motionJob?.status]);
   useEffect(() => { if (!persisted) return; const timer = setTimeout(() => { void api.saveAnimationProject(project).catch(() => undefined); }, 1500); return () => clearTimeout(timer); }, [persisted, project]);
 
   useEffect(() => {
@@ -250,9 +284,9 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   };
   const reuseAsset = (asset: AnimationAsset) => {
     if (!scene || !['image', 'background', 'object', 'icon', 'character', 'effect', 'audio'].includes(asset.type)) return;
-    const layerId = makeId(asset.type === 'audio' ? 'audio' : 'image'); const isAudio = asset.type === 'audio';
-    const layer: SceneLayer = { id: layerId, name: asset.name, type: isAudio ? 'audio' : asset.type === 'sprite' || asset.sprite ? 'sprite' : 'image', assetId: asset.id, visible: true, locked: false, zIndex: scene.layers.length + 1, width: isAudio ? 1 : Math.min(asset.sprite?.frameWidth || asset.width || 560, 760), height: isAudio ? 1 : Math.min(asset.sprite?.frameHeight || asset.height || 560, 760), animation: asset.animations?.[0] || (asset.sprite ? Object.keys(asset.sprite.clips)[0] : undefined), characterId: asset.type === 'character' ? asset.id : undefined, transform: { ...defaultTransform(), position: { x: project.width / 2, y: project.height / 2 } } };
-    setProject((current) => ({ ...current, assets: current.assets.some((item) => item.id === asset.id) ? current.assets : [...current.assets, asset], scenes: current.scenes.map((item) => item.id === scene.id && item.renderMode === 'composite' ? { ...item, layers: [...item.layers, layer] } : item), updatedAt: now() })); setSelectedLayerId(layerId);
+    const layerId = makeId(asset.type === 'audio' ? 'audio' : 'image'); const isAudio = asset.type === 'audio'; const isBackground = asset.type === 'background';
+    const layer: SceneLayer = { id: layerId, name: asset.name, type: isAudio ? 'audio' : asset.type === 'sprite' || asset.sprite ? 'sprite' : 'image', assetId: asset.id, visible: true, locked: isBackground, zIndex: isBackground ? 0 : scene.layers.length + 1, width: isAudio ? 1 : isBackground ? project.width : Math.min(asset.sprite?.frameWidth || asset.width || 560, 760), height: isAudio ? 1 : isBackground ? project.height : Math.min(asset.sprite?.frameHeight || asset.height || 560, 760), animation: asset.animations?.[0] || (asset.sprite ? Object.keys(asset.sprite.clips)[0] : undefined), characterId: asset.type === 'character' ? asset.id : undefined, transform: { ...defaultTransform(), position: { x: project.width / 2, y: project.height / 2 } } };
+    setProject((current) => ({ ...current, assets: current.assets.some((item) => item.id === asset.id) ? current.assets : [...current.assets, asset], scenes: current.scenes.map((item) => item.id === scene.id && item.renderMode === 'composite' ? { ...item, layers: [...(isBackground ? item.layers.filter((candidate) => !(candidate.type === 'image' && candidate.locked && candidate.zIndex === 0)) : item.layers), layer] } : item), updatedAt: now() })); setSelectedLayerId(layerId);
   };
   const selectedAssetGeneration = () => usingFlowAgentAssets ? { generator: 'flow-agent' as const, model: 'narwhal' } : imageProvider ? { provider: imageProvider, model: imageModel } : undefined;
   const generateAsset = async () => {
@@ -260,7 +294,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     if (!generation) { onNotice('Hãy chọn provider tạo ảnh trước.', 'error'); return; }
     if (usingFlowAgentAssets && !flowAgent?.connected) { onNotice('Flow Agent chưa sẵn sàng. Hãy mở Google Flow và tải lại tab.', 'error'); return; }
     setGeneratingAsset(true);
-    try { const asset = await api.generateAnimationAsset({ prompt: assetPrompt, ...generation, type: 'image' }); setLibraryAssets((current) => [asset, ...current]); setAssetPrompt(''); reuseAsset(asset); onNotice('Đã tạo, lưu và thêm asset vào scene.'); }
+    try { const ratio = project.width > project.height ? '16:9 landscape' : project.width < project.height ? '9:16 portrait' : '1:1 square'; const asset = await api.generateAnimationAsset({ prompt: `${assetPrompt}. Full-frame ${ratio}, no borders, no letterboxing, no text`, ...generation, type: 'background', width: project.width, height: project.height }); setLibraryAssets((current) => [asset, ...current]); setAssetPrompt(''); reuseAsset(asset); onNotice(`Đã tạo asset đúng tỷ lệ ${ratio.split(' ')[0]} và thêm vào scene.`); }
     catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo asset.'), 'error'); }
     finally { setGeneratingAsset(false); }
   };
@@ -283,6 +317,11 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     finally { setSaving(false); }
   };
   const direct = async () => {
+    const requestedMinutes = Number(targetMinutes.replace(',', '.'));
+    if (!Number.isFinite(requestedMinutes) || requestedMinutes <= 0) {
+      setDirectorError('Hãy nhập thời lượng video lớn hơn 0 phút.');
+      return;
+    }
     if (!directorProvider || !directorAssignment?.model) {
       const message = 'Hãy cấu hình provider/model AI trong Cài đặt → Default Models.';
       setDirectorError(message);
@@ -293,7 +332,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     setDirectorError(''); setDirectorWarning(''); setDirecting(true);
     try {
       const assetGeneration = autoGenerateAssets ? selectedAssetGeneration() : undefined;
-      const directed = await api.directAnimationProject({ brief, project, provider: directorProvider, model: directorAssignment.model, targetDurationSeconds: Math.round(targetMinutes * 60), narration: { provider: ttsProvider, model: ttsAssignment.model, voice: selectedVoice, speed: 1 }, ...(assetGeneration ? { assetGeneration } : {}) });
+      const directed = await api.directAnimationProject({ brief, project, provider: directorProvider, model: directorAssignment.model, targetDurationSeconds: Math.round(requestedMinutes * 60), narration: { provider: ttsProvider, model: ttsAssignment.model, voice: selectedVoice, speed: 1 }, ...(assetGeneration ? { assetGeneration } : {}) });
       setProject(directed);
       setSceneId(directed.scenes[0]?.id || '');
       setSelectedLayerId('');
@@ -333,16 +372,72 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const editWholeProject = async () => { if (!directorProvider || !directorAssignment?.model || editInstruction.trim().length < 4) return; setEditingWithAi(true); try { const edited = await api.editAnimationProject({ instruction: editInstruction, project, provider: directorProvider, model: directorAssignment.model }); setProject(edited); setEditInstruction(''); setSelectedLayerId(''); onNotice('AI đã áp dụng lệnh cho toàn bộ composite scene.'); } catch (error) { onNotice(friendlyErrorMessage(error, 'AI không thể sửa toàn project.'), 'error'); } finally { setEditingWithAi(false); } };
   const relayout = (width: number, height: number) => { const ratioX = width / project.width, ratioY = height / project.height, objectScale = Math.min(ratioX, ratioY); setProject((current) => ({ ...current, width, height, scenes: current.scenes.map((item) => item.renderMode !== 'composite' ? item : { ...item, layers: item.layers.map((layer) => layer.type === 'audio' ? layer : { ...layer, width: layer.type === 'image' && layer.locked ? width : Math.max(1, Math.round(layer.width * (layer.type === 'text' || layer.type === 'chart' ? ratioX : objectScale))), height: layer.type === 'image' && layer.locked ? height : Math.max(1, Math.round(layer.height * objectScale)), fontSize: layer.fontSize ? Math.max(12, Math.round(layer.fontSize * objectScale)) : layer.fontSize, transform: { ...layer.transform, position: { x: Math.round(layer.transform.position.x * ratioX), y: Math.round(layer.transform.position.y * ratioY) } } }), commands: item.commands.map((command) => command.type === 'MOVE' && typeof command.from === 'object' && typeof command.to === 'object' ? { ...command, from: { x: command.from.x * ratioX, y: command.from.y * ratioY }, to: { x: command.to.x * ratioX, y: command.to.y * ratioY } } : command) }), updatedAt: now() })); setSelectedLayerId(''); setTimeMs(0); onNotice(`Đã smart re-layout project sang ${width}:${height}.`); };
   const createVoiceover = async () => { if (!ttsProvider || !ttsAssignment?.model) { onNotice('Hãy cấu hình TTS provider/model.', 'error'); return; } setCreatingVoiceover(true); try { const narrated = await api.generateAnimationNarration({ project, provider: ttsProvider, model: ttsAssignment.model, voice: ttsVoice, speed: 1 }); setProject(narrated); onNotice('Đã tạo voiceover và gắn audio layer cho từng scene.'); } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo voiceover.'), 'error'); } finally { setCreatingVoiceover(false); } };
+  const createMotionVideo = async () => {
+    if (!directorProvider || !directorAssignment?.model) { onNotice('Hãy cấu hình AI Director trước khi tạo video chuyển động.', 'error'); return; }
+    if (!flowAgent?.connected) { onNotice('Flow Agent chưa sẵn sàng. Hãy mở Google Flow và tải lại tab.', 'error'); return; }
+    const storyboard = compositeScenes.map((item, index) => {
+      const visibleText = item.layers.filter((layer) => layer.visible && layer.type === 'text' && layer.text).map((layer) => layer.text).join(' · ');
+      return `Cảnh ${index + 1} (${(item.durationMs / 1000).toFixed(1)} giây): ${item.name}${visibleText ? ` — ${visibleText}` : ''}`;
+    }).join('\n');
+    setStartingMotion(true);
+    try {
+      const created = await api.createAiVideoJob({
+        brief: `${brief.trim()}\n\nHãy chuyển storyboard Animation Studio sau thành phim chuyển động liền mạch, giữ đúng thứ tự và nội dung cảnh:\n${storyboard}`,
+        durationSeconds: Math.max(4, Math.min(120, Math.round(totalDurationMs / 1000))),
+        model: 'Flow Agent Auto',
+        aspectRatio: project.width >= project.height ? '16:9' : '9:16',
+        script: { provider: directorProvider, model: directorAssignment.model },
+      });
+      localStorage.setItem(animationMotionJobStorageKey, created.id);
+      setMotionJob(created);
+      onNotice('Flow Agent đã bắt đầu tạo bản video chuyển động.');
+    } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể bắt đầu video chuyển động.'), 'error'); }
+    finally { setStartingMotion(false); }
+  };
+  const cancelMotionVideo = async () => {
+    if (!motionJob || !activeMotionStates.has(motionJob.status)) return;
+    try { setMotionJob(await api.cancelAiVideoJob(motionJob.id)); onNotice('Đã dừng tạo video chuyển động.'); }
+    catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể dừng video chuyển động.'), 'error'); }
+  };
   const toggleHistory = async () => { if (!persisted) { onNotice('Hãy lưu project lần đầu để sử dụng lịch sử.', 'error'); return; } const next = !historyOpen; setHistoryOpen(next); if (next) setVersions(await api.listAnimationProjectVersions(project.id)); };
   const restoreVersion = async (versionId: string) => { try { const restored = await api.restoreAnimationProjectVersion(project.id, versionId); setProject(restored); setSceneId(restored.scenes[0]?.id || ''); setSelectedLayerId(''); setTimeMs(0); setHistoryOpen(false); onNotice('Đã khôi phục version project.'); } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể khôi phục version.'), 'error'); } };
   const exportJson = () => { const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${project.name.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'animation-project'}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); };
+  const exportSrt = () => {
+    let offsetMs = 0; let cueNumber = 1; const cues: string[] = [];
+    for (const item of compositeScenes) {
+      const subtitle = item.layers.find((layer) => layer.type === 'text' && layer.name.startsWith('Voiceover · Subtitle'));
+      const words = String(subtitle?.text || item.narration || '').trim().split(/\s+/).filter(Boolean);
+      const groups = Array.from({ length: Math.ceil(words.length / 7) }, (_, index) => words.slice(index * 7, index * 7 + 7));
+      let usedWords = 0;
+      for (const group of groups) {
+        const start = offsetMs + Math.round(item.durationMs * usedWords / Math.max(1, words.length));
+        usedWords += group.length;
+        const end = offsetMs + Math.round(item.durationMs * usedWords / Math.max(1, words.length));
+        cues.push(`${cueNumber++}\n${srtTimestamp(start)} --> ${srtTimestamp(end)}\n${group.join(' ')}\n`);
+      }
+      offsetMs += item.durationMs;
+    }
+    if (!cues.length) { onNotice('Project chưa có lời dẫn để xuất SRT.', 'error'); return; }
+    const blob = new Blob([`\uFEFF${cues.join('\n')}`], { type: 'application/x-subrip;charset=utf-8' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${project.name.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'autosub-animation'}.srt`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    onNotice(`Đã xuất ${cues.length} cue phụ đề SRT.`);
+  };
+  const updateSubtitleFontSize = (fontSize: number) => setProject((current) => ({ ...current, scenes: current.scenes.map((item) => item.renderMode !== 'composite' ? item : ({ ...item, layers: item.layers.map((layer) => layer.type === 'text' && layer.name.startsWith('Voiceover · Subtitle') ? { ...layer, fontSize } : layer) })), updatedAt: now() }));
   const renderMp4 = async () => {
     const canvas = canvasRef.current;
     const compositeScenes = project.scenes.filter((item): item is CompositeScene => item.renderMode === 'composite');
-    if (!canvas || !compositeScenes.length || typeof MediaRecorder === 'undefined') { onNotice('Trình duyệt hiện tại không hỗ trợ ghi Canvas.', 'error'); return; }
+    if (!compositeScenes.length) { onNotice('Project chưa có cảnh composite để xuất.', 'error'); return; }
     setRendering(true); setPlaying(false); setSelectedLayerId('');
     try {
       const quality = await api.checkAnimationQuality(project); setQualityIssues(quality.issues); const blockers = quality.issues.filter((item) => item.severity === 'error'); if (blockers.length) throw new Error(`Quality Checker chặn render: ${blockers.map((item) => item.message).join(' ')}`);
+      try {
+        const mp4 = await api.renderAnimationProjectFrameAccurate(project, showSubtitles);
+        const url = URL.createObjectURL(mp4); const link = document.createElement('a'); link.href = url; link.download = `${project.name.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'autosub-animation'}.mp4`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        onNotice(`Đã xuất MP4 frame-accurate gồm ${compositeScenes.length} cảnh${showSubtitles ? ', voice và phụ đề' : ' và voice, không phụ đề'}.`);
+        return;
+      } catch (remotionError) {
+        onNotice(`Renderer mới chưa sẵn sàng, đang chuyển sang chế độ tương thích: ${friendlyErrorMessage(remotionError, 'Lỗi Remotion.')}`, 'error');
+      }
+      if (!canvas || typeof MediaRecorder === 'undefined') throw new Error('Renderer mới gặp lỗi và trình duyệt không hỗ trợ chế độ ghi Canvas dự phòng.');
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const stream = canvas.captureStream(project.fps);
       const audioContext = new AudioContext(); const audioDestination = audioContext.createMediaStreamDestination(); const audioSources: AudioBufferSourceNode[] = [];
@@ -385,13 +480,17 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const startPresentation = () => { const first = compositeScenes[0]; if (!first) return; setPresentationOpen(true); setSequenceMode(true); setSequenceTimeMs(0); setSceneId(first.id); setSelectedLayerId(''); setTimeMs(0); setPlaying(true); };
   if (!scene) return <div className="animation-studio-page"><p>Project chưa có composite scene.</p></div>;
 
-  return <section className="animation-studio-page" aria-label="Animation Studio">
+  return <section className={`animation-studio-page studio-preview-first${setupOpen ? ' setup-open' : ''}${timelineOpen ? ' timeline-open' : ''}`} aria-label="Animation Studio">
     <header className="animation-toolbar">
       <div className="animation-project-title"><span>Animation Studio</span><input aria-label="Tên project" value={project.name} onChange={(event) => setProject((current) => ({ ...current, name: event.target.value, updatedAt: now() }))} /></div>
       <div className="animation-toolbar-meta" aria-label="Thông số project"><span>{project.width} × {project.height}</span><span>{project.fps} FPS</span></div>
       <div className="animation-toolbar-actions">
+        <button className="button quiet" type="button" aria-expanded={setupOpen} aria-controls="animation-setup" onClick={() => setSetupOpen((value) => !value)}><Settings2 size={15} aria-hidden="true" /> Thiết lập AI</button>
+        <details className="animation-file-menu"><summary>Thêm <ChevronDown size={14} aria-hidden="true" /></summary><div>
         <button className="button quiet" type="button" onClick={() => void toggleHistory()}>Lịch sử</button>
         <button className="button quiet" type="button" onClick={exportJson}>JSON</button>
+        <button className="button quiet" type="button" onClick={exportSrt}><Download size={14} aria-hidden="true" /> SRT</button>
+        </div></details>
         <button className="button" type="button" onClick={startPresentation}><Maximize size={15} aria-hidden="true" /> Trình chiếu</button>
         <button className="button" type="button" onClick={() => void renderMp4()} disabled={rendering}><Download size={15} aria-hidden="true" /> {rendering ? 'Đang xuất toàn bộ…' : 'Xuất video hoàn chỉnh'}</button>
         <button className="button primary" type="button" onClick={() => void save()} disabled={saving}><Save size={15} aria-hidden="true" /> {saving ? 'Đang lưu' : 'Lưu'}</button>
@@ -402,19 +501,23 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       <div className="animation-presentation-status"><span>{sequenceSeconds}s / {(totalDurationMs / 1000).toFixed(1)}s</span><strong>{scene.name}</strong></div>
       <button type="button" className="animation-presentation-close" aria-label="Đóng trình chiếu" onClick={() => { setPresentationOpen(false); setPlaying(false); }}><X size={20} aria-hidden="true" /></button>
     </div>}
+    <aside id="animation-setup" className="animation-setup-panel" aria-label="Thiết lập AI và video" hidden={!setupOpen}>
     <div className="animation-director-bar">
       <div className="animation-director-heading"><span><Sparkles size={16} aria-hidden="true" /> AI Director</span><small>{directorProvider ? `${directorProvider.name} · ${directorAssignment?.model || ''}` : 'Chưa cấu hình AI Director'}</small></div>
       <label className="animation-director-prompt"><span className="sr-only">Ý tưởng hoặc kịch bản</span><textarea value={brief} onChange={(event) => setBrief(event.target.value)} placeholder="Mô tả video bạn muốn tạo…" /></label>
-      <div className="animation-director-options"><label className="animation-duration"><span>Thời lượng video</span><input aria-label="Thời lượng video tính bằng phút" type="number" min="0.5" max="10" step="0.5" value={targetMinutes} onChange={(event) => setTargetMinutes(Math.max(.5, Math.min(10, Number(event.target.value) || 1)))} /><span>phút</span></label><label className="animation-director-voice"><span>Giọng đọc</span>{ttsVoices.length ? <select aria-label="Chọn giọng đọc" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} title={ttsProvider?.name}>{ttsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name || voice.id}{voice.language ? ` · ${voice.language}` : ''}</option>)}</select> : <input aria-label="Voice ID" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} placeholder={ttsProvider ? 'Nhập Voice ID' : 'Chưa cấu hình TTS'} disabled={!ttsProvider} />}</label><label className="animation-subtitle-toggle"><input type="checkbox" checked={showSubtitles} onChange={(event) => setShowSubtitles(event.target.checked)} /><span>Phụ đề</span></label><label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tự tạo asset thiếu</span></label>{autoGenerateAssets && <select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => { const value = event.target.value; setImageProviderId(value); setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1'); }}><option value="flow-agent">Flow Agent · Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : ' · chưa kết nối'}</option>{providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}<button className="button quiet" type="button" disabled={batching || directing} onClick={() => void directBatch()}>{batching ? 'Đang chạy…' : 'Tạo hàng loạt'}</button><button className="button primary" type="button" disabled={directing || batching || brief.trim().length < 10 || (autoGenerateAssets && usingFlowAgentAssets && !flowAgent?.connected) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang viết kịch bản và tạo voice…' : 'Dựng video hoàn chỉnh'}</button></div>
-      {directorError && <div className="animation-director-error" role="alert"><span><strong>Không thể dựng video.</strong> {directorError}</span><button type="button" aria-label="Đóng thông báo lỗi" onClick={() => setDirectorError('')}><X size={14} aria-hidden="true" /></button></div>}
-      {directorWarning && <div className="animation-director-error warning" role="status"><span><strong>Video đã được dựng với asset thay thế.</strong> {directorWarning}</span><button type="button" aria-label="Đóng cảnh báo" onClick={() => setDirectorWarning('')}><X size={14} aria-hidden="true" /></button></div>}
+      <div className="animation-director-options"><label className="animation-duration"><span>Thời lượng video</span><input aria-label="Thời lượng video tính bằng phút" type="number" min="0.1" step="0.5" value={targetMinutes} onChange={(event) => setTargetMinutes(event.target.value)} /><span>phút</span></label><label className="animation-director-voice"><span>Giọng đọc</span>{ttsVoices.length ? <select aria-label="Chọn giọng đọc" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} title={ttsProvider?.name}>{ttsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name || voice.id}{voice.language ? ` · ${voice.language}` : ''}</option>)}</select> : <input aria-label="Voice ID" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} placeholder={ttsProvider ? 'Nhập Voice ID' : 'Chưa cấu hình TTS'} disabled={!ttsProvider} />}</label><label className="animation-subtitle-toggle"><input type="checkbox" checked={showSubtitles} onChange={(event) => setShowSubtitles(event.target.checked)} /><span>Phụ đề</span></label><label className="animation-subtitle-size"><span>Cỡ chữ</span><input aria-label="Cỡ chữ phụ đề" type="number" min="16" max="120" value={subtitleFontSize} onChange={(event) => updateSubtitleFontSize(Math.max(16, Math.min(120, Number(event.target.value) || 16)))} /></label>{subtitleLayer && <button className="button quiet animation-edit-subtitle" type="button" onClick={() => setSelectedLayerId(subtitleLayer.id)}>Sửa câu hiện tại</button>}<label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tự tạo asset thiếu</span></label>{autoGenerateAssets && <select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => { const value = event.target.value; setImageProviderId(value); setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1'); }}><option value="flow-agent">Flow Agent · Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : ' · chưa kết nối'}</option>{providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}<button className="button quiet" type="button" disabled={batching || directing} onClick={() => void directBatch()}>{batching ? 'Đang chạy…' : 'Tạo hàng loạt'}</button><button className="button primary" type="button" disabled={directing || batching || brief.trim().length < 10 || (autoGenerateAssets && usingFlowAgentAssets && !flowAgent?.connected) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang viết kịch bản và tạo voice…' : 'Dựng video hoàn chỉnh'}</button><button className="button animation-flow-motion" type="button" disabled={startingMotion || Boolean(motionJob && activeMotionStates.has(motionJob.status)) || !flowAgent?.connected || !compositeScenes.length} onClick={() => void createMotionVideo()}><Sparkles size={14} aria-hidden="true" /> {startingMotion ? 'Đang bắt đầu…' : motionJob && activeMotionStates.has(motionJob.status) ? `${motionJob.progressPercent}% · ${motionJob.stage}` : 'Tạo video chuyển động AI'}</button>{motionJob && activeMotionStates.has(motionJob.status) && <button className="button animation-flow-cancel" type="button" onClick={() => void cancelMotionVideo()}><X size={14} aria-hidden="true" /> Dừng tạo video AI</button>}{motionJob?.status === 'completed' && motionJob.result && <a className="button animation-flow-result" href={aiVideoUrl(motionJob.id, true)}><Download size={14} aria-hidden="true" /> Tải bản AI</a>}{motionJob?.status === 'failed' && <p className="animation-flow-error" role="alert">{motionJob.error || 'Flow Agent không tạo được video chuyển động.'}</p>}</div>
+      {directorError && <div className="animation-director-error" role="alert"><details><summary>Không thể dựng video. Xem lỗi</summary><p>{directorError}</p></details><button type="button" aria-label="Đóng thông báo lỗi" onClick={() => setDirectorError('')}><X size={14} aria-hidden="true" /></button></div>}
+      {directorWarning && <div className="animation-director-error warning" role="status"><details><summary>Video đang dùng ảnh thay thế. Xem chi tiết</summary><p>{directorWarning}</p></details><button type="button" aria-label="Đóng cảnh báo" onClick={() => setDirectorWarning('')}><X size={14} aria-hidden="true" /></button></div>}
     </div>
+    <details className="animation-edit-disclosure"><summary>Chỉnh sửa bằng AI <ChevronDown size={14} aria-hidden="true" /></summary>
     <div className="animation-ai-edit-bar">
       <span className="animation-ai-edit-label">Chỉnh bằng AI</span><input aria-label="Yêu cầu chỉnh sửa bằng AI" value={editInstruction} onChange={(event) => setEditInstruction(event.target.value)} placeholder="Ví dụ: zoom gần Trái Đất hơn…" /><button className="animation-ai-apply" type="button" disabled={editingWithAi || editInstruction.trim().length < 4} onClick={() => void editWithAi('edit')}>{editingWithAi ? 'Đang sửa…' : 'Áp dụng'}</button>
       <details className="animation-ai-more"><summary><Settings2 size={14} aria-hidden="true" /> Tùy chọn <ChevronDown size={13} aria-hidden="true" /></summary><div><button type="button" disabled={editingWithAi || editInstruction.trim().length < 4} onClick={() => void editWholeProject()}>Áp dụng toàn project</button><button type="button" disabled={editingWithAi} onClick={() => void editWithAi('animation')}>Tạo lại chuyển động</button><button type="button" disabled={editingWithAi} onClick={() => void editWithAi('visual')}>Tạo lại hình ảnh</button><button type="button" onClick={() => void checkQuality()}>Kiểm tra chất lượng</button>{qualityIssues.length > 0 && <button type="button" onClick={() => void fixQuality()}>Tự sửa lỗi</button>}</div></details>
       {qualityIssues.length > 0 && <span className={`animation-quality-badge ${qualityIssues.some((item) => item.severity === 'error') ? 'has-error' : ''}`}>{qualityIssues.length} cảnh báo</span>}
     </div>
-    <div className="animation-project-settings" aria-label="Thiết lập project"><input className="animation-style-profile" value={project.styleProfile?.style || ''} onChange={(event) => setProject((current) => ({ ...current, styleProfile: { name: current.styleProfile?.name || 'Kênh mặc định', style: event.target.value, pacing: current.styleProfile?.pacing || 'balanced' }, updatedAt: now() }))} placeholder="Phong cách: pixel, doodle…" /><div className="animation-ratio-buttons"><button type="button" onClick={() => relayout(1080, 1920)}>9:16</button><button type="button" onClick={() => relayout(1920, 1080)}>16:9</button><button type="button" onClick={() => relayout(1080, 1080)}>1:1</button></div><div className="animation-voiceover"><button type="button" disabled={creatingVoiceover} onClick={() => void createVoiceover()}>{creatingVoiceover ? 'Đang tạo…' : 'Tạo lại voiceover'}</button></div></div>
+    </details>
+    <div className="animation-project-settings" aria-label="Thiết lập project"><label>Phong cách hình ảnh<input className="animation-style-profile" value={project.styleProfile?.style || ''} onChange={(event) => setProject((current) => ({ ...current, styleProfile: { name: current.styleProfile?.name || 'Kênh mặc định', style: event.target.value, pacing: current.styleProfile?.pacing || 'balanced' }, updatedAt: now() }))} placeholder="Ví dụ: pixel, doodle…" /></label><span>Tỷ lệ khung hình</span><div className="animation-ratio-buttons">{([[1080, 1920, '9:16'], [1920, 1080, '16:9'], [1080, 1080, '1:1']] as const).map(([width, height, label]) => <button key={label} type="button" aria-pressed={project.width === width && project.height === height} onClick={() => relayout(width, height)}>{label}</button>)}</div><div className="animation-voiceover"><button type="button" disabled={creatingVoiceover} onClick={() => void createVoiceover()}>{creatingVoiceover ? 'Đang tạo…' : 'Tạo lại voiceover'}</button></div></div>
+    </aside>
     {historyOpen && <div className="animation-history">{versions.length ? versions.map((version) => <button type="button" key={version.id} onClick={() => void restoreVersion(version.id)}><strong>{new Date(version.createdAt).toLocaleString('vi-VN')}</strong><small>{version.sceneCount} scene · {version.name}</small></button>) : <span>Chưa có version trước.</span>}</div>}
     <div className={`animation-workspace${selectedLayer ? ' has-selection' : ''}`}>
       <aside className="animation-left-panel" aria-label="Scene và layer">
@@ -439,7 +542,8 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
           <label><span>Tên layer</span><input value={selectedLayer.name} onChange={(event) => updateLayer(selectedLayer.id, { name: event.target.value })} /></label>
           <div className="animation-field-row"><label><span>Hiển thị</span><input type="checkbox" checked={selectedLayer.visible} onChange={(event) => updateLayer(selectedLayer.id, { visible: event.target.checked })} /></label><label><span>Khóa</span><input type="checkbox" checked={selectedLayer.locked} onChange={(event) => updateLayer(selectedLayer.id, { locked: event.target.checked })} /></label></div>
           <label><span>Thứ tự layer</span><input type="number" value={selectedLayer.zIndex} onChange={(event) => updateLayer(selectedLayer.id, { zIndex: Number(event.target.value) })} /></label>
-          {selectedLayer.type === 'text' && <label><span>Nội dung</span><textarea value={selectedLayer.text || ''} onChange={(event) => updateLayer(selectedLayer.id, { text: event.target.value })} /></label>}
+          {selectedLayer.type === 'text' && <label><span>Nội dung</span><textarea value={selectedLayer.text || ''} onChange={(event) => { const text = event.target.value; updateLayer(selectedLayer.id, selectedLayer.name.startsWith('Voiceover · Subtitle') ? { text, wordTimings: subtitleWordTimings(text, scene.durationMs) } : { text }); }} /></label>}
+          {selectedLayer.type === 'text' && <label><span>Cỡ chữ <b>{selectedLayer.fontSize || 54}px</b></span><input type="range" min="16" max="160" value={selectedLayer.fontSize || 54} onChange={(event) => updateLayer(selectedLayer.id, { fontSize: Number(event.target.value) })} /></label>}
           {selectedLayer.type === 'chart' && <><label><span>Dữ liệu (phân cách dấu phẩy)</span><input value={(selectedLayer.data || []).join(', ')} onChange={(event) => updateLayer(selectedLayer.id, { data: event.target.value.split(',').map(Number).filter(Number.isFinite) })} /></label><label><span>Nhãn</span><input value={(selectedLayer.labels || []).join(', ')} onChange={(event) => updateLayer(selectedLayer.id, { labels: event.target.value.split(',').map((value) => value.trim()) })} /></label></>}
           {selectedLayer.type === 'audio' && <><label><span>Bắt đầu audio (ms)</span><input type="number" min="0" max={scene.durationMs} value={selectedLayer.startMs || 0} onChange={(event) => updateLayer(selectedLayer.id, { startMs: Number(event.target.value) })} /></label><label><span>Thời lượng audio (ms, 0 = hết file)</span><input type="number" min="0" value={selectedLayer.durationMs || 0} onChange={(event) => updateLayer(selectedLayer.id, { durationMs: Number(event.target.value) || undefined })} /></label><label><span>Âm lượng</span><input type="range" min="0" max="1" step="0.01" value={selectedLayer.volume ?? 1} onChange={(event) => updateLayer(selectedLayer.id, { volume: Number(event.target.value) })} /></label></>}
           {selectedAsset && <><label><span>Asset tags</span><input defaultValue={selectedAsset.tags.join(', ')} key={`${selectedAsset.id}-tags-${selectedAsset.tags.join('|')}`} onBlur={(event) => void updateAssetMetadata({ tags: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) })} /></label><label><span>Style lock</span><input value={selectedAsset.style || ''} onChange={(event) => setProject((current) => ({ ...current, assets: current.assets.map((item) => item.id === selectedAsset.id ? { ...item, style: event.target.value } : item) }))} onBlur={(event) => void updateAssetMetadata({ style: event.target.value })} /></label></>}
@@ -456,6 +560,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       </aside>
     </div>
     <div className="animation-timeline" aria-label="Timeline scene">
+      <button className="animation-timeline-toggle" type="button" aria-expanded={timelineOpen} aria-controls="animation-detail-timeline" onClick={() => setTimelineOpen((value) => !value)}>{timelineOpen ? 'Thu gọn timeline' : 'Sửa chuyển động'} <ChevronDown size={14} aria-hidden="true" /></button>
       <div className="animation-timeline-top"><button type="button" aria-label={playing && sequenceMode ? 'Tạm dừng toàn bộ video' : 'Phát toàn bộ video'} onClick={toggleSequencePreview}>{playing && sequenceMode ? <Pause size={14} /> : <Play size={14} />}</button><strong>TOÀN BỘ VIDEO</strong><span>{sequenceSeconds}s / {(totalDurationMs / 1000).toFixed(1)}s</span></div>
       <div className="animation-sequence-overview" aria-label="Tất cả cảnh trong video">
         <div className="animation-sequence-lane">
@@ -463,9 +568,11 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
           <i className="animation-sequence-playhead" aria-hidden="true" style={{ left: `${sequenceTimeMs / Math.max(1, totalDurationMs) * 100}%` }} />
         </div>
       </div>
+      <div id="animation-detail-timeline" className="animation-detail-timeline" hidden={!timelineOpen}>
       <div className="animation-ruler">{Array.from({ length: Math.ceil(scene.durationMs / 1000) + 1 }, (_, index) => <span key={index} style={{ left: `${index * 1000 / scene.durationMs * 100}%` }}>{index}s</span>)}</div>
       <div className="animation-tracks">{scene.layers.map((layer) => <div className="animation-track" key={layer.id}><button type="button" onClick={() => setSelectedLayerId(layer.id)}>{layer.name}</button><div className="animation-track-lane" onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setTimeMs(Math.max(0, Math.min(scene.durationMs, (event.clientX - rect.left) / rect.width * scene.durationMs))); }}>{scene.commands.filter((command) => command.targetId === layer.id).map((command) => <button type="button" key={command.id} className={`animation-command-block${command.id === selectedCommandId ? ' active' : ''}`} style={{ left: `${command.startMs / scene.durationMs * 100}%`, width: `${Math.max(2, command.durationMs / scene.durationMs * 100)}%` }} onClick={(event) => { event.stopPropagation(); setSelectedLayerId(layer.id); setSelectedCommandId(command.id); }} onPointerDown={(event) => { event.stopPropagation(); const lane = event.currentTarget.parentElement?.getBoundingClientRect(); const block = event.currentTarget.getBoundingClientRect(); if (!lane) return; commandDragRef.current = { id: command.id, startX: event.clientX, startMs: command.startMs, durationMs: command.durationMs, laneWidth: lane.width, mode: block.right - event.clientX < 10 ? 'resize' : 'move' }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={dragCommand} onPointerUp={() => { commandDragRef.current = undefined; }} onPointerCancel={() => { commandDragRef.current = undefined; }}>{command.type}<i aria-hidden="true" /></button>)}<i className="animation-playhead" style={{ left: `${timeMs / scene.durationMs * 100}%` }} /></div></div>)}</div>
       <input className="animation-scrubber" aria-label="Vị trí phát" type="range" min="0" max={scene.durationMs} step={1000 / project.fps} value={timeMs} onChange={(event) => { setPlaying(false); setSequenceMode(false); setTimeMs(Number(event.target.value)); }} />
+      </div>
     </div>
   </section>;
 }

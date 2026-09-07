@@ -166,8 +166,8 @@ const DEFAULTS = {
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
 const TTS_CACHE_VERSION = 'tts-v11-clear-expressive-speech';
-const SPEECH_PREP_VERSION = 'speech-v2-tight-edges';
-export const ADAPTIVE_FIT_VERSION = 11;
+const SPEECH_PREP_VERSION = 'speech-v3-pop-free-edges';
+export const ADAPTIVE_FIT_VERSION = 12;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
@@ -202,7 +202,7 @@ const jobFile = (id: string) => path.join(jobDir(id), 'job.json');
 const cueFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.json`);
 const audioFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.wav`);
 const timelineRenderConcurrency = () => clamp(Math.round(Number(process.env.AUTOSUB_TIMELINE_CONCURRENCY) || 2), 1, 4);
-const TIMELINE_SEGMENT_CACHE_VERSION = 3;
+const TIMELINE_SEGMENT_CACHE_VERSION = 4;
 
 export const buildTimelineMixFilter = (inputCount: number, durationMs: number) => {
   const count = Math.max(1, Math.floor(inputCount));
@@ -518,7 +518,9 @@ export function fittingTempo(requiredSpeed: number, maxSpeed: number = DEFAULTS.
 // Keep a short piece of the provider's natural room tone at both ends. Cutting
 // exactly at the first/last voiced sample creates a broadband click whenever
 // adjacent CapCut MP3 responses are placed on the dubbing timeline.
-export const speechTrimFilter = 'silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0.01,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0.01,areverse';
+// Nonzero start_silence produces a one-sample spike at the retained-silence
+// boundary on affected FFmpeg builds. Edge fades are applied when mixing cues.
+export const speechTrimFilter = 'silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-45dB:start_silence=0,areverse';
 
 export function isTransientDubbingError(error: unknown) {
   if (error instanceof ProviderError) {

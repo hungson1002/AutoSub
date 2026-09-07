@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
@@ -54,12 +55,30 @@ test('stem mix combines selected source stems only once before ducking under dub
 });
 
 test('cue boundaries keep only click-safe edge silence and do not delay audible speech', () => {
-  assert.equal((speechTrimFilter.match(/start_silence=0\.01/g) || []).length, 2);
+  assert.equal((speechTrimFilter.match(/start_silence=0(?=,|$)/g) || []).length, 2);
   const fades = cueBoundaryFades(3_066);
   assert.equal(fades.fadeInDuration, 0.012);
   assert.equal(fades.fadeOutDuration, 0.012);
   assert.ok(Math.abs(fades.fadeOutStart - 3.054) < 0.000_001);
   assert.equal(cueBoundaryFadeFilter(3_066), 'afade=t=in:st=0:d=0.012,areverse,afade=t=in:st=0:d=0.012,areverse');
+});
+
+test('speech trimming does not inject impulses into a smooth PCM signal', () => {
+  const rate = 48_000;
+  const input = Buffer.alloc(rate * 4);
+  for (let frame = rate / 5; frame < rate * 4 / 5; frame += 1) {
+    const value = Math.round(10_000 * Math.sin(2 * Math.PI * 300 * frame / rate));
+    input.writeInt16LE(value, frame * 4);
+    input.writeInt16LE(value, frame * 4 + 2);
+  }
+  const result = spawnSync('ffmpeg', ['-v', 'error', '-f', 's16le', '-ar', String(rate), '-ac', '2', '-i', 'pipe:0', '-af', speechTrimFilter, '-f', 's16le', 'pipe:1'], { input, timeout: 15_000 });
+  assert.equal(result.status, 0, result.error?.message || result.stderr?.toString());
+  assert.ok(result.stdout.length > rate * 4 * 0.5);
+  assert.ok(result.stdout.length < rate * 4 * 0.7);
+  for (let offset = 4; offset < result.stdout.length; offset += 2) {
+    const jump = Math.abs(result.stdout.readInt16LE(offset) - result.stdout.readInt16LE(offset - 4));
+    assert.ok(jump < 500, `Unexpected PCM impulse at byte ${offset}: ${jump}`);
+  }
 });
 
 test('nearby cues borrow only a short pause and do not make the whole speech block race', () => {
@@ -133,7 +152,7 @@ test('CapCut jobs are serialized and narration is sped up without padding or tri
   assert.equal(tempoFilter(1), 'anull');
   assert.equal(fallbackTempoFilter(1.25), 'atempo=1.250');
   assert.equal(fallbackTempoFilter(1), 'anull');
-  assert.equal(ADAPTIVE_FIT_VERSION, 11);
+  assert.equal(ADAPTIVE_FIT_VERSION, 12);
   assert.equal(fittingTempo(0.65), 1);
   assert.equal(fittingTempo(0.90), 1);
   assert.equal(fittingTempo(1.08), 1.08);

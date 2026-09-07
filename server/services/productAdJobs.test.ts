@@ -1,6 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assessProductAdVideoQuality, buildVeo3PromptPack, parseProductAdPlan, summarizeProductAdError } from './productAdJobs';
+import { assessProductAdVideoQuality, buildProductAdPrompt, buildVeo3PromptPack, parseProductAdPlan, summarizeProductAdError, type CreateProductAdJobInput } from './productAdJobs';
+
+test('creative director prompt applies the selected ad craft instead of paraphrasing specs', () => {
+  const input = {
+    imageUploadIds: ['image-1'], productName: 'Giá đỡ', productDescription: 'Giá đỡ kim loại có khớp xoay và đế chống trượt.',
+    platform: 'both', targetDurationSeconds: 24, tone: 'Tự nhiên', creativeMode: 'professional', burnSubtitles: true,
+    script: { provider: {}, model: 'test' },
+  } as CreateProductAdJobInput;
+  const prompt = buildProductAdPrompt(input, 'Ảnh 1: giá đỡ màu bạc.', 1, 55);
+  assert.match(prompt.system, /creative director/i);
+  assert.match(prompt.system, /PHIM THƯƠNG HIỆU CHUYÊN NGHIỆP/);
+  assert.match(prompt.system, /ABCD/);
+  assert.match(prompt.system, /PRODUCT MOTION CRAFT GATE/);
+  assert.match(prompt.system, /problem reveal, tactile macro, interaction demo/i);
+  assert.match(prompt.system, /tránh lặp slow zoom/i);
+});
 
 test('parseProductAdPlan normalizes a usable short-form plan', () => {
   const narration = 'Sản phẩm này giúp giữ điện thoại ổn định khi xem video, có thể điều chỉnh góc nhìn và sử dụng thuận tiện trên bàn làm việc mỗi ngày.';

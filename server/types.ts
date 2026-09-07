@@ -124,6 +124,7 @@ export interface ProductAdJobStatus {
   updatedAt: string;
   productName: string;
   imageNames: string[];
+  imageUploadIds?: string[];
   outputMode: ProductAdOutputMode;
   warnings: string[];
   error?: string;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { AIProvider, AIVoice, AppSettings, ProductAdJobStatus, ProductAdOutputMode, ProductAdPlatform, ProviderAssignment } from '../types';
-import { api, friendlyErrorMessage, productAdVideoUrl } from '../lib/api';
+import { animationAssetUrl, api, friendlyErrorMessage, productAdSubtitleUrl, productAdVideoUrl } from '../lib/api';
 import { capabilityAssignments } from '../lib/settings';
 import { resolvedProviderType } from '../lib/providers';
 import { CapabilityAssignmentPicker } from '../components/CapabilityAssignmentPicker';
@@ -19,10 +19,18 @@ type ProductImageDraft = {
   error?: string;
 };
 
+type ProductSubtitleStyle = {
+  fontSize: number; positionPercent: number; textColor: string; backgroundColor: string;
+  backgroundOpacity: number; outlineWidth: number; maxCharsPerLine: number;
+  textAlign: 'left' | 'center' | 'right'; bold: boolean;
+};
+
 const productAdJobStorageKey = 'autosub.product-ad-job-id';
+const productAdImagesStorageKey = 'autosub.product-ad-images';
 const activeStates = new Set<ProductAdJobStatus['status']>(['queued', 'analyzing', 'scripting', 'voicing', 'rendering']);
 const maxProductImages = 8;
 const maxImageBytes = 25 * 1024 * 1024;
+const defaultSubtitleStyle: ProductSubtitleStyle = { fontSize: 30, positionPercent: 76, textColor: '#FFFFFF', backgroundColor: '#101010', backgroundOpacity: 0.55, outlineWidth: 2, maxCharsPerLine: 32, textAlign: 'center', bold: false };
 
 function compactJobError(value?: string) {
   if (!value || !/^ffmpeg version/im.test(value)) return value;
@@ -45,7 +53,12 @@ export function ProductAdPage({ providers, settings, onNotice }: {
   settings: AppSettings;
   onNotice: (message: string, kind?: 'success' | 'error') => void;
 }) {
-  const [images, setImages] = useState<ProductImageDraft[]>([]);
+  const [images, setImages] = useState<ProductImageDraft[]>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(productAdImagesStorageKey) || '[]') as Array<Pick<ProductImageDraft, 'id' | 'name' | 'size' | 'uploadId'>>;
+      return stored.filter((image) => image.uploadId).map((image) => ({ ...image, url: animationAssetUrl(image.uploadId as string), status: 'ready' }));
+    } catch { return []; }
+  });
   const [productName, setProductName] = useState('');
   const [productDescription, setProductDescription] = useState('');
   const [targetAudience, setTargetAudience] = useState('');
@@ -55,9 +68,12 @@ export function ProductAdPage({ providers, settings, onNotice }: {
   const [outputMode] = useState<ProductAdOutputMode>('render');
   const [targetDuration, setTargetDuration] = useState(30);
   const [tone, setTone] = useState('UGC chân thật, nhanh gọn, không khoa trương');
+  const [creativeMode, setCreativeMode] = useState<'professional' | 'everyday' | 'ugc' | 'direct-response'>('everyday');
   const [customPrompt, setCustomPrompt] = useState('');
   const [burnSubtitles, setBurnSubtitles] = useState(true);
-  const [useFlowAgentVisuals, setUseFlowAgentVisuals] = useState(false);
+  const [subtitleStyle, setSubtitleStyle] = useState(defaultSubtitleStyle);
+  const [subtitleTexts, setSubtitleTexts] = useState<string[]>([]);
+  const [visualMode, setVisualMode] = useState<'local' | 'flow-image' | 'flow-video'>('local');
   const [flowAgent, setFlowAgent] = useState<Awaited<ReturnType<typeof api.flowAgentStatus>>>();
   const [visionAssignment, setVisionAssignment] = useState<ProviderAssignment>(settings.assignments.vision);
   const [scriptAssignment, setScriptAssignment] = useState<ProviderAssignment>(settings.assignments.translation);
@@ -73,11 +89,15 @@ export function ProductAdPage({ providers, settings, onNotice }: {
   const voicePreviewRef = useRef<HTMLAudioElement | null>(null);
   const voicePreviewUrlRef = useRef<string | null>(null);
   const voicePreviewRequestRef = useRef(0);
+  const subtitleSourceJobRef = useRef('');
 
   const visionProvider = providers.find((item) => item.id === visionAssignment.providerId);
   const scriptProvider = providers.find((item) => item.id === scriptAssignment.providerId);
   const ttsProvider = providers.find((item) => item.id === ttsAssignment.providerId);
   const ttsProviderType = ttsProvider ? resolvedProviderType(ttsProvider) : undefined;
+  const useFlowAgentVisuals = visualMode === 'flow-image';
+  const useFlowAgentMotion = visualMode === 'flow-video';
+  const needsFlowAgent = visualMode !== 'local';
   const voiceItems = useMemo(() => ttsProviderType === 'vieneu-local' ? cloneVoices : ttsProviderType === 'hiiu-tts'
     ? (ttsProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id, language: '' }))
     : ttsProvider?.voices || [], [cloneVoices, ttsProvider, ttsProviderType]);
@@ -100,6 +120,10 @@ export function ProductAdPage({ providers, settings, onNotice }: {
   }, []);
 
   useEffect(() => { imagesRef.current = images; }, [images]);
+  useEffect(() => {
+    const stored = images.filter((image) => image.status === 'ready' && image.uploadId).map(({ id, name, size, uploadId }) => ({ id, name, size, uploadId }));
+    localStorage.setItem(productAdImagesStorageKey, JSON.stringify(stored));
+  }, [images]);
   useEffect(() => {
     let mounted = true;
     const refresh = () => void api.flowAgentStatus().then((status) => { if (mounted) setFlowAgent(status); }).catch(() => { if (mounted) setFlowAgent(undefined); });
@@ -129,7 +153,17 @@ export function ProductAdPage({ providers, settings, onNotice }: {
   }, [ttsProviderType]);
   useEffect(() => {
     const savedId = localStorage.getItem(productAdJobStorageKey);
-    if (savedId) void api.getProductAdJob(savedId).then(setJob).catch(() => localStorage.removeItem(productAdJobStorageKey));
+    if (savedId) void api.getProductAdJob(savedId).then((savedJob) => {
+      setJob(savedJob);
+      if (!imagesRef.current.length && savedJob.imageUploadIds?.length) setImages(savedJob.imageUploadIds.map((uploadId, index) => ({
+        id: uploadId,
+        name: savedJob.imageNames[index] || `Ảnh sản phẩm ${index + 1}`,
+        url: animationAssetUrl(uploadId),
+        size: 0,
+        uploadId,
+        status: 'ready',
+      })));
+    }).catch(() => localStorage.removeItem(productAdJobStorageKey));
   }, []);
   useEffect(() => {
     if (!job || !activeStates.has(job.status)) return;
@@ -141,6 +175,11 @@ export function ProductAdPage({ providers, settings, onNotice }: {
     }, 1_500);
     return () => { controller.abort(); window.clearInterval(timer); };
   }, [job?.id, job?.status]);
+  useEffect(() => {
+    if (!job?.plan || subtitleSourceJobRef.current === job.id) return;
+    subtitleSourceJobRef.current = job.id;
+    setSubtitleTexts(job.plan.scenes.map((scene) => scene.narration));
+  }, [job?.id, job?.plan]);
 
   const addImages = (files?: FileList | null) => {
     const available = maxProductImages - images.length;
@@ -210,7 +249,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
     if (!productName.trim() || productDescription.trim().length < 20) { onNotice('Hãy nhập tên và mô tả sản phẩm ít nhất 20 ký tự.', 'error'); return; }
     if (!scriptProvider || !scriptAssignment.model) { onNotice('Cấu hình Script AI còn thiếu.', 'error'); return; }
     if (outputMode === 'render' && (!ttsProvider || !ttsAssignment.model || !voice)) { onNotice('Cấu hình TTS còn thiếu để render MP4.', 'error'); return; }
-    if (useFlowAgentVisuals && !flowAgent?.connected) { onNotice('Flow Agent chưa sẵn sàng. Hãy mở Google Flow và tải lại tab.', 'error'); return; }
+    if (needsFlowAgent && !flowAgent?.connected) { onNotice('Flow Agent chưa sẵn sàng. Hãy mở Google Flow và tải lại tab.', 'error'); return; }
     setStarting(true);
     try {
       const created = await api.createProductAdJob({
@@ -224,9 +263,12 @@ export function ProductAdPage({ providers, settings, onNotice }: {
         outputMode,
         targetDurationSeconds: targetDuration,
         tone,
+        creativeMode,
         customPrompt,
         burnSubtitles,
+        subtitleStyle,
         useFlowAgentVisuals,
+        useFlowAgentMotion,
         vision: visionProvider && visionAssignment.model ? { provider: visionProvider, model: visionAssignment.model } : undefined,
         script: { provider: scriptProvider, model: scriptAssignment.model },
         tts: outputMode === 'render' && ttsProvider ? { provider: ttsProvider, model: ttsAssignment.model, voice, speed: voiceSpeed } : undefined,
@@ -271,6 +313,22 @@ export function ProductAdPage({ providers, settings, onNotice }: {
     finally { setStarting(false); }
   };
 
+  const applySubtitleStyle = async (burnOverride = burnSubtitles) => {
+    if (!job?.id || job.status !== 'completed' || !job.result) { onNotice('Hãy tạo xong video trước khi áp dụng lại phụ đề.', 'error'); return; }
+    setStarting(true);
+    try {
+      const updated = await api.rerenderProductAdSubtitles(job.id, burnOverride, subtitleStyle, subtitleTexts);
+      setJob(updated);
+      onNotice(burnOverride ? 'Đang áp dụng phụ đề vào video đã tạo.' : 'Đang tạo bản video sạch không phụ đề.');
+    } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể áp dụng lại phụ đề.'), 'error'); }
+    finally { setStarting(false); }
+  };
+
+  const changeBurnSubtitles = (next: boolean) => {
+    setBurnSubtitles(next);
+    if (job?.status === 'completed' && job.result) void applySubtitleStyle(next);
+  };
+
   const jobRunning = Boolean(job && activeStates.has(job.status));
   const running = starting || jobRunning;
   const uploading = images.some((image) => image.status === 'uploading');
@@ -311,14 +369,37 @@ export function ProductAdPage({ providers, settings, onNotice }: {
         <section className="review-panel">
           <div className="section-title"><span>04 · ĐẦU RA QUẢNG CÁO</span><small>Xuất MP4 dọc 720 × 1280</small></div>
           <div className="product-veo-mode-note"><WandSparkles size={15} /><span>AutoSub sẽ tạo lời đọc, dựng chuyển động từ ảnh sản phẩm, đốt phụ đề nếu bật và xuất trực tiếp video MP4 hoàn chỉnh.</span></div>
-          <div className="two-fields"><div className="field"><span>Nền tảng</span><SelectField ariaLabel="Nền tảng đăng" value={platform} onChange={(value) => setPlatform(value as ProductAdPlatform)} options={[{ value: 'both', label: 'TikTok + YouTube Shorts' }, { value: 'tiktok', label: 'TikTok' }, { value: 'youtube-shorts', label: 'YouTube Shorts' }]} /></div><div className="field"><span>Phong cách</span><SelectField ariaLabel="Phong cách quảng cáo" value={tone} onChange={setTone} options={['UGC chân thật, nhanh gọn, không khoa trương', 'Review trực diện, tập trung tính năng', 'Kể chuyện vấn đề → giải pháp', 'Năng động, nhiều hook ngắn'].map((value) => ({ value, label: value }))} /></div></div>
+          <div className="two-fields"><div className="field"><span>Nền tảng</span><SelectField ariaLabel="Nền tảng đăng" value={platform} onChange={(value) => setPlatform(value as ProductAdPlatform)} options={[{ value: 'both', label: 'TikTok + YouTube Shorts' }, { value: 'tiktok', label: 'TikTok' }, { value: 'youtube-shorts', label: 'YouTube Shorts' }]} /></div><div className="field"><span>Chế độ đạo diễn</span><SelectField ariaLabel="Chế độ đạo diễn quảng cáo" value={creativeMode} onChange={(value) => setCreativeMode(value as typeof creativeMode)} options={[{ value: 'professional', label: 'Chuyên nghiệp', description: 'Brand film sạch, cao cấp, giàu chi tiết.' }, { value: 'everyday', label: 'Đời thường', description: 'Tình huống gần gũi, tự nhiên, dễ đồng cảm.' }, { value: 'ugc', label: 'UGC chân thật', description: 'Ngôn ngữ creator và camera điện thoại.' }, { value: 'direct-response', label: 'Bán hàng hiệu quả', description: 'Hook, demo, xử lý băn khoăn và CTA.' }]} /></div></div>
+          <div className="field"><span>Giọng điệu bổ sung</span><SelectField ariaLabel="Giọng điệu quảng cáo" value={tone} onChange={setTone} options={['UGC chân thật, nhanh gọn, không khoa trương', 'Review trực diện, tập trung tính năng', 'Kể chuyện vấn đề → giải pháp', 'Năng động, nhiều hook ngắn'].map((value) => ({ value, label: value }))} /></div>
           <div className="field"><span>Thời lượng mục tiêu <b className="value-badge">{targetDuration} giây</b></span><RangeInput min={10} max={60} step={5} value={targetDuration} onChange={(event) => setTargetDuration(Number(event.target.value))} /></div>
-          <label className="toggle-row compact"><input type="checkbox" checked={useFlowAgentVisuals} onChange={(event) => setUseFlowAgentVisuals(event.target.checked)} /><i /><span>Dùng Flow Agent tạo hình quảng cáo cho từng cảnh</span></label>
-          {useFlowAgentVisuals && <div className="product-veo-mode-note"><ShieldCheck size={15} /><span>{flowAgent?.connected ? 'Flow Agent đã sẵn sàng · Nano Banana 2 sẽ giữ hình dáng sản phẩm từ ảnh gốc.' : 'Flow Agent chưa kết nối. Mở Google Flow và tải lại tab trước khi dựng.'}</span></div>}
+          <div className="field"><span>Kiểu hình ảnh</span><SelectField ariaLabel="Kiểu hình ảnh quảng cáo" value={visualMode} onChange={(value) => setVisualMode(value as typeof visualMode)} options={[
+            { value: 'local', label: 'Ảnh chuyển động nhẹ', description: 'Không tốn credit Flow; pan và zoom ảnh sản phẩm.' },
+            { value: 'flow-image', label: 'Ảnh AI từ Flow', description: 'Nano Banana 2 tạo ảnh mới cho từng cảnh.' },
+            { value: 'flow-video', label: 'Clip chuyển động AI', description: 'Flow Agent tạo video thật cho từng cảnh; có dùng credit.' },
+          ]} /></div>
+          {needsFlowAgent && <div className="product-veo-mode-note"><ShieldCheck size={15} /><span>{flowAgent?.connected ? useFlowAgentMotion ? `Flow Agent sẵn sàng · khoảng ${Math.ceil(targetDuration / 8)} lượt clip, chỉ gửi khi bạn bấm Tạo.` : 'Flow Agent sẵn sàng · Nano Banana 2 sẽ giữ hình dáng sản phẩm từ ảnh gốc.' : 'Flow Agent chưa kết nối. Mở Google Flow và tải lại tab trước khi dựng.'}</span></div>}
           <div className="field"><span>Yêu cầu bổ sung <small>· không bắt buộc</small></span><textarea value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} placeholder="Ví dụ: mở đầu bằng vấn đề điện thoại rơi khi xem phim trên giường…" /></div>
-          {outputMode === 'render' && <label className="toggle-row compact"><input type="checkbox" checked={burnSubtitles} onChange={(event) => setBurnSubtitles(event.target.checked)} /><i /><span>Đốt phụ đề tiếng Việt vào video</span></label>}
+          {outputMode === 'render' && <label className="toggle-row compact"><input type="checkbox" checked={burnSubtitles} disabled={running} onChange={(event) => changeBurnSubtitles(event.target.checked)} /><i /><span>Đốt phụ đề tiếng Việt vào video</span></label>}
+          {outputMode === 'render' && <details className="product-subtitle-editor" open>
+            <summary><span>Tùy chỉnh phụ đề</span><small>Cỡ chữ · vị trí · màu · nền · xuống dòng</small></summary>
+            <div className="product-subtitle-editor-body">
+              <div className="product-subtitle-preview" aria-label="Xem trước kiểu phụ đề"><span style={{ top: `${subtitleStyle.positionPercent}%`, color: subtitleStyle.textColor, backgroundColor: `${subtitleStyle.backgroundColor}${Math.round(subtitleStyle.backgroundOpacity * 255).toString(16).padStart(2, '0')}`, fontSize: `${12 + (subtitleStyle.fontSize - 18) / 38 * 14}px`, WebkitTextStroke: `${Math.min(2, subtitleStyle.outlineWidth / 2)}px #101010`, textAlign: subtitleStyle.textAlign, fontWeight: subtitleStyle.bold ? 800 : 400 }}>{subtitleTexts[0] || 'Phụ đề sẽ được AutoSub thêm sau khi tạo video'}</span></div>
+              <label><span>Cỡ chữ <b>{subtitleStyle.fontSize}</b></span><RangeInput min={18} max={56} step={1} value={subtitleStyle.fontSize} onChange={(event) => setSubtitleStyle((current) => ({ ...current, fontSize: Number(event.target.value) }))} /></label>
+              <label><span>Vị trí dọc <b>{subtitleStyle.positionPercent}%</b></span><RangeInput min={12} max={90} step={1} value={subtitleStyle.positionPercent} onChange={(event) => setSubtitleStyle((current) => ({ ...current, positionPercent: Number(event.target.value) }))} /></label>
+              <div className="product-subtitle-colors"><label><span>Màu chữ</span><input type="color" value={subtitleStyle.textColor} onChange={(event) => setSubtitleStyle((current) => ({ ...current, textColor: event.target.value.toUpperCase() }))} /></label><label><span>Màu nền</span><input type="color" value={subtitleStyle.backgroundColor} onChange={(event) => setSubtitleStyle((current) => ({ ...current, backgroundColor: event.target.value.toUpperCase() }))} /></label></div>
+              <label><span>Độ đậm nền <b>{Math.round(subtitleStyle.backgroundOpacity * 100)}%</b></span><RangeInput min={0} max={0.9} step={0.05} value={subtitleStyle.backgroundOpacity} onChange={(event) => setSubtitleStyle((current) => ({ ...current, backgroundOpacity: Number(event.target.value) }))} /></label>
+              <label><span>Độ dày viền <b>{subtitleStyle.outlineWidth}px</b></span><RangeInput min={0} max={6} step={1} value={subtitleStyle.outlineWidth} onChange={(event) => setSubtitleStyle((current) => ({ ...current, outlineWidth: Number(event.target.value) }))} /></label>
+              <label><span>Ký tự mỗi dòng <b>{subtitleStyle.maxCharsPerLine}</b></span><RangeInput min={18} max={48} step={1} value={subtitleStyle.maxCharsPerLine} onChange={(event) => setSubtitleStyle((current) => ({ ...current, maxCharsPerLine: Number(event.target.value) }))} /></label>
+              <div className="product-subtitle-align" aria-label="Căn lề phụ đề">{(['left', 'center', 'right'] as const).map((value) => <button type="button" key={value} aria-pressed={subtitleStyle.textAlign === value} onClick={() => setSubtitleStyle((current) => ({ ...current, textAlign: value }))}>{value === 'left' ? 'Trái' : value === 'right' ? 'Phải' : 'Giữa'}</button>)}</div>
+              <label className="toggle-row compact"><input type="checkbox" checked={subtitleStyle.bold} onChange={(event) => setSubtitleStyle((current) => ({ ...current, bold: event.target.checked }))} /><i /><span>Chữ đậm</span></label>
+              {job?.plan && <div className="product-subtitle-copy"><div><strong>Nội dung phụ đề từng cảnh</strong><small>Đổi chữ không làm thay đổi giọng đọc; để trống nếu muốn ẩn riêng cảnh đó.</small></div>{job.plan.scenes.map((scene, index) => <label key={scene.id}><span>{String(index + 1).padStart(2, '0')} · {scene.headline}</span><textarea value={subtitleTexts[index] ?? scene.narration} onChange={(event) => setSubtitleTexts((current) => { const next = [...current]; next[index] = event.target.value; return next; })} /></label>)}</div>}
+              <button className="button small ghost" type="button" onClick={() => setSubtitleStyle(defaultSubtitleStyle)}>Đặt lại mặc định</button>
+              <button className="button primary" type="button" disabled={running || job?.status !== 'completed' || !job.result} onClick={() => void applySubtitleStyle()}>Áp dụng vào video đã tạo</button>
+              <small className="product-subtitle-reuse-note">Chỉ render lại chữ từ clip và voice đã lưu, không tạo ảnh/video AI và không tốn thêm credit Flow.</small>
+            </div>
+          </details>}
           <div className="review-safety-note"><ShieldCheck size={16} /><span>AI được yêu cầu không tự bịa giá, ưu đãi, trải nghiệm hoặc công dụng. Bạn vẫn cần duyệt lại kịch bản và giữ disclosure affiliate khi đăng.</span></div>
-          <button type="submit" className="button primary large full" disabled={running || uploading || (useFlowAgentVisuals && !flowAgent?.connected)}><WandSparkles size={16} /> {running ? 'Pipeline đang chạy…' : uploading ? 'Đang lưu ảnh…' : useFlowAgentVisuals ? 'Tạo quảng cáo bằng Flow Agent' : 'Tạo video quảng cáo'} <span>→</span></button>
+          <button type="submit" className="button primary large full" disabled={running || uploading || (needsFlowAgent && !flowAgent?.connected)}><WandSparkles size={16} /> {running ? 'Pipeline đang chạy…' : uploading ? 'Đang lưu ảnh…' : useFlowAgentMotion ? 'Tạo quảng cáo chuyển động AI' : useFlowAgentVisuals ? 'Tạo quảng cáo bằng ảnh Flow' : 'Tạo video quảng cáo'} <span>→</span></button>
         </section>
       </div>
 
@@ -330,7 +411,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
             <div className="progress-track review-progress"><div style={{ width: `${job.progressPercent}%` }} /></div>
             {jobRunning && <button type="button" className="button small ghost danger review-cancel" onClick={() => void cancelJob()}><X size={14} /> Hủy job</button>}
             {job.status === 'failed' && <div className="product-ad-retry"><button type="button" className="button primary" disabled={!canRetry || starting} onClick={() => void startJob()}>{starting ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />} {starting ? 'Đang thử lại…' : 'Thử lại'}</button><small>{canRetry ? 'Dùng lại ảnh và toàn bộ cấu hình hiện tại.' : 'Hãy chọn lại ảnh sản phẩm để thử lại.'}</small></div>}
-            {job.status === 'completed' && job.result && <div className="review-result product-ad-video"><video controls playsInline preload="metadata" src={productAdVideoUrl(job.id)} /><div className="review-result-meta"><div><span>Thời lượng</span><strong>{formatDuration(job.result.durationMs)}</strong></div><div><span>Số cảnh</span><strong>{job.plan?.scenes.length || 0}</strong></div><a className="button primary" href={productAdVideoUrl(job.id, true)}><Download size={14} /> Tải MP4</a></div></div>}
+            {job.result && <div className="review-result product-ad-video"><video controls playsInline preload="metadata" src={`${productAdVideoUrl(job.id)}?v=${encodeURIComponent(job.result.videoFile)}`} /><div className="review-result-meta"><div><span>Thời lượng</span><strong>{formatDuration(job.result.durationMs)}</strong></div><div><span>Số cảnh</span><strong>{job.plan?.scenes.length || 0}</strong></div><a className="button" href={productAdSubtitleUrl(job.id)}><Download size={14} /> Tải SRT</a><a className="button primary" href={productAdVideoUrl(job.id, true)}><Download size={14} /> Tải MP4</a></div></div>}
             {job.status === 'completed' && job.veo3Pack && <section className="product-veo-pack"><div className="product-veo-pack-heading"><div><strong>{job.veo3Pack.clips.length} prompt Veo 3 · {job.veo3Pack.totalDurationSeconds} giây</strong><small>Mỗi clip tối đa {job.veo3Pack.clipLimitSeconds} giây · 4 micro-shot · chữ và voice hậu kỳ · khung {job.veo3Pack.aspectRatio}</small></div><div><button type="button" className="button primary small" disabled={starting} onClick={() => void createFlowPreview()}>{starting ? 'Flow đang tạo…' : 'Tạo thử video Flow 4s'}</button> <button type="button" className="button small" onClick={() => void copyVeoPrompts()}>Sao chép toàn bộ</button></div></div><div className="product-veo-prompt-list">{job.veo3Pack.clips.map((clip) => <article key={clip.id}><header><span>CLIP {String(clip.index).padStart(2, '0')}</span><strong>{clip.durationSeconds} giây</strong><small>{clip.startSeconds}s → {clip.endSeconds}s · Ảnh {clip.imageIndex + 1}</small></header><pre>{clip.prompt}</pre><button type="button" className="button small ghost" onClick={() => void copyVeoPrompts(clip.prompt)}>Sao chép prompt này</button></article>)}</div></section>}
             {job.plan && <details className="review-plan" open={job.status === 'completed'}><summary>Kịch bản, caption và danh sách cảnh</summary><div className="review-plan-heading"><strong>{job.plan.title}</strong><p>{job.plan.caption}</p><p><b>Disclosure:</b> {job.plan.disclosure}</p><p>{job.plan.hashtags.join(' ')}</p><button type="button" className="button small ghost product-caption-copy" onClick={() => void copyCaption()}>Sao chép caption</button></div><div className="product-ad-scene-list">{job.plan.scenes.map((scene, index) => <article key={scene.id}><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{scene.headline}</strong><p>{scene.narration}</p></div><small>Ảnh {scene.imageIndex + 1}</small></article>)}</div></details>}
             {job.warnings.length > 0 && <div className="product-ad-warning-list">{job.warnings.map((warning) => <p key={warning}><ShieldCheck size={13} /> {warning}</p>)}</div>}
