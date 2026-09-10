@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { ArrowDownToLine, AudioLines, Captions, Clapperboard, Film, HardDrive, Layers3, Megaphone, PanelLeftClose, PanelLeftOpen, Settings2, Video, Volume2, WandSparkles, Zap } from './Icons';
-export type Page = 'pipeline' | 'translate' | 'extract' | 'editor' | 'review' | 'product-ads' | 'ai-video' | 'animation-studio' | 'voice-clone' | 'douyin' | 'storage' | 'settings';
+export type Page = 'pipeline' | 'translate' | 'extract' | 'editor' | 'review' | 'product-ads' | 'ai-video' | 'animation-studio' | 'voice-clone' | 'douyin' | 'douyin-search' | 'storage' | 'settings';
 const nav = [
   { id: 'extract' as const, label: 'Trích xuất phụ đề', caption: 'OCR / âm thanh', icon: Clapperboard },
   { id: 'translate' as const, label: 'Dịch phụ đề', caption: 'SRT / VTT → bản dịch', icon: Captions },
@@ -8,6 +8,7 @@ const nav = [
   { id: 'pipeline' as const, label: 'Pipeline 1 chạm', caption: 'Trích xuất → dịch → lồng tiếng', icon: WandSparkles },
   { id: 'voice-clone' as const, label: 'Clone giọng', caption: 'Tạo voice TTS cục bộ', icon: Volume2 },
   { id: 'douyin' as const, label: 'Tải Douyin/Bilibili', caption: 'Tải video công khai hàng loạt', icon: ArrowDownToLine },
+  { id: 'douyin-search' as const, label: 'Tìm video Douyin', caption: 'Từ khóa · bộ lọc · chọn video', icon: Film },
   { id: 'review' as const, label: 'Review tự động', caption: 'Script · voice · YouTube', icon: Film },
   { id: 'product-ads' as const, label: 'Quảng cáo sản phẩm', caption: 'Ảnh · script · video ngắn', icon: Megaphone },
   { id: 'ai-video' as const, label: 'AI Video Studio', caption: 'Kịch bản → Flow → MP4', icon: Video },

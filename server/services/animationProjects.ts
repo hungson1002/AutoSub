@@ -7,6 +7,7 @@ import {
   type AnimationProject,
 } from '../../shared/animationStudio';
 import { workdir } from './ffmpeg';
+import { buildAnimationAssetManifest } from './animationManifest';
 
 const projectsRoot = path.join(workdir, 'animation-projects');
 const safeId = (value: string) => /^[a-f0-9-]{36}$/i.test(value) ? value : '';
@@ -41,11 +42,13 @@ export function createEmptyAnimationProject(input: { name?: string; width?: numb
 }
 
 export async function saveAnimationProject(value: unknown, expectedId?: string) {
+  // The manifest is derived data: editing/removing scenes can make it stale.
+  if (value && typeof value === 'object' && !Array.isArray(value)) value = { ...value, assetManifest: undefined };
   assertAnimationProject(value);
   if (expectedId && value.id !== expectedId) throw new Error('Project id does not match the request path.');
   if (!safeId(value.id)) throw new Error('Project id is invalid.');
   try { const previous = await readFile(projectFile(value.id), 'utf8'); if (previous !== JSON.stringify(value, null, 2)) await writeJsonAtomic(path.join(versionsDir(value.id), `${Date.now()}.json`), JSON.parse(previous)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  const project: AnimationProject = { ...value, updatedAt: new Date().toISOString() };
+  const project: AnimationProject = { ...value, assetManifest: buildAnimationAssetManifest(value), updatedAt: new Date().toISOString() };
   await writeJsonAtomic(projectFile(project.id), project);
   return project;
 }

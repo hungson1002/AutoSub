@@ -1,6 +1,73 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildAiVideoConcatManifest, buildAiVideoContinuityReviewPrompt, buildAiVideoDirectorPrompt, buildCharacterSheetPrompt, buildFlowPrompt, buildFlowVideoReferences, buildStoryboardPrompt, compactProductionBible, getAiVideoVisualQualityIssue, getProfessionalShotPlanIssue, isRetryableNoChargeFlowError, parseAiVideoPlan, parseAiVideoVisualQualityLog, parseBlurScore, planAiVideoShotDurations, qualityRetakeReferences, runWithConcurrency } from './aiVideoJobs';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { failResumedAiVideoJob, getAiVideoClip, selectShotCharacters, type AiVideoScene } from './aiVideoJobs';
+import { workdir } from './ffmpeg';
+
+test('shot cast routing excludes absent characters and preserves legacy metadata', () => {
+  const cast = [{ index: 1, name: 'Robot', description: 'robot' }, { index: 2, name: 'Creature', description: 'quadruped' }];
+  assert.deepEqual(selectShotCharacters(cast, { charactersInShot: ['robot'] } as AiVideoScene), [cast[0]]);
+  assert.deepEqual(selectShotCharacters(cast, { charactersInShot: [] } as unknown as AiVideoScene), []);
+  assert.deepEqual(selectShotCharacters(cast, {} as AiVideoScene), cast);
+});
+
+test('partial assembly uses original shot IDs even when middle shots are missing', () => {
+  const manifest = buildAiVideoConcatManifest('clips', [{ index: 2, transition: 'cut' }, { index: 5, transition: 'cut' }] as AiVideoScene[]);
+  assert.match(manifest, /002\.mp4/);
+  assert.match(manifest, /005\.mp4/);
+  assert.doesNotMatch(manifest, /001\.mp4/);
+});
+
+test('resume failure preserves the latest completed clips instead of resetting to the initial snapshot', async () => {
+  const id = randomUUID();
+  const directory = path.join(workdir, 'ai-video-jobs', id);
+  await mkdir(directory, { recursive: true });
+  try {
+    await writeFile(path.join(directory, 'job.json'), JSON.stringify({
+      id, status: 'failed', progressPercent: 84,
+      scenes: [
+        { index: 1, status: 'completed' },
+        { index: 2, status: 'completed' },
+        { index: 3, status: 'failed' },
+        { index: 4, status: 'generating' },
+      ],
+    }));
+    const result = await failResumedAiVideoJob(id, new Error('last shot rejected'));
+    assert.deepEqual(result.scenes.map((scene) => scene.status), ['completed', 'completed', 'failed', 'failed']);
+    assert.equal(result.progressPercent, 84);
+    assert.equal(result.error, 'last shot rejected');
+    const persisted = JSON.parse(await readFile(path.join(directory, 'job.json'), 'utf8'));
+    assert.deepEqual(persisted.scenes, result.scenes);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+import { AUTOMATIC_VISUAL_QUALITY_ATTEMPTS, aiVideoCandidateFileName, buildAiVideoConcatManifest, buildAiVideoContinuityReviewPrompt, buildAiVideoDirectorPrompt, buildCharacterSheetPrompt, buildFlowPrompt, buildFlowVideoReferences, buildStoryboardPrompt, compactProductionBible, getAiVideoVisualQualityIssue, getProfessionalShotPlanIssue, isRetryableNoChargeFlowError, parseAiVideoPlan, parseAiVideoVisualQualityLog, parseBlurScore, planAiVideoShotDurations, qualityRetakeReferences, runWithConcurrency } from './aiVideoJobs';
+
+test('retained video candidates use a safe, scene-scoped filename', () => {
+  assert.equal(aiVideoCandidateFileName(3, 2), '003.mp4.candidate-2.mp4');
+  assert.equal(aiVideoCandidateFileName(0, 0), '001.mp4.candidate-1.mp4');
+});
+
+test('last candidate remains streamable while a shot is marked failed', async () => {
+  const id = randomUUID();
+  const directory = path.join(workdir, 'ai-video-jobs', id);
+  const candidate = '001.mp4.candidate-1.mp4';
+  await mkdir(path.join(directory, 'clips'), { recursive: true });
+  try {
+    await writeFile(path.join(directory, 'clips', candidate), 'candidate');
+    await writeFile(path.join(directory, 'job.json'), JSON.stringify({
+      id, status: 'failed', progressPercent: 84, scenes: [{ index: 1, status: 'failed', lastCandidate: { attempt: 1, fileName: candidate, status: 'needs-review', issue: 'frozen opening', createdAt: new Date().toISOString() } }],
+    }));
+    const result = await getAiVideoClip(id, 1, 'last');
+    assert.equal(path.basename(result.path), candidate);
+    assert.equal(result.size, Buffer.byteLength('candidate'));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('parseBlurScore averages FFmpeg blur measurements', () => {
   assert.equal(parseBlurScore('blur mean: 4.0\nblur mean: 6.0'), 5);
@@ -15,6 +82,18 @@ test('only retries Flow failures that explicitly did not charge credit', () => {
   assert.equal(isRetryableNoChargeFlowError(new Error("Generation failed. You weren't charged.")), true);
   assert.equal(isRetryableNoChargeFlowError(new Error('Google Flow session expired or unauthorized (HTTP 401).')), false);
   assert.equal(isRetryableNoChargeFlowError(new Error('Không tải được video Flow.')), false);
+});
+
+test('does not spend paid credits on automatic artistic retakes', () => {
+  assert.equal(AUTOMATIC_VISUAL_QUALITY_ATTEMPTS, 1);
+});
+
+test('plans fewer provider-valid shots and does not force every beat to four seconds', () => {
+  assert.deepEqual(planAiVideoShotDurations(30), [6, 8, 8, 8]);
+  assert.deepEqual(planAiVideoShotDurations(20), [4, 8, 8]);
+  assert.deepEqual(planAiVideoShotDurations(10), [4, 6]);
+  assert.deepEqual(planAiVideoShotDurations(5), [6]);
+  for (const duration of planAiVideoShotDurations(123)) assert.ok([4, 6, 8].includes(duration as 4 | 6 | 8));
 });
 
 test('video shot scheduler never exceeds its safe concurrency', async () => {
@@ -59,6 +138,8 @@ test('director prompt plans professional coverage and respects the selected fram
   assert.match(prompt.system, /reaction, occlusion and negative space/i);
   assert.match(prompt.system, /strict voice bible/i);
   assert.match(prompt.system, /DIRECTOR CRAFT GATE/);
+  assert.match(prompt.system, /provider-neutral video clips/);
+  assert.match(prompt.system, /renderer adapter will translate/i);
   assert.match(prompt.system, /desire, obstacle, spatial geometry, gaze and rhythm/i);
   assert.match(prompt.system, /transition.*cut\|continue/i);
   assert.match(prompt.user, /<story_material>/);
@@ -124,6 +205,10 @@ test('plan parser keeps one character bible entry per recurring character', () =
     },
     scenes: [{
       title: 'The meeting', dramaticBeat: 'Recognition changes hesitation into trust.',
+      primaryAction: 'An and Binh walk toward the exit.',
+      openingState: 'An wears headphones over both ears; Binh carries his camera in his right hand.',
+      closingState: 'Both move screen-right; An still wears headphones; camera stays in Binh right hand.',
+      successCriteria: 'Both characters take a shared step toward the exit.',
       shotSize: 'WS', lensMm: 35, cameraAngle: 'eye-level profile', cameraMovement: 'parallel track screen-right', editMotivation: 'action', charactersInShot: ['An', 'Binh'],
       shotPlan: '0.0–2.5s wide meeting; 2.5–5.0s medium reaction; 5.0–8.0s exit action.',
       blocking: 'An waits frame-left while Binh approaches from frame-right.', transition: 'cut',
@@ -136,6 +221,10 @@ test('plan parser keeps one character bible entry per recurring character', () =
   assert.deepEqual(plan.characters.map(({ name }) => name), ['An', 'Binh']);
   assert.match(plan.productionBible, /An — Young architect/);
   assert.match(plan.productionBible, /Binh — Older photographer/);
+  const scene = plan.scenes[0];
+  assert.match(scene.openingState || '', /headphones/);
+  assert.match(buildFlowPrompt(plan.productionBible, scene, 1, 4), /SHOT OPENING STATE: An wears headphones/);
+  assert.match(buildStoryboardPrompt(plan.productionBible, scene, '16:9'), /EXACT WORN PROPS AND OPENING STATE: An wears headphones/);
 });
 
 test('plan parser extracts a complete JSON object from provider prose and fenced output', () => {
@@ -231,9 +320,9 @@ test('Flow prompt turns a plan into timed shots with a stable handoff frame', ()
 });
 
 test('professional planner creates real shot-level durations supported by Flow', () => {
-  assert.deepEqual(planAiVideoShotDurations(20), [4, 4, 4, 4, 4]);
-  assert.deepEqual(planAiVideoShotDurations(62), [...Array.from({ length: 14 }, () => 4), 6]);
-  assert.deepEqual(planAiVideoShotDurations(7), [7]);
+  assert.deepEqual(planAiVideoShotDurations(20), [4, 8, 8]);
+  assert.deepEqual(planAiVideoShotDurations(62), [6, 8, 8, 8, 8, 8, 8, 8]);
+  assert.deepEqual(planAiVideoShotDurations(7), [8]);
 });
 
 test('visual quality gate catches single black frames and frozen boundaries', () => {
@@ -307,6 +396,8 @@ test('storyboard prompt turns the approved design into one production frame', ()
   assert.match(prompt, /production still used to generate video, not a collage/i);
   assert.match(prompt, /exact character identity/i);
   assert.match(prompt, /camera height, lens feel, framing, blocking, screen direction/i);
-  assert.match(prompt, /CAMERA CONTRACT: WS at 24mm/i);
+  assert.match(prompt, /wide view/i);
+  assert.doesNotMatch(prompt, /WS at 24mm|SHOT PLAN:/i);
+  assert.match(prompt, /ONLY the opening continuity state/i);
   assert.match(prompt, /No typography, captions, labels/i);
 });

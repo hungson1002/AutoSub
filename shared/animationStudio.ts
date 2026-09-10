@@ -27,6 +27,10 @@ export interface AnimationAsset {
   name: string;
   uri: string;
   tags: string[];
+  /** Optional production lifecycle marker. Older projects may omit it. */
+  status?: 'approved' | 'candidate' | 'rejected' | 'draft';
+  /** Stable content/config key used to avoid charging for duplicate generation. */
+  cacheKey?: string;
   style?: string;
   width?: number;
   height?: number;
@@ -62,6 +66,8 @@ export interface SceneLayer {
   data?: number[];
   labels?: string[];
   wordTimings?: Array<{ word: string; startMs: number; endMs: number }>;
+  /** Sentence/cue timing used when word-level alignment is not available. */
+  captionTimings?: Array<{ id?: string; text: string; startMs: number; endMs: number; source?: 'sentence-proportional' | 'measured-sentence' | 'provider' | 'forced-alignment' }>;
   startMs?: number;
   durationMs?: number;
   volume?: number;
@@ -111,6 +117,69 @@ export interface GeneratedVideoScene extends SceneBase {
 
 export type AnimationScene = CompositeScene | GeneratedVideoScene;
 
+export type AnimationProductionTechnique = 'image-camera' | 'object-composite' | 'diagram' | 'sprite' | 'rig' | 'generated-video' | 'hold';
+
+export interface AnimationNarrationUnit {
+  id: string;
+  sceneId: string;
+  text: string;
+  startMs?: number;
+  endMs?: number;
+  timingSource?: 'planned' | 'provider' | 'forced-alignment' | 'sentence-proportional' | 'measured-sentence';
+}
+
+export interface AnimationBeatContract {
+  id: string;
+  sceneId: string;
+  narrationUnitId: string;
+  cueText?: string;
+  cueOccurrence?: number;
+  subjectIds: string[];
+  focusSubjectId?: string;
+  action?: { description: string; actorId?: string; beforeState?: string; afterState?: string; targetId?: string };
+  technique: AnimationProductionTechnique;
+  startMs?: number;
+  endMs?: number;
+  screenDirection?: 'left-to-right' | 'right-to-left' | 'static';
+  entryState?: string;
+  exitState?: string;
+  visibleEvidence: string;
+  failureConditions: string[];
+}
+
+export interface AnimationProductionPlan {
+  version: 1;
+  source: 'director' | 'manual';
+  status: 'draft' | 'ready' | 'warning';
+  continuityBible?: string;
+  narrationUnits: AnimationNarrationUnit[];
+  beats: AnimationBeatContract[];
+  diagnostics?: string[];
+}
+
+export type AnimationManifestRole = 'background' | 'character' | 'object' | 'diagram' | 'audio' | 'effect';
+
+export interface AnimationAssetManifestEntry {
+  id: string;
+  role: AnimationManifestRole;
+  name: string;
+  sceneIds: string[];
+  beatIds: string[];
+  assetIds: string[];
+  required: boolean;
+  status: 'ready' | 'candidate' | 'missing' | 'rejected';
+  capabilities: string[];
+  cacheKey?: string;
+}
+
+export interface AnimationAssetManifest {
+  version: 1;
+  generatedAt: string;
+  styleKey?: string;
+  entries: AnimationAssetManifestEntry[];
+  diagnostics?: string[];
+}
+
 export interface AnimationProject {
   schemaVersion: typeof ANIMATION_PROJECT_VERSION;
   id: string;
@@ -122,6 +191,9 @@ export interface AnimationProject {
   updatedAt: string;
   assets: AnimationAsset[];
   scenes: AnimationScene[];
+  productionPlan?: AnimationProductionPlan;
+  /** Optional, derived inventory for asset preflight and resumable generation. */
+  assetManifest?: AnimationAssetManifest;
   styleProfile?: { name: string; style: string; palette?: string[]; subtitlePreset?: string; pacing?: 'slow' | 'balanced' | 'fast' };
   templateId?: string;
   generationWarnings?: string[];
@@ -139,10 +211,23 @@ const commandTypes = new Set<AnimationCommandType>([
 ]);
 const assetTypes = new Set<AssetType>(['character', 'sprite', 'background', 'object', 'icon', 'image', 'audio', 'effect']);
 const layerTypes = new Set<LayerType>(['image', 'sprite', 'text', 'shape', 'diagram', 'chart', 'particle', 'audio']);
+const productionTechniques = new Set<AnimationProductionTechnique>(['image-camera', 'object-composite', 'diagram', 'sprite', 'rig', 'generated-video', 'hold']);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+function occurrenceCount(text: string, cue: string) {
+  if (!cue) return 0;
+  let count = 0;
+  let from = 0;
+  while (from <= text.length) {
+    const index = text.indexOf(cue, from);
+    if (index < 0) break;
+    count += 1;
+    from = index + Math.max(1, cue.length);
+  }
+  return count;
+}
 
 function validateTransform(value: unknown, path: string, issues: ValidationIssue[]) {
   if (!isRecord(value)) return void issues.push({ path, message: 'Transform must be an object.' });
@@ -191,11 +276,12 @@ export function validateAnimationProject(value: unknown): ValidationIssue[] {
     if (!isNonEmptyString(raw.type) || !assetTypes.has(raw.type as AssetType)) issues.push({ path: `${path}.type`, message: 'Unknown asset type.' });
     if (!isNonEmptyString(raw.uri)) issues.push({ path: `${path}.uri`, message: 'Asset uri is required.' });
     if (!Array.isArray(raw.tags)) issues.push({ path: `${path}.tags`, message: 'Asset tags must be an array.' });
+    if (raw.status !== undefined && (!isNonEmptyString(raw.status) || !['approved', 'candidate', 'rejected', 'draft'].includes(raw.status))) issues.push({ path: `${path}.status`, message: 'Asset status is invalid.' });
+    if (raw.cacheKey !== undefined && (!isNonEmptyString(raw.cacheKey) || !/^[a-f0-9]{64}$/i.test(raw.cacheKey))) issues.push({ path: `${path}.cacheKey`, message: 'Asset cacheKey must be a SHA-256 hex string.' });
     if (raw.sprite !== undefined) {
       if (!isRecord(raw.sprite) || !isFiniteNumber(raw.sprite.frameWidth) || raw.sprite.frameWidth < 1 || !isFiniteNumber(raw.sprite.frameHeight) || raw.sprite.frameHeight < 1 || !isFiniteNumber(raw.sprite.columns) || raw.sprite.columns < 1 || !isFiniteNumber(raw.sprite.frameCount) || raw.sprite.frameCount < 1 || !isRecord(raw.sprite.clips)) issues.push({ path: `${path}.sprite`, message: 'Sprite metadata must define positive frame dimensions, columns, frameCount and clips.' });
     }
   });
-
   const sceneIds = new Set<string>();
   const characterAssets = new Map<string, string>();
   if (!Array.isArray(value.scenes)) issues.push({ path: 'scenes', message: 'Scenes must be an array.' });
@@ -235,6 +321,81 @@ export function validateAnimationProject(value: unknown): ValidationIssue[] {
       validateCommands(raw.camera.commands, `${path}.camera.commands`, sceneDuration, new Set(['camera']), issues);
     }
   });
+  if (value.assetManifest !== undefined) {
+    const manifest = value.assetManifest;
+    if (!isRecord(manifest)) issues.push({ path: 'assetManifest', message: 'Asset manifest must be an object.' });
+    else {
+      if (manifest.version !== 1) issues.push({ path: 'assetManifest.version', message: 'Only asset manifest version 1 is supported.' });
+      if (!isNonEmptyString(manifest.generatedAt)) issues.push({ path: 'assetManifest.generatedAt', message: 'Asset manifest generatedAt is required.' });
+      if (!Array.isArray(manifest.entries)) issues.push({ path: 'assetManifest.entries', message: 'Asset manifest entries must be an array.' });
+      else {
+        const manifestIds = new Set<string>();
+        manifest.entries.forEach((entry, index) => {
+          const entryPath = `assetManifest.entries[${index}]`;
+          if (!isRecord(entry)) return void issues.push({ path: entryPath, message: 'Asset manifest entry must be an object.' });
+          if (!isNonEmptyString(entry.id) || manifestIds.has(entry.id)) issues.push({ path: `${entryPath}.id`, message: 'Manifest entry id must be non-empty and unique.' }); else manifestIds.add(entry.id);
+          if (!isNonEmptyString(entry.role) || !['background', 'character', 'object', 'diagram', 'audio', 'effect'].includes(entry.role)) issues.push({ path: `${entryPath}.role`, message: 'Manifest role is invalid.' });
+          if (!isNonEmptyString(entry.name)) issues.push({ path: `${entryPath}.name`, message: 'Manifest entry name is required.' });
+          for (const field of ['sceneIds', 'beatIds', 'assetIds', 'capabilities'] as const) if (!Array.isArray(entry[field]) || entry[field].some((item) => typeof item !== 'string')) issues.push({ path: `${entryPath}.${field}`, message: `${field} must be an array of strings.` });
+          if (typeof entry.required !== 'boolean') issues.push({ path: `${entryPath}.required`, message: 'Manifest required must be boolean.' });
+          if (!isNonEmptyString(entry.status) || !['ready', 'candidate', 'missing', 'rejected'].includes(entry.status)) issues.push({ path: `${entryPath}.status`, message: 'Manifest status is invalid.' });
+          if (entry.cacheKey !== undefined && (!isNonEmptyString(entry.cacheKey) || !/^[a-f0-9]{64}$/i.test(entry.cacheKey))) issues.push({ path: `${entryPath}.cacheKey`, message: 'Manifest cacheKey must be a SHA-256 hex string.' });
+          if (Array.isArray(entry.sceneIds) && entry.sceneIds.some((sceneId) => !sceneIds.has(sceneId))) issues.push({ path: `${entryPath}.sceneIds`, message: 'Manifest references an unknown scene.' });
+          if (Array.isArray(entry.assetIds) && entry.assetIds.some((assetId) => !assetIds.has(assetId))) issues.push({ path: `${entryPath}.assetIds`, message: 'Manifest references an unknown asset.' });
+        });
+      }
+    }
+  }
+  if (value.productionPlan !== undefined) {
+    const plan = value.productionPlan;
+    if (!isRecord(plan)) issues.push({ path: 'productionPlan', message: 'Production plan must be an object.' });
+    else {
+      if (plan.version !== 1) issues.push({ path: 'productionPlan.version', message: 'Only production plan version 1 is supported.' });
+      if (!isNonEmptyString(plan.source) || !['director', 'manual'].includes(plan.source)) issues.push({ path: 'productionPlan.source', message: 'Production plan source is invalid.' });
+      if (!isNonEmptyString(plan.status) || !['draft', 'ready', 'warning'].includes(plan.status)) issues.push({ path: 'productionPlan.status', message: 'Production plan status is invalid.' });
+      const narrationIds = new Set<string>();
+      const sceneDurations = new Map<string, number>();
+      if (Array.isArray(value.scenes)) value.scenes.forEach((scene) => { if (isRecord(scene) && isNonEmptyString(scene.id) && isFiniteNumber(scene.durationMs)) sceneDurations.set(scene.id, scene.durationMs); });
+      if (!Array.isArray(plan.narrationUnits)) issues.push({ path: 'productionPlan.narrationUnits', message: 'Narration units must be an array.' });
+      else plan.narrationUnits.forEach((unit, index) => {
+        const unitPath = `productionPlan.narrationUnits[${index}]`;
+        if (!isRecord(unit)) return void issues.push({ path: unitPath, message: 'Narration unit must be an object.' });
+        if (!isNonEmptyString(unit.id) || narrationIds.has(unit.id)) issues.push({ path: `${unitPath}.id`, message: 'Narration unit id must be non-empty and unique.' }); else narrationIds.add(unit.id);
+        if (!isNonEmptyString(unit.sceneId) || !sceneIds.has(unit.sceneId)) issues.push({ path: `${unitPath}.sceneId`, message: 'Narration unit scene does not exist.' });
+        if (!isNonEmptyString(unit.text)) issues.push({ path: `${unitPath}.text`, message: 'Narration unit text is required.' });
+        if (unit.startMs !== undefined && (!isFiniteNumber(unit.startMs) || unit.startMs < 0)) issues.push({ path: `${unitPath}.startMs`, message: 'Narration unit startMs must be zero or greater.' });
+        if (unit.endMs !== undefined && (!isFiniteNumber(unit.endMs) || unit.endMs < 0)) issues.push({ path: `${unitPath}.endMs`, message: 'Narration unit endMs must be zero or greater.' });
+        if (isFiniteNumber(unit.startMs) && isFiniteNumber(unit.endMs) && unit.endMs <= unit.startMs) issues.push({ path: unitPath, message: 'Narration unit endMs must be after startMs.' });
+        const sceneDuration = isNonEmptyString(unit.sceneId) ? sceneDurations.get(unit.sceneId) : undefined;
+        if (sceneDuration !== undefined && isFiniteNumber(unit.endMs) && unit.endMs > sceneDuration) issues.push({ path: `${unitPath}.endMs`, message: 'Narration unit extends beyond scene duration.' });
+      });
+      const beatIds = new Set<string>();
+      if (!Array.isArray(plan.beats)) issues.push({ path: 'productionPlan.beats', message: 'Beat contracts must be an array.' });
+      else plan.beats.forEach((beat, index) => {
+        const beatPath = `productionPlan.beats[${index}]`;
+        if (!isRecord(beat)) return void issues.push({ path: beatPath, message: 'Beat contract must be an object.' });
+        if (!isNonEmptyString(beat.id) || beatIds.has(beat.id)) issues.push({ path: `${beatPath}.id`, message: 'Beat id must be non-empty and unique.' }); else beatIds.add(beat.id);
+        if (!isNonEmptyString(beat.sceneId) || !sceneIds.has(beat.sceneId)) issues.push({ path: `${beatPath}.sceneId`, message: 'Beat scene does not exist.' });
+        if (!isNonEmptyString(beat.narrationUnitId) || !narrationIds.has(beat.narrationUnitId)) issues.push({ path: `${beatPath}.narrationUnitId`, message: 'Beat narration unit does not exist.' });
+        if (!Array.isArray(beat.subjectIds) || beat.subjectIds.some((subjectId) => typeof subjectId !== 'string')) issues.push({ path: `${beatPath}.subjectIds`, message: 'Beat subjectIds must be an array of strings.' });
+        if (!isNonEmptyString(beat.technique) || !productionTechniques.has(beat.technique as AnimationProductionTechnique)) issues.push({ path: `${beatPath}.technique`, message: 'Beat technique is unsupported.' });
+        if (!isNonEmptyString(beat.visibleEvidence)) issues.push({ path: `${beatPath}.visibleEvidence`, message: 'Beat visibleEvidence is required.' });
+        if (!Array.isArray(beat.failureConditions) || beat.failureConditions.some((condition) => typeof condition !== 'string' || !condition.trim())) issues.push({ path: `${beatPath}.failureConditions`, message: 'Beat failureConditions must contain text.' });
+        if (beat.action !== undefined && (!isRecord(beat.action) || !isNonEmptyString(beat.action.description))) issues.push({ path: `${beatPath}.action`, message: 'Beat action must contain a description.' });
+        if (beat.cueText !== undefined && typeof beat.cueText !== 'string') issues.push({ path: `${beatPath}.cueText`, message: 'Beat cueText must be a string.' });
+        if (beat.cueOccurrence !== undefined && (!isFiniteNumber(beat.cueOccurrence) || !Number.isInteger(beat.cueOccurrence) || beat.cueOccurrence < 0)) issues.push({ path: `${beatPath}.cueOccurrence`, message: 'Beat cueOccurrence must be a non-negative integer.' });
+        const unit = Array.isArray(plan.narrationUnits) ? plan.narrationUnits.find((candidate) => isRecord(candidate) && candidate.id === beat.narrationUnitId) : undefined;
+        if (typeof beat.cueText === 'string' && beat.cueText.trim() && isRecord(unit) && typeof unit.text === 'string' && !unit.text.includes(beat.cueText)) issues.push({ path: `${beatPath}.cueText`, message: 'Beat cueText is not present in its narration unit.' });
+        const cueOccurrence = beat.cueOccurrence;
+        if (cueOccurrence !== undefined && typeof beat.cueText === 'string' && beat.cueText.trim() && isRecord(unit) && typeof unit.text === 'string' && isFiniteNumber(cueOccurrence) && Number.isInteger(cueOccurrence) && cueOccurrence >= 0 && cueOccurrence >= occurrenceCount(unit.text, beat.cueText)) issues.push({ path: `${beatPath}.cueOccurrence`, message: 'Beat cueOccurrence does not exist in its narration unit.' });
+        if (beat.startMs !== undefined && (!isFiniteNumber(beat.startMs) || beat.startMs < 0)) issues.push({ path: `${beatPath}.startMs`, message: 'Beat startMs must be zero or greater.' });
+        if (beat.endMs !== undefined && (!isFiniteNumber(beat.endMs) || beat.endMs < 0)) issues.push({ path: `${beatPath}.endMs`, message: 'Beat endMs must be zero or greater.' });
+        if (isFiniteNumber(beat.startMs) && isFiniteNumber(beat.endMs) && beat.endMs <= beat.startMs) issues.push({ path: beatPath, message: 'Beat endMs must be after startMs.' });
+        const sceneDuration = isNonEmptyString(beat.sceneId) ? sceneDurations.get(beat.sceneId) : undefined;
+        if (sceneDuration !== undefined && isFiniteNumber(beat.endMs) && beat.endMs > sceneDuration) issues.push({ path: `${beatPath}.endMs`, message: 'Beat extends beyond scene duration.' });
+      });
+    }
+  }
   return issues;
 }
 

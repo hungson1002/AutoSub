@@ -1,0 +1,6 @@
+diff --git a/dy_apis/douyin_api.py b/dy_apis/douyin_api.py
+--- a/dy_apis/douyin_api.py
++++ b/dy_apis/douyin_api.py
+@@ -2425,1 +2425,1 @@
+-        return search_id, json_data["guide_search_words"], json_data
++        return search_id, json_data.get("guide_search_words", []), json_data

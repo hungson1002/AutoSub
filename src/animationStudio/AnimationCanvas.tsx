@@ -117,7 +117,24 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
           context.textBaseline = 'middle';
           context.shadowColor = 'rgba(0, 0, 0, 0.55)';
           context.shadowBlur = 18;
-          if (layer.wordTimings?.length) {
+          if (layer.captionTimings?.length) {
+            const active = layer.captionTimings.find((timing) => timeMs >= timing.startMs && timeMs < timing.endMs);
+            const text = active?.text || '';
+            const words = text.split(/\s+/).filter(Boolean);
+            const lines: string[] = [];
+            let line = '';
+            for (const word of words) {
+              const candidate = line ? `${line} ${word}` : word;
+              if (line && context.measureText(candidate).width > layer.width) { lines.push(line); line = word; } else line = candidate;
+            }
+            if (line) lines.push(line);
+            context.textAlign = 'center';
+            const lineHeight = (layer.fontSize || 54) * 1.18;
+            const firstLineY = layer.height / 2 - (lines.length - 1) * lineHeight / 2;
+            lines.forEach((value, index) => context.fillText(value, layer.width / 2, firstLineY + index * lineHeight, layer.width));
+            context.textAlign = 'start';
+            context.shadowBlur = 0;
+          } else if (layer.wordTimings?.length) {
             const timings = layer.wordTimings;
             const foundIndex = timings.findIndex((timing) => timeMs < timing.endMs);
             const activeIndex = foundIndex < 0 ? timings.length - 1 : foundIndex;

@@ -2,6 +2,55 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import Fastify from 'fastify';
 import { douyinRoutes } from './douyin';
+import { normalizeDouyinSearch, validateDouyinSearch } from '../services/douyinSearch';
+
+test('cookie management rejects foreign origins and nonlocal clients', async () => {
+  const app = Fastify();
+  await app.register(douyinRoutes);
+  try {
+    const foreign = await app.inject({ method: 'PUT', url: '/api/douyin/search-cookie', headers: { origin: 'https://untrusted.example' }, payload: { cookie: 'fixture' } });
+    assert.equal(foreign.statusCode, 403);
+    const remote = await app.inject({ method: 'GET', url: '/api/douyin/search-cookie', remoteAddress: '192.0.2.1' });
+    assert.equal(remote.statusCode, 403);
+    const invalid = await app.inject({ method: 'PUT', url: '/api/douyin/search-cookie', payload: { cookie: '' } });
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(invalid.headers['cache-control'], 'no-store');
+  } finally { await app.close(); }
+});
+
+test('Douyin search validates filters and never accepts multiline cookies', () => {
+  assert.deepEqual(validateDouyinSearch({ keyword: '  动画 ' }), { keyword: '动画', sort: '0', publishTime: '0', cookie: undefined, offset: 0, count: 20, searchId: '', filterDuration: '', searchRange: '0' });
+  for (const extra of [{ offset: -1 }, { offset: 0.5 }, { count: 999 }, { searchId: 'bad\nvalue' }, { filterDuration: 'bad' }, { searchRange: '4' }]) assert.throws(() => validateDouyinSearch({ keyword: 'x', ...extra }));
+  for (const body of [{ keyword: '' }, { keyword: 'x', sort: '99' }, { keyword: 'x', publishTime: '-1' }, { keyword: 'x', cookie: 'a=b\r\nx=y' }]) assert.throws(() => validateDouyinSearch(body));
+});
+
+test('Douyin search normalizes video results without trusting URLs or duplicates', () => {
+  const video = { aweme_id: '1234567890', desc: '动画', author: { nickname: '作者' }, statistics: { digg_count: 42 }, video: { duration: 12300, cover: { url_list: ['javascript:bad', 'https://p.example.byteimg.com/cover.jpg'] } } };
+  const items = normalizeDouyinSearch({ data: [{ aweme_info: video }, { aweme_info: video }, { aweme_info: { ...video, aweme_id: '1234567891', images: [{}] } }, { aweme_info: { ...video, aweme_id: '../bad' } }] });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].url, 'https://www.douyin.com/video/1234567890');
+  assert.equal(items[0].duration, 12.3);
+  assert.equal(items[0].likes, 42);
+  assert.equal(items[0].coverUrl, 'https://p.example.byteimg.com/cover.jpg');
+  assert.throws(() => normalizeDouyinSearch({ data: null }));
+  const malformed = normalizeDouyinSearch({ data: [{ aweme_info: { ...video, video: { cover: { url_list: 'not-an-array' } } } }] });
+  assert.equal(malformed[0].coverUrl, undefined);
+  const unsafe = normalizeDouyinSearch({ data: [{ aweme_info: { ...video, video: { cover: { url_list: ['https://p.byteimg.com@localhost/secret', 'https://p.byteimg.com:8443/private'] } } } }] });
+  assert.equal(unsafe[0].coverUrl, undefined);
+});
+
+test('Douyin search route rejects malformed input without returning secrets', async () => {
+  const app = Fastify();
+  await app.register(douyinRoutes);
+  try {
+    const result = await app.inject({ method: 'POST', url: '/api/douyin/search', payload: { keyword: '', cookie: 'secret-value' } });
+    assert.equal(result.statusCode, 400);
+    assert.equal(result.headers['cache-control'], 'no-store');
+    assert.ok(!result.body.includes('secret-value'));
+    const foreign = await app.inject({ method: 'POST', url: '/api/douyin/search', headers: { origin: 'https://untrusted.example' }, payload: { keyword: 'test' } });
+    assert.equal(foreign.statusCode, 403);
+  } finally { await app.close(); }
+});
 
 test('douyinRoutes downloads thumbnails from supported image CDNs', async () => {
   const app = Fastify();

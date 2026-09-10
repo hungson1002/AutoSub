@@ -19,7 +19,7 @@ import type {
   SubtitleCue,
   SubtitleStyle,
   VoiceCloneProfile,
-  FlowVideoModel,
+  FilmVideoModel,
 } from "../types";
 import { cuesToAss } from "./subtitles";
 import type { AnimationAsset, AnimationProject } from "../../shared/animationStudio";
@@ -32,6 +32,8 @@ export interface TranslationMemoryItem {
   translation: string;
 }
 type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent' };
+export interface AnimationDirectorJobStatus { id: string; projectId: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'; stage: string; error?: string; hasResult?: boolean }
+export interface AnimationDirectorInput { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }
 export function buildTranslationMemory(cues: SubtitleCue[], cueId: string, limit = 24): TranslationMemoryItem[] {
   const cueIndex = cues.findIndex((cue) => cue.id === cueId);
   const previous = cues
@@ -48,6 +50,8 @@ export function buildTranslationMemory(cues: SubtitleCue[], cueId: string, limit
 }
 export const reviewVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/review/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
+export const reviewSubtitleUrl = (jobId: string) =>
+  `${MEDIA_BACKEND_ORIGIN}/api/review/jobs/${encodeURIComponent(jobId)}/subtitles.srt`;
 export const productAdVideoUrl = (jobId: string, download = false) =>
   `${MEDIA_BACKEND_ORIGIN}/api/product-ads/jobs/${encodeURIComponent(jobId)}/video${download ? "?download=1" : ""}`;
 export const productAdSubtitleUrl = (jobId: string) =>
@@ -55,7 +59,10 @@ export const productAdSubtitleUrl = (jobId: string) =>
 export const aiVideoUrl = (jobId: string, download = false) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/video${download ? '?download=1' : ''}`;
 export const aiVideoCharacterSheetUrl = (jobId: string, characterIndex?: number) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/preproduction/character-sheet${characterIndex ? `?character=${characterIndex}` : ''}`;
 export const aiVideoStoryboardUrl = (jobId: string, sceneIndex: number) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/preproduction/storyboard?scene=${sceneIndex}`;
-export const aiVideoClipUrl = (jobId: string, sceneIndex: number, download = false) => `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/clips/${sceneIndex}${download ? '?download=1' : ''}`;
+export const aiVideoClipUrl = (jobId: string, sceneIndex: number, download = false, candidate?: 'last') => {
+  const query = [download ? 'download=1' : '', candidate ? 'candidate=last' : ''].filter(Boolean).join('&');
+  return `${MEDIA_BACKEND_ORIGIN}/api/ai-video/jobs/${encodeURIComponent(jobId)}/clips/${sceneIndex}${query ? `?${query}` : ''}`;
+};
 export const animationAssetUrl = (uploadId: string) => `${MEDIA_BACKEND_ORIGIN}/api/uploads/${encodeURIComponent(uploadId)}/media`;
 
 export type StoredMediaResult = {
@@ -246,6 +253,11 @@ function decodeBase64Json<T>(value: string | null): T | undefined {
 }
 
 export const api = {
+  runDouyinTool: (input: { operation: string; params: Record<string, string>; cursor: string; confirmed?: boolean; requestId?: string }) => request<{ data: unknown; write: boolean }>('/api/douyin/tools', { method: 'POST', body: JSON.stringify(input) }),
+  douyinCookieStatus: () => request<{ saved: boolean; environment: boolean }>('/api/douyin/search-cookie'),
+  saveDouyinCookie: (cookie: string) => request<{ saved: boolean; environment: boolean }>('/api/douyin/search-cookie', { method: 'PUT', body: JSON.stringify({ cookie }) }),
+  deleteDouyinCookie: () => request<{ saved: boolean; environment: boolean }>('/api/douyin/search-cookie', { method: 'DELETE' }),
+  searchDouyin: (input: { keyword: string; sort: string; publishTime: string; cookie?: string; offset?: number; count?: number; searchId?: string; filterDuration?: string; searchRange?: string }) => request<{ warning: string; hasMore: boolean; nextOffset: number; searchId: string; items: Array<{ id: string; title: string; author: string; url: string; coverUrl?: string; duration: number; likes: number }> }>('/api/douyin/search', { method: 'POST', body: JSON.stringify(input) }),
   inspectStorage: (signal?: AbortSignal) => request<StorageSnapshot>('/api/storage', { signal }),
   deleteStorageItems: (items: Array<Pick<StorageItem, 'categoryId' | 'name'>>) => request<{ deletedCount: number; freedBytes: number; errors: Array<{ categoryId: string; name: string; error: string }> }>('/api/storage/delete', { method: 'POST', body: JSON.stringify({ items }) }),
   createAnimationProject: (input: { name: string; width: number; height: number; fps: number }) =>
@@ -256,7 +268,12 @@ export const api = {
   restoreAnimationProjectVersion: (id: string, versionId: string) => request<AnimationProject>(`/api/animation-studio/projects/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/restore`, { method: "POST" }),
   directAnimationProject: (input: { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }) =>
     request<AnimationProject>("/api/animation-studio/direct", { method: "POST", body: JSON.stringify(input) }),
-  batchDirectAnimationProjects: (input: { briefs: string[]; template: AnimationProject; provider: AIProvider; model: string; assetGeneration?: AnimationAssetGeneration }) => request<{ total: number; completed: number; failed: number; results: Array<{ brief: string; status: "completed" | "failed"; project?: AnimationProject; error?: string }> }>("/api/animation-studio/direct-batch", { method: "POST", body: JSON.stringify(input) }),
+  startAnimationDirectorJob: (input: AnimationDirectorInput, resumeId?: string): Promise<AnimationDirectorJobStatus> => request<AnimationDirectorJobStatus>('/api/animation-studio/director-jobs', { method: 'POST', body: JSON.stringify({ input, resumeId }) }),
+  animationDirectorJob: (id: string) => request<AnimationDirectorJobStatus>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}`),
+  animationDirectorResult: (id: string) => request<AnimationProject>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/result`),
+  animationDirectorInput: (id: string) => request<AnimationDirectorInput>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/input`),
+  cancelAnimationDirectorJob: (id: string) => request<AnimationDirectorJobStatus>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+  batchDirectAnimationProjects: (input: Omit<AnimationDirectorInput, 'brief' | 'project'> & { briefs: string[]; template: AnimationProject }) => request<{ total: number; completed: number; failed: number; results: Array<{ brief: string; status: "completed" | "failed"; project?: AnimationProject; error?: string }> }>("/api/animation-studio/direct-batch", { method: "POST", body: JSON.stringify(input) }),
   editAnimationScene: (input: { instruction: string; project: AnimationProject; sceneId: string; provider: AIProvider; model: string; mode?: "edit" | "animation" | "visual" }) => request<AnimationProject>("/api/animation-studio/edit", { method: "POST", body: JSON.stringify(input) }),
   editAnimationProject: (input: { instruction: string; project: AnimationProject; provider: AIProvider; model: string }) => request<AnimationProject>("/api/animation-studio/edit-project", { method: "POST", body: JSON.stringify(input) }),
   checkAnimationQuality: (project: AnimationProject) => request<{ issues: Array<{ severity: "error" | "warning"; code: string; sceneId: string; layerId?: string; message: string }> }>("/api/animation-studio/quality-check", { method: "POST", body: JSON.stringify(project) }),
@@ -836,8 +853,9 @@ export const api = {
       };
     },
     signal?: AbortSignal,
+    retryJobId?: string,
   ) =>
-    request<ReviewJobStatus>("/api/review/jobs", {
+    request<ReviewJobStatus>(retryJobId ? `/api/review/jobs/${encodeURIComponent(retryJobId)}/retry` : "/api/review/jobs", {
       method: "POST",
       body: JSON.stringify(input),
       signal,
@@ -878,16 +896,21 @@ export const api = {
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/flow-preview`, { method: "POST" }),
   rerenderProductAdSubtitles: (id: string, burnSubtitles: boolean, subtitleStyle: { fontSize: number; positionPercent: number; textColor: string; backgroundColor: string; backgroundOpacity: number; outlineWidth: number; maxCharsPerLine: number; textAlign: 'left' | 'center' | 'right'; bold: boolean }, subtitleTexts?: string[]) =>
     request<ProductAdJobStatus>(`/api/product-ads/jobs/${encodeURIComponent(id)}/subtitles`, { method: 'POST', body: JSON.stringify({ burnSubtitles, subtitleStyle, subtitleTexts }) }),
-  createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FlowVideoModel; imageModel?: string; aspectRatio: '9:16' | '16:9'; directionMode?: 'cinematic' | 'documentary' | 'commercial' | 'social-realism'; workflowMode?: 'review-first' | 'direct'; automationMode?: 'automatic' | 'manual'; characterReferenceUploadId?: string; script: { provider: AIProvider; model: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
+  getAiVideoAdapters: () => request<Array<{ id: string; label: string; models: string[] }>>('/api/ai-video/video-adapters'),
+  configureFilmReviewer: (id: string, vision?: { provider: AIProvider; model: string }) => request<{ ok: boolean }>(`/api/ai-video/jobs/${encodeURIComponent(id)}/reviewer`, { method: 'POST', body: JSON.stringify({ vision }) }),
+  createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FilmVideoModel; imageModel?: string; aspectRatio: '9:16' | '16:9'; directionMode?: 'cinematic' | 'documentary' | 'commercial' | 'social-realism'; workflowMode?: 'review-first' | 'direct'; automationMode?: 'automatic' | 'manual'; characterReferenceUploadId?: string; script: { provider: AIProvider; model: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
   flowAgentStatus: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/status'),
+  refreshFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/refresh', { method: 'POST' }),
   openFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/open', { method: 'POST' }),
   getAiVideoJob: (id: string, signal?: AbortSignal) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}`, { signal }),
   cancelAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+  composeAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/compose`, { method: 'POST', body: '{}' }),
   approveAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
-  updateAiVideoPreproduction: (id: string, input: { productionBible?: string; scene?: Partial<AiVideoScene> & { index: number }; imageModel?: string; model?: FlowVideoModel }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/preproduction`, { method: 'PATCH', body: JSON.stringify(input) }),
+  updateAiVideoPreproduction: (id: string, input: { productionBible?: string; scene?: Partial<AiVideoScene> & { index: number }; imageModel?: string; model?: FilmVideoModel }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/preproduction`, { method: 'PATCH', body: JSON.stringify(input) }),
   regenerateAiVideoDesign: (id: string, input: { kind: 'character-sheet' | 'storyboard'; sceneIndex?: number; characterIndex?: number }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/preproduction/regenerate`, { method: 'POST', body: JSON.stringify(input) }),
   regenerateAiVideoShot: (id: string, sceneIndex: number) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/shots/${sceneIndex}/regenerate`, { method: 'POST', body: '{}' }),
-  resumeAiVideoJob: (id: string, model: FlowVideoModel, script: { provider: AIProvider; model: string }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ model, script }) }),
+  acceptAiVideoClipCandidate: (id: string, sceneIndex: number) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/shots/${sceneIndex}/accept-candidate`, { method: 'POST', body: '{}' }),
+  resumeAiVideoJob: (id: string, model: FilmVideoModel, script?: { provider: AIProvider; model: string }) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({ model, script }) }),
   getReviewJob: (id: string, signal?: AbortSignal) =>
     request<ReviewJobStatus>(`/api/review/jobs/${encodeURIComponent(id)}`, {
       signal,

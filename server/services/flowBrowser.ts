@@ -2,8 +2,40 @@ import { spawn } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import path from 'node:path';
 
-const flowUrl = 'https://flow.google.com/';
+const flowUrl = () => {
+  const configured = process.env.FLOW_GOOGLE_URL?.trim();
+  if (configured) {
+    const url = new URL(configured);
+    if (url.protocol !== 'https:' || url.username || url.password
+      || !['flow.google.com', 'labs.google'].includes(url.hostname)) {
+      throw new Error('FLOW_GOOGLE_URL must be an HTTPS Google Flow URL.');
+    }
+    return url.href;
+  }
+  const account = process.env.FLOW_GOOGLE_AUTHUSER?.trim();
+  return account && /^\d+$/.test(account)
+    ? `https://flow.google.com/u/${account}/` : 'https://flow.google.com/';
+};
 const flowAgentUrl = () => String(process.env.FLOW_AGENT_URL || 'http://127.0.0.1:8001').replace(/\/$/, '');
+
+export async function resolveFlowBrowserUrl() {
+  try {
+    const response = await fetch(`${flowAgentUrl()}/health`, { signal: AbortSignal.timeout(1_500) });
+    const health = response.ok ? await response.json() : null;
+    const sessions = health && typeof health === 'object' && 'sessions' in health ? health.sessions : undefined;
+    // Prefer the account actually selected in the connected browser. The env
+    // URL is a startup fallback, not a permanent account binding.
+    if (Array.isArray(sessions) && sessions.length === 1 && typeof sessions[0]?.selected_flow_url === 'string') {
+      const url = new URL(sessions[0].selected_flow_url);
+      if (url.protocol === 'https:' && !url.username && !url.password
+          && (url.hostname === 'flow.google.com'
+            || (url.hostname === 'labs.google' && /^\/fx\/(?:[^/]+\/)?tools\/flow(?:\/|$)/.test(url.pathname)))) {
+        return url.href;
+      }
+    }
+  } catch { /* Offline/older bridge: use the configured startup URL. */ }
+  return flowUrl();
+}
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -86,12 +118,13 @@ export async function openFlowBrowser() {
     throw new Error(`Không tìm thấy Opera GX tại ${executablePath}. Hãy đặt OPERA_PATH trong .env.`);
   });
 
-  const child = spawn(executablePath, [flowUrl], {
+  const targetUrl = await resolveFlowBrowserUrl();
+  const child = spawn(executablePath, [targetUrl], {
     detached: true,
     stdio: 'ignore',
     windowsHide: false,
   });
   child.unref();
 
-  return { open: true, browser: 'Opera GX', url: flowUrl };
+  return { open: true, browser: 'Opera GX', url: targetUrl };
 }

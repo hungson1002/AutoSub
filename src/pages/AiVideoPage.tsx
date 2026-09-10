@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { AIProvider, AiVideoJobStatus, AppSettings, FlowVideoAspectRatio, FlowVideoModel, ProviderAssignment } from '../types';
+import type { AIProvider, AiVideoJobStatus, AppSettings, FilmVideoModel, FlowVideoAspectRatio, ProviderAssignment } from '../types';
 import { aiVideoCharacterSheetUrl, aiVideoClipUrl, aiVideoStoryboardUrl, aiVideoUrl, api, friendlyErrorMessage } from '../lib/api';
 import { capabilityAssignments } from '../lib/settings';
 import { CapabilityAssignmentPicker } from '../components/CapabilityAssignmentPicker';
@@ -7,13 +7,15 @@ import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
 import { Check, Download, Film, LoaderCircle, ShieldCheck, WandSparkles, X } from '../components/Icons';
 import { AiVideoWorkflowGraph, type WorkflowNoteNode } from '../components/AiVideoWorkflowGraph';
+import { ManualFilmWorkflow } from '../components/ManualFilmWorkflow';
 
-const models: FlowVideoModel[] = ['Flow Agent Auto'];
 const active = new Set<AiVideoJobStatus['status']>(['queued', 'planning', 'designing', 'generating', 'composing']);
 const storageKey = 'autosub.ai-video-job-id';
 const workflowNotesKey = 'autosub.ai-video-workflow-notes';
 const workflowNodesKey = 'autosub.ai-video-workflow-nodes';
-const professionalShotSeconds = 4;
+// The Flow adapter currently supports 4/6/8s generations. The planner picks
+// among those values per action instead of splitting every film into 4s cuts.
+const professionalShotSeconds = 8;
 const maxDurationSeconds = 20 * 60;
 
 function formatDuration(seconds: number) {
@@ -28,7 +30,8 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
   const [characterReference, setCharacterReference] = useState<File>();
   const [durationSeconds, setDurationSeconds] = useState(20);
   const [durationDraft, setDurationDraft] = useState('20');
-  const [model, setModel] = useState<FlowVideoModel>('Flow Agent Auto');
+  const [videoModels, setVideoModels] = useState<string[]>(['Flow Agent Auto']);
+  const [model, setModel] = useState<FilmVideoModel>('Flow Agent Auto');
   const [imageModel, setImageModel] = useState('narwhal');
   const [aspectRatio, setAspectRatio] = useState<FlowVideoAspectRatio>('9:16');
   const [directionMode, setDirectionMode] = useState<'cinematic' | 'documentary' | 'commercial' | 'social-realism'>('cinematic');
@@ -47,6 +50,12 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
   });
   const scriptProvider = providers.find((item) => item.id === scriptAssignment.providerId);
   const directorAssignments = capabilityAssignments(settings, 'translation');
+  const prepareReviewer = async () => {
+    if (!job) return;
+    const assignment = settings.assignments.vision;
+    const provider = providers.find((item) => item.id === assignment?.providerId);
+    await api.configureFilmReviewer(job.id, provider && assignment?.model ? { provider, model: assignment.model } : undefined);
+  };
 
   useEffect(() => {
     let active = true;
@@ -55,6 +64,20 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
     const timer = window.setInterval(refresh, 5000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void api.getAiVideoAdapters().then((adapters) => {
+      if (!active) return;
+      const options = adapters.flatMap((adapter) => adapter.models);
+      if (options.length) {
+        setVideoModels(options);
+        setModel((current) => options.includes(current) ? current : (options[0] || current));
+      }
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
   useEffect(() => { localStorage.setItem(workflowNotesKey, JSON.stringify(noteNodes)); }, [noteNodes]);
   useEffect(() => { localStorage.setItem(workflowNodesKey, JSON.stringify(workflowNodes)); }, [workflowNodes]);
   useEffect(() => { setDurationDraft(String(durationSeconds)); }, [durationSeconds]);
@@ -132,6 +155,7 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
   };
 
   const running = starting || Boolean(job && active.has(job.status));
+  const videoReady = model !== 'Flow Agent Auto' || Boolean(flowAgent?.connected);
   const awaitingApproval = job?.status === 'reviewing';
   const startNewWorkflow = () => { localStorage.removeItem(storageKey); localStorage.removeItem(workflowNodesKey); setJob(undefined); setWorkflowNodes([]); setSetupOpen(true); };
   const openFlow = async () => {
@@ -143,14 +167,22 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
     finally { setOpeningFlow(false); }
   };
   const resumeFailedJob = async () => {
-    if (!job) return;
-    if (!scriptProvider || !scriptAssignment.model) {
+    if (!job || starting) return;
+    if (!job.scenes.length && (!scriptProvider || !scriptAssignment.model)) {
       onNotice('Hãy chọn AI phát triển ý tưởng.', 'error');
       return;
     }
     setStarting(true);
     try {
-      const resumed = await api.resumeAiVideoJob(job.id, model, { provider: scriptProvider, model: scriptAssignment.model });
+      const status = await api.flowAgentStatus();
+      setFlowAgent(status);
+      // Let the backend inspect the persisted checkpoints before blocking on
+      // Flow. A failed job may only need local composition, or it may have
+      // accepted clips/storyboards that can be resumed without another login.
+      // If a new Flow request is actually required, the backend returns the
+      // actionable connection error and no paid request is submitted.
+      await prepareReviewer();
+      const resumed = await api.resumeAiVideoJob(job.id, model, scriptProvider && scriptAssignment.model ? { provider: scriptProvider, model: scriptAssignment.model } : undefined);
       setJob(resumed);
       onNotice(job.scenes.length ? `Đang tiếp tục cảnh lỗi bằng ${model}.` : 'Đang tạo lại kế hoạch phim ở dạng JSON gọn.');
     } catch (error) {
@@ -159,12 +191,22 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
       setStarting(false);
     }
   };
+  const composeExisting = async () => {
+    if (!job) return;
+    const count = job.scenes.filter((scene) => scene.status === 'completed').length;
+    if (count < job.scenes.length && !window.confirm(`Ghép ${count}/${job.scenes.length} cảnh đã xong? Các cảnh chưa hoàn thành sẽ bị bỏ qua. Không tốn credit Flow.`)) return;
+    setStarting(true);
+    try { setJob(await api.composeAiVideoJob(job.id)); onNotice('Đang ghép các clip có sẵn trên máy, không dùng credit Flow.'); }
+    catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể ghép video.'), 'error'); }
+    finally { setStarting(false); }
+  };
   const approvePreproduction = async () => {
     if (!job) return;
     setStarting(true);
     try {
+      await prepareReviewer();
       setJob(await api.approveAiVideoJob(job.id));
-      onNotice(job.automationMode === 'manual' ? 'Đã khóa thiết kế. Flow bắt đầu tạo từng shot video.' : 'Đã duyệt nhân vật. AutoSub sẽ tự tạo storyboard, các shot Flow và bản master.');
+      onNotice(job.automationMode === 'manual' ? `Đã khóa thiết kế. ${model} bắt đầu tạo từng shot video.` : `Đã duyệt nhân vật. AutoSub sẽ tự tạo storyboard, các shot bằng ${model} và bản master.`);
     } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể duyệt tiền kỳ.'), 'error'); }
     finally { setStarting(false); }
   };
@@ -185,12 +227,28 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
   const regenerateShot = async (sceneIndex: number) => {
     if (!job) return;
     setStarting(true);
-    try { setJob(await api.regenerateAiVideoShot(job.id, sceneIndex)); onNotice(`Flow đang tạo shot ${sceneIndex}. Các shot phụ thuộc phía sau sẽ được tạo lại.`); }
-    catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo Flow shot.'), 'error'); }
+    try { await prepareReviewer(); setJob(await api.regenerateAiVideoShot(job.id, sceneIndex)); onNotice(`${model} đang tạo shot ${sceneIndex}. Các shot phụ thuộc phía sau sẽ được tạo lại.`); }
+    catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo video shot.'), 'error'); }
+    finally { setStarting(false); }
+  };
+  const acceptCandidate = async (sceneIndex: number) => {
+    if (!job) return;
+    setStarting(true);
+    try {
+      await prepareReviewer();
+      const accepted = await api.acceptAiVideoClipCandidate(job.id, sceneIndex);
+      setJob(accepted);
+      onNotice(accepted.status === 'failed'
+        ? `Đã duyệt shot ${sceneIndex}; kết quả vẫn được giữ. Hãy kết nối Flow rồi bấm Tiếp tục để chạy phần còn lại.`
+        : accepted.status === 'composing' || active.has(accepted.status)
+          ? `Đã duyệt shot ${sceneIndex}; AutoSub đang tự chạy tiếp các node còn lại.`
+          : `Đã dùng bản candidate cuối của shot ${sceneIndex}; không gọi lại model và không tốn credit.`);
+    }
+    catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể dùng bản candidate cuối.'), 'error'); }
     finally { setStarting(false); }
   };
   const changeImageModel = (value: string) => { setImageModel(value); if (job?.status === 'reviewing') void savePreproduction({ imageModel: value }); };
-  const changeVideoModel = (value: FlowVideoModel) => { setModel(value); if (job?.status === 'reviewing') void savePreproduction({ model: value }); };
+  const changeVideoModel = (value: FilmVideoModel) => { setModel(value); if (job?.status === 'reviewing') void savePreproduction({ model: value }); };
   const addWorkflowNode = (nodeId: string) => setWorkflowNodes((nodes) => nodes.includes(nodeId) ? nodes : [...nodes, nodeId]);
   const removeWorkflowNode = (nodeId: string) => setWorkflowNodes((nodes) => nodes.filter((id) => {
     if (nodeId === 'character') return !['character', 'master'].includes(id) && !id.startsWith('story-') && !id.startsWith('shot-');
@@ -216,12 +274,12 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
           <h1>
             Kịch bản thành <span>video AI</span>
           </h1>
-          <p>AI phát triển ý tưởng, chia cảnh, đạo diễn prompt và dùng Google Flow để dựng video dọc.</p>
+          <p>AI phát triển ý tưởng, chia cảnh, đạo diễn prompt và dùng adapter video đã chọn để dựng phim theo shot.</p>
         </div>
         <div className="ai-video-header-badge">
           <Film size={18} aria-hidden="true" />
           <span>
-            <strong>Flow production line</strong>
+            <strong>Provider-neutral production line</strong>
             <small>Ý tưởng · cảnh · kiểm tra · MP4</small>
           </span>
         </div>
@@ -233,7 +291,7 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
             <div className="section-title"><span>CHẾ ĐỘ WORKFLOW</span><small>{automationMode === 'automatic' ? 'Tự dựng chuỗi sản xuất' : 'Tự thêm và chạy từng node'}</small></div>
             <div className="ai-video-mode-switch" role="group" aria-label="Chế độ chạy workflow">
               <button type="button" className={automationMode === 'automatic' ? 'active' : ''} onClick={() => setAutomationMode('automatic')}><strong>Tự động</strong><small>AI tạo từng nhân vật để bạn duyệt; sau đó tự làm storyboard, shot và master.</small></button>
-              <button type="button" className={automationMode === 'manual' ? 'active' : ''} onClick={() => setAutomationMode('manual')}><strong>Thủ công</strong><small>Chỉ tạo production bible trước; thêm và chạy từng node theo ý bạn.</small></button>
+              <button type="button" className={automationMode === 'manual' ? 'active' : ''} onClick={() => { setAutomationMode('manual'); setSetupOpen(false); }}><strong>Thủ công</strong><small>Canvas tự do: thêm, xóa, tự nối và chạy ngay tại từng node. Không bắt buộc Director hay nhân vật.</small></button>
             </div>
           </section>
           <section className="review-panel ai-video-format">
@@ -276,6 +334,7 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
               </small>
             </div>
             <CapabilityAssignmentPicker capability="translation" assignments={capabilityAssignments(settings, 'translation')} providers={providers} value={scriptAssignment} onChange={setScriptAssignment} label="AI phát triển ý tưởng và chia cảnh" />
+            <p className="field-hint">Kiểm tra nội dung dùng model Vision trong Thiết lập chung: {settings.assignments.vision?.model || 'chưa chọn — chỉ kiểm tra kỹ thuật'}. Mỗi storyboard và video có thêm một lượt Vision; không tự tăng lượt tạo video.</p>
             <div className="field">
               <span>Phong cách đạo diễn</span>
               <SelectField ariaLabel="Phong cách đạo diễn phim" value={directionMode} onChange={(value) => setDirectionMode(value as typeof directionMode)} options={[
@@ -288,13 +347,13 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
             <div className="field">
               <span>Model tạo video</span>
               <SelectField
-                ariaLabel="Model Google Flow"
+                ariaLabel="Model tạo video"
                 value={model}
-                onChange={(value) => setModel(value as FlowVideoModel)}
-                options={models.map((value) => ({
+                onChange={(value) => setModel(value as FilmVideoModel)}
+                options={videoModels.map((value) => ({
                   value,
                   label: value,
-                  description: 'Flow Agent tự chọn model phù hợp với thời lượng cảnh',
+                  description: 'Dùng chung production bible, continuity và shot contract',
                 }))}
               />
             </div>
@@ -311,19 +370,19 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
             <div className="ai-video-cost-note">
               <ShieldCheck size={15} aria-hidden="true" />
               <span>
-                Chế độ điện ảnh tạo một lượt Flow cho mỗi shot khoảng {professionalShotSeconds} giây. Video {durationSeconds} giây cần khoảng <strong>{Math.ceil(durationSeconds / professionalShotSeconds)} lượt</strong>. Số lượt nhiều hơn chế độ cũ 8 giây nhưng cho storyboard và góc máy riêng; job dừng ngay nếu một shot thất bại.
+                Chế độ điện ảnh tự chia shot theo hành động (Flow nhận 4, 6 hoặc 8 giây/shot; không ép mọi cảnh thành 4 giây). Video {durationSeconds} giây cần khoảng <strong>{Math.ceil(durationSeconds / professionalShotSeconds)} lượt</strong>. Shot dài được dành cho hành động có diễn tiến; insert và phản ứng ngắn dùng 4–6 giây. Mỗi shot có storyboard, continuity và góc máy riêng; bản cuối vẫn được giữ nếu hậu kiểm có cảnh báo.
               </span>
             </div>
-            <button className="button primary large full" disabled={running || awaitingApproval || brief.trim().length < 20}>
+            <button className="button primary large full" hidden={automationMode === 'manual'} disabled={running || awaitingApproval || brief.trim().length < 20}>
               {running ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />} {running ? (job && ['generating', 'composing'].includes(job.status) ? 'Đang sản xuất video…' : 'Đang làm tiền kỳ…') : awaitingApproval ? (automationMode === 'automatic' ? 'Đang chờ duyệt nhân vật' : 'Đang chờ duyệt storyboard') : automationMode === 'manual' ? 'Tạo production bible' : 'Tạo hình ảnh nhân vật'} <span>→</span>
             </button>
-            <small className="field-help">{automationMode === 'manual' ? 'Chế độ thủ công chỉ chạy AI Director trước. Sau đó mở Thêm node để dựng và chạy từng bước.' : 'Bước này tạo riêng character bible cho từng nhân vật. Sau khi bạn duyệt, storyboard và video sẽ chạy tự động.'}</small>
+            <small className="field-help">{automationMode === 'manual' ? 'Nhập prompt và chọn model tại từng node trên canvas, rồi bấm Bắt đầu ngay ở node. Không dùng pipeline tự động bên dưới.' : 'Bước này tạo riêng character bible cho từng nhân vật. Sau khi bạn duyệt, storyboard và video sẽ chạy tự động.'}</small>
             {!flowAgent?.connected && <small className="field-help">Bạn vẫn có thể bấm tạo. AutoSub sẽ kiểm tra phiên Flow trước khi gửi cảnh và báo cách khắc phục nếu phiên chưa sẵn sàng.</small>}
           </section>
           <section className="review-panel ai-video-format">
             <div className="section-title">
               <span>03 · KHUNG HÌNH</span>
-              <small>Được gửi trực tiếp tới Flow</small>
+              <small>Được gửi trực tiếp tới adapter đã chọn</small>
             </div>
             <div className="field">
               <span>Tỷ lệ video</span>
@@ -352,13 +411,14 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
             <span>NODE WORKFLOW</span>
             <small>{job ? `JOB ${job.id.slice(0, 8)}` : 'Chưa bắt đầu'}</small>
           </div>
-          <AiVideoWorkflowGraph
+          {automationMode === 'manual' ? <ManualFilmWorkflow videoModels={videoModels} imageModel={imageModel} onSetup={() => setSetupOpen((value) => !value)} onInspect={() => setSetupOpen(false)} /> : <AiVideoWorkflowGraph
             job={job}
             brief={brief}
             characterFile={characterReference}
             aspectRatio={aspectRatio}
             busy={starting}
             flowConnected={Boolean(flowAgent?.connected)}
+            videoReady={videoReady}
             canStart={brief.trim().length >= 20}
             setupOpen={setupOpen}
             noteNodes={noteNodes}
@@ -366,6 +426,7 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
             directorAssignments={directorAssignments}
             directorAssignment={scriptAssignment}
             videoModel={model}
+            videoModels={videoModels}
             imageModel={imageModel}
             automationMode={automationMode}
             workflowNodes={workflowNodes}
@@ -383,11 +444,13 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
             onApprove={() => void approvePreproduction()}
             onCancel={() => void cancelJob()}
             onResume={() => void resumeFailedJob()}
+            onCompose={() => void composeExisting()}
             onSaveBible={(value) => void savePreproduction({ productionBible: value })}
             onSaveScene={(scene) => void savePreproduction({ scene })}
             onRegenerate={(kind, sceneIndex) => void regenerateDesign(kind, sceneIndex)}
             onRegenerateShot={(sceneIndex) => void regenerateShot(sceneIndex)}
-          />
+            onAcceptCandidate={(sceneIndex) => void acceptCandidate(sceneIndex)}
+          />}
           <div className="ai-video-output-legacy" hidden>
           {!job ? (
             <div className="ai-video-workflow-preview">
@@ -453,7 +516,7 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
                       {job.scenes.map((scene) => (
                         <article key={scene.index}>
                           {scene.storyboardReady ? <img src={`${aiVideoStoryboardUrl(job.id, scene.index)}&v=${encodeURIComponent(job.updatedAt)}`} alt={`Storyboard cảnh ${scene.index}: ${scene.title}`} /> : <div className="ai-video-frame-skeleton"><span>{String(scene.index).padStart(2, '0')}</span></div>}
-                          <div><span>{String(scene.index).padStart(2, '0')}</span><strong>{scene.title}</strong></div>
+                          <div><span>{String(scene.index).padStart(2, '0')}</span><strong>{scene.title}</strong><small>{scene.durationSeconds || job.shotDurationSeconds || 8} giây · {scene.shotSize || 'MS'} · {scene.editMotivation || 'action'}</small></div>
                           <p>{scene.dramaticBeat || scene.narration}</p>
                           {scene.shotPlan && <small>{scene.shotPlan}</small>}
                         </article>
@@ -475,6 +538,7 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
                       <span>{String(scene.index).padStart(2, '0')}</span>
                       <div>
                         <strong>{scene.title}</strong>
+                        <small>{scene.durationSeconds || job.shotDurationSeconds || 8} giây · {scene.shotSize || 'MS'} · {scene.cameraMovement || 'locked'}</small>
                         <p>{scene.narration || scene.visualPrompt}</p>
                       </div>
                       <div className="ai-video-scene-actions">
@@ -501,11 +565,11 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
                 </button>
               )}
               {['failed', 'cancelled'].includes(job.status) && (
-                <button type="button" className="button secondary full" disabled={starting || !flowAgent?.connected} onClick={() => void resumeFailedJob()}>
+                <button type="button" className="button secondary full" disabled={starting} onClick={() => void resumeFailedJob()}>
                   {starting ? <LoaderCircle className="spin" size={15} /> : <WandSparkles size={15} />} Tiếp tục từ cảnh lỗi
                 </button>
               )}
-              {job.status === 'completed' && job.result && (
+              {job.status !== 'composing' && job.result && (
                 <div className="review-result">
                   <video controls playsInline preload="metadata" src={aiVideoUrl(job.id)} />
                   <div className="review-result-meta">

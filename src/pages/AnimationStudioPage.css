@@ -26,6 +26,9 @@
 .studio-preview-first .animation-director-prompt .sr-only { position: static; width: auto; height: auto; clip: auto; white-space: normal; display: block; margin-bottom: 8px; color: #b6c1cd; font-size: 12px; }
 .studio-preview-first .animation-director-prompt textarea { height: 116px; min-height: 116px; max-height: 240px; resize: vertical; font-size: 13px; line-height: 1.6; }
 .studio-preview-first .animation-director-options { display: flex; flex-direction: column; align-items: stretch; gap: 14px; }
+.animation-director-job { display: grid; gap: 8px; min-width: 0; margin-top: 12px; }
+.animation-director-job p { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.animation-director-job .button { min-height: 44px; white-space: normal; }
 .studio-preview-first .animation-duration { display: grid !important; grid-template-columns: 1fr 62px auto; font-size: 12px; }
 .studio-preview-first .animation-duration input { width: 62px; font-size: 13px; }
 .studio-preview-first .animation-director-voice { display: grid !important; gap: 8px !important; font-size: 12px; }

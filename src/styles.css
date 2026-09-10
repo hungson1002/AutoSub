@@ -288,15 +288,24 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .ai-flow-node footer > span { min-width: 0; flex: 1; }
 .ai-flow-node footer > button { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; padding: 0; color: #bcc7d3; border: 1px solid #354354; border-radius: 5px; background: #1c2632; cursor: pointer; }
 .ai-flow-node footer > button:disabled { opacity: .35; cursor: not-allowed; }
+.ai-flow-node-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; }
+.ai-flow-node-actions button { width: 27px; height: 27px; display: grid; place-items: center; padding: 0; color: #bcc7d3; border: 1px solid #354354; border-radius: 5px; background: #1c2632; cursor: pointer; }
+.ai-flow-node-actions .candidate-download { width: 27px; height: 27px; display: grid; place-items: center; color: #bcc7d3; border: 1px solid #354354; border-radius: 5px; background: #1c2632; text-decoration: none; }
+.ai-flow-node-actions button.accept-candidate { color: #071f18; border-color: rgba(74,220,171,.7); background: #54d8aa; }
+.ai-flow-node-actions button:disabled { opacity: .35; cursor: not-allowed; }
+.ai-flow-node.shot.candidate { border-color: rgba(255,196,107,.78); box-shadow: 0 0 0 1px rgba(255,196,107,.16),0 9px 20px rgba(0,0,0,.32); }
+.ai-flow-node-media.shot-preview.candidate { border-block: 1px solid rgba(255,196,107,.42); }
 .ai-flow-media-open { position: relative; width: 100%; display: block; padding: 0; overflow: hidden; border: 0; background: #090d12; cursor: zoom-in; }
 .ai-flow-media-open img { width: 100%; height: 100%; object-fit: contain; background: #070b10; }
 .ai-flow-media-open > svg,.ai-flow-video-expand { position: absolute; top: 7px; right: 7px; padding: 5px; color: white; border: 1px solid rgba(255,255,255,.2); border-radius: 5px; background: rgba(5,8,12,.78); }
 .ai-flow-video-expand { width: 28px; height: 28px; display: grid; place-items: center; cursor: zoom-in; }
 .ai-flow-node footer.actions button,.ai-flow-node footer.actions a { flex: 1; height: 29px; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 0 5px; color: #dce4ec; border: 0; border-radius: 4px; background: #202b37; font-size: 8px; text-decoration: none; cursor: pointer; }
-.ai-flow-preview-modal { position: absolute; z-index: 20; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(4,7,11,.82); backdrop-filter: blur(8px); }
+.ai-flow-preview-modal { position: fixed; inset: 0; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; box-sizing: border-box; border: 0; padding: 16px; background: rgba(4,7,11,.82); }
+.ai-flow-preview-modal[open] { display: grid; place-items: center; }
+.ai-flow-preview-modal::backdrop { background: rgba(4,7,11,.7); }
 .ai-flow-preview-modal > section { width: min(1120px,100%); max-height: 100%; display: grid; grid-template-rows: auto minmax(0,1fr); overflow: hidden; border: 1px solid #3a4859; border-radius: 10px; background: #0b1016; box-shadow: 0 28px 70px rgba(0,0,0,.58); }
 .ai-flow-preview-modal header { display: flex; align-items: center; justify-content: space-between; padding: 11px 13px; border-bottom: 1px solid #293645; }
-.ai-flow-preview-modal header strong { color: #edf2f6; font-size: 11px; }.ai-flow-preview-modal header button { width: 30px; height: 30px; display: grid; place-items: center; color: #cbd5df; border: 1px solid #344253; border-radius: 6px; background: #18212c; }
+.ai-flow-preview-modal header strong { color: #edf2f6; font-size: 13px; }.ai-flow-preview-modal header button { min-width: 88px; min-height: 44px; display: flex; gap: 6px; align-items: center; justify-content: center; flex-shrink: 0; color: #fff; border: 1px solid #65778d; border-radius: 6px; background: #18212c; cursor: pointer; }
 .ai-flow-preview-modal img,.ai-flow-preview-modal video { width: 100%; max-height: calc(100dvh - 150px); object-fit: contain; background: #05080b; }
 
 @media (max-width: 700px) {
@@ -1599,3 +1608,45 @@ input[type="range"]:focus-visible { outline: none; }
   .storage-size { text-align: right; }
   .storage-path { align-items: flex-start; flex-direction: column; }
 }
+.mcp-settings { min-width: 0; }
+.mcp-settings .settings-heading > span { white-space: nowrap; }
+.mcp-settings p { line-height: 1.6; }
+.mcp-settings label { display: grid; gap: 8px; margin-block: 12px; }
+.mcp-settings .mcp-options label { display: flex; align-items: center; gap: 10px; }
+.mcp-settings input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; }
+.mcp-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-block: 16px; }
+.mcp-settings details { margin-block: 16px; }
+.mcp-settings summary { cursor: pointer; padding-block: 12px; font-weight: 600; }
+.mcp-settings textarea, .mcp-settings input:not([type="checkbox"]) { width: 100%; min-width: 0; box-sizing: border-box; }
+.mcp-settings textarea { font-family: monospace; font-size: 13px; margin-block: 12px; }
+.mcp-tunnel { margin-block: 24px; padding-block: 20px; border-block: 1px solid var(--border, #2c3946); }
+.mcp-tunnel a { color: #69cbd6; text-decoration: underline; }
+.manual-film .manual-film-ports { position: absolute; top: 105px; left: -7px; right: -7px; height: 0; display: flex; align-items: center; justify-content: space-between; pointer-events: none; z-index: 2; }
+.manual-film-ports button { pointer-events: auto; flex: 0 0 12px; width: 12px; height: 12px; padding: 0; border: 2px solid #28b996; border-radius: 50%; background: #0d171e; cursor: crosshair; box-shadow: 0 0 0 3px #0c1117; }
+.manual-film-ports button::after { content: ''; position: absolute; inset: -7px; }
+.manual-film-ports button { position: relative; }
+.manual-film-ports button:hover,.manual-film-ports button[aria-pressed=true] { background: #45dbb1; box-shadow: 0 0 0 4px rgba(40,185,150,.18); }
+.manual-film-ports button:disabled { border-color: #506372; cursor: default; }
+.manual-film .ai-flow-node { overflow: visible; display: grid; grid-template-rows: 32px minmax(0, 1fr) 46px; }
+.manual-film .ai-flow-node > .ai-flow-node-media,.manual-film .ai-flow-node > .ai-flow-media-open,.manual-film .ai-flow-node > .ai-flow-master-video { height: 100%; min-height: 0; }
+.manual-film .ai-flow-node > .ai-flow-node-copy { grid-row: 2 / -1; height: auto; min-height: 0; }
+.manual-film-merge-order > div { display: flex; align-items: center; gap: 8px; margin-block: 8px; }
+.manual-film-merge-order > div > span { flex: 1; font-size: 12px; color: #bdcad7; }
+.manual-film-merge-order button { width: 36px; height: 36px; border: 1px solid #354354; border-radius: 5px; color: #bdcad7; background: #1c2632; cursor: pointer; }
+.manual-film-merge-order button:disabled { opacity: .35; cursor: default; }
+.manual-film .ai-flow-node > header { border-radius: 7px 7px 0 0; }
+.manual-film .ai-flow-node > footer { border-radius: 0 0 7px 7px; }
+.manual-film .ai-flow-node-copy { overflow: hidden; border-radius: 0 0 7px 7px; }
+.manual-film .ai-flow-zoom > span { padding: 7px 0; color: #8295a7; font: 9px Consolas,monospace; text-align: center; }
+.manual-film .ai-flow-inspector-body label > span { font-size: 11px; }
+.manual-film .ai-flow-inspector-body textarea { min-height: 180px; font-size: 12px; }
+.manual-film .manual-film-unlink { padding: 9px 12px; text-align: left; color: #9eb2c4; border: 1px solid #2e4050; background: #141e28; border-radius: 6px; font-size: 11px; }
+.manual-film .ai-flow-node header > button { width: 18px; height: 20px; padding: 2px; border: 0; background: transparent; color: #91a0b0; }
+.manual-film .ai-flow-node-media.empty { display: grid; place-items: center; align-content: center; gap: 8px; }
+.manual-film .ai-flow-node-media.empty small { font-size: 9px; }
+.manual-film > p { position: absolute; top: 65px; left: 16px; z-index: 5; max-width: 420px; padding: 10px; color: #e4edf5; background: #17232f; border-radius: 6px; }
+.manual-film-empty { padding: 80px 45px; max-width: 360px; color: #8495a7; font-size: 12px; }
+.manual-film-reference { width: 100%; max-height: 190px; object-fit: contain; }
+.manual-film .ai-flow-inspector-body > div { min-width: 0; }
+.manual-film .ai-flow-inspector-body .button { width: 100%; }
+.manual-film .ai-flow-inspector-body p { color: #8a9bac; font-size: 11px; line-height: 1.6; }

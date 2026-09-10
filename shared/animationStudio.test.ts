@@ -52,3 +52,30 @@ test('allows generated video scenes beside composite scenes', () => {
   });
   assert.deepEqual(validateAnimationProject(value), []);
 });
+
+test('validates optional production beat contracts without breaking old projects', () => {
+  const value = project();
+  value.productionPlan = {
+    version: 1,
+    source: 'director',
+    status: 'draft',
+    narrationUnits: [{ id: 'narration-1', sceneId: 'scene-001', text: value.scenes[0]!.narration, startMs: 0, endMs: 5000, timingSource: 'planned' }],
+    beats: [{ id: 'beat-1', sceneId: 'scene-001', narrationUnitId: 'narration-1', cueText: 'Earth', subjectIds: [], technique: 'image-camera', visibleEvidence: 'The Moon remains visible.', failureConditions: ['Do not crop the Moon.'] }],
+  };
+  assert.ok(validateAnimationProject(value).some((issue) => issue.path === 'productionPlan.beats[0].cueText'));
+  value.productionPlan.beats[0]!.cueText = 'What if';
+  assert.deepEqual(validateAnimationProject(value), []);
+});
+
+test('rejects a cue occurrence that is not present instead of anchoring to the first match', () => {
+  const value = project();
+  value.scenes[0]!.narration = 'Moon moves. Moon returns.';
+  value.productionPlan = {
+    version: 1,
+    source: 'director',
+    status: 'draft',
+    narrationUnits: [{ id: 'narration-1', sceneId: 'scene-001', text: value.scenes[0]!.narration }],
+    beats: [{ id: 'beat-1', sceneId: 'scene-001', narrationUnitId: 'narration-1', cueText: 'Moon', cueOccurrence: 2, subjectIds: [], technique: 'image-camera', visibleEvidence: 'Moon moves.', failureConditions: ['Cue must exist.'] }],
+  };
+  assert.ok(validateAnimationProject(value).some((issue) => issue.path === 'productionPlan.beats[0].cueOccurrence'));
+});

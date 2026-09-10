@@ -1,8 +1,68 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildVisualBeatTimeline, directorRepairRule, jsonFromDirectorReply, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets } from './animationDirector';
+import { animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, directorRepairRule, jsonFromDirectorReply, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets } from './animationDirector';
 import { wavDurationMs } from './animationAssets';
 import { animationCraftRules } from './directorKnowledge';
+
+test('actor preflight rejects missing or unsupported clips before image generation', () => {
+  const segments = normalizeLongAnimationSegments({ segments: [{ narration: 'Nhân vật bước tới bàn.', visualBeats: [{ visual: 'A room', narrationCue: 'Nhân vật bước tới bàn', action: 'Walk towards table', actors: [{ assetId: 'hero', animation: 'walk', fromX: .2, toX: .6, y: .6 }] }] }] }, 1);
+  const spriteRequests = [{ key: 'hero', name: 'Hero', design: 'A consistent blue cutout character with a yellow jacket', clips: ['walk'] }];
+  assert.equal(animationActorPlanIssues(segments, {}, [], true).length, 1);
+  assert.equal(animationActorPlanIssues(segments, { spriteRequests }, [], false).length, 1);
+  assert.deepEqual(animationActorPlanIssues(segments, { spriteRequests }, [], true), []);
+  segments[0].visualBeats[0].actors![0].animation = 'pick-up';
+  assert.equal(animationActorPlanIssues(segments, { spriteRequests }, [], true).length, 1);
+});
+
+test('legacy decorative motion is disabled and invented narration cues are rejected', () => {
+  const [segment] = normalizeLongAnimationSegments({ segments: [{ narration: 'Mặt Trăng quay quanh Trái Đất.', motionGraphic: 'focus', visualBeats: [{ visual: 'Space', narrationCue: 'Câu không tồn tại', action: 'Orbit' }] }] }, 1);
+  assert.equal(segment.motionGraphic, 'none');
+  assert.equal(segment.visualBeats[0].narrationCue, undefined);
+});
+
+test('performance commands preserve the exact narration cue and semantic action', () => {
+  const result = buildBeatPerformances({ sceneIndex: 0, durationMs: 5000, width: 1280, height: 720, assets: [], beats: [{ purpose: 'So sánh', narrationCue: 'A khác B', action: 'Lần lượt hiện hai thuộc tính để đối chiếu', visual: '', motion: 'locked', transition: 'cut', diagram: { steps: ['A nóng', 'B lạnh'], layout: 'comparison' } }] });
+  assert.ok(result.commands.every((c) => c.parameters?.narrationCue === 'A khác B'));
+});
+
+test('staged diagrams create independent editable movement within each beat', () => {
+  const result = buildBeatPerformances({ sceneIndex: 0, durationMs: 4000, width: 1920, height: 1080, assets: [], beats: [{ purpose: 'process', visual: '', motion: 'locked', transition: 'cut', diagram: { steps: ['Mưa', 'Nước ngấm', 'Cây phát triển'] } }] });
+  assert.equal(result.layers.length, 9);
+  assert.equal(result.commands.filter((item) => item.type === 'MOVE').length, 9);
+  assert.ok(result.commands.every((item) => item.startMs + item.durationMs <= 4000));
+  const reveals = result.commands.filter((item) => item.type === 'FADE_IN');
+  assert.ok(reveals[3].startMs > reveals[0].startMs);
+});
+
+test('portrait comparison cards stay readable, separated and inside the safe area', () => {
+  const result = buildBeatPerformances({ sceneIndex: 0, durationMs: 6000, width: 1080, height: 1920, assets: [], beats: [{ purpose: 'contrast', visual: '', motion: 'locked', transition: 'cut', diagram: { layout: 'comparison', steps: ['Ăn thực vật', 'Ăn thịt'] } }] });
+  const cards = result.layers.filter((layer) => layer.id.endsWith('-card'));
+  assert.equal(cards.length, 2);
+  assert.ok(cards[0].transform.position.y + cards[0].height / 2 < cards[1].transform.position.y - cards[1].height / 2);
+  assert.ok(cards.every((layer) => layer.transform.position.x - layer.width / 2 >= 100 && layer.transform.position.x + layer.width / 2 <= 980));
+  assert.equal(result.commands.filter((command) => command.type === 'SCALE').length, 6);
+  assert.ok(result.commands.every((command) => command.startMs + command.durationMs <= 6000));
+});
+
+test('missing sprite clips are reported rather than replaced by fake motion', () => {
+  const result = buildBeatPerformances({ sceneIndex: 0, durationMs: 4000, width: 1920, height: 1080, assets: [], beats: [{ purpose: 'walk', visual: '', motion: 'locked', transition: 'cut', actors: [{ assetId: 'missing', animation: 'walk', fromX: .2, toX: .8, y: .5 }] }] });
+  assert.equal(result.layers.length, 0);
+  assert.equal(result.warnings.length, 1);
+});
+
+test('leftward sprite travel mirrors the character without changing clip timing', () => {
+  const result = buildBeatPerformances({ sceneIndex: 0, durationMs: 4000, width: 1280, height: 720, assets: [{ id: 'hero', name: 'Hero', type: 'sprite', uri: '/hero.png', tags: [], createdAt: '', sprite: { frameWidth: 128, frameHeight: 128, columns: 4, frameCount: 8, clips: { walk: { from: 0, to: 7, fps: 8, loop: true } } } }], beats: [{ purpose: 'walk', visual: '', motion: 'locked', transition: 'cut', actors: [{ assetId: 'hero', animation: 'walk', fromX: .8, toX: .2, y: .5 }] }] });
+  assert.equal(result.layers[0].transform.scale.x, -1);
+  assert.equal(result.commands.find((command) => command.type === 'PLAY_ANIMATION')?.durationMs, 4000);
+});
+
+test('missing images preserve the assigned beat instead of shifting later shots', () => {
+  const asset = { id: 'last', name: 'Last', type: 'background' as const, uri: '/last.png', tags: [], createdAt: new Date().toISOString() };
+  const beat = { purpose: 'reveal', visual: 'test', motion: 'locked' as const, transition: 'cut' as const };
+  const result = buildVisualBeatTimeline({ sceneIndex: 0, durationMs: 8000, width: 1920, height: 1080, visuals: [undefined, asset], beats: [beat, beat] });
+  assert.equal(result.layers[0].id, 'visual-0-1');
+  assert.equal(result.commands.find((item) => item.type === 'FADE_IN')?.startMs, 4000);
+});
 
 test('animation craft knowledge rejects static slideshow direction', () => {
   assert.match(animationCraftRules, /ANIMATION CRAFT GATE/);
@@ -43,15 +103,21 @@ test('reads real WAV duration for voice-synced scenes', () => {
   assert.equal(wavDurationMs(wav), 1000);
 });
 
-test('long animation keeps the requested scene count and four distinct visual beats', () => {
+test('long animation keeps real visual beats without manufacturing four image prompts', () => {
   const segments = normalizeLongAnimationSegments({ segments: Array.from({ length: 9 }, (_, index) => ({
     title: `Scene ${index + 1}`,
     narration: `Narration ${index + 1}`,
     visual: `Subject ${index + 1}`,
   })) }, 6);
   assert.equal(segments.length, 6);
-  assert.equal(segments[0].visualBeats.length, 4);
-  assert.equal(new Set(segments[0].visualBeats.map((beat) => beat.visual)).size, 4);
+  assert.equal(segments[0].visualBeats.length, 1);
+  assert.equal(segments[0].visualBeats[0].visual, 'Subject 1');
+});
+
+test('diagram-only beats survive and duplicate still prompts are removed', () => {
+  const [segment] = normalizeLongAnimationSegments({ segments: [{ narration: 'Giải thích', visualBeats: [{ visual: 'Forest' }, { visual: ' forest ' }, { diagram: { steps: ['Nguyên nhân', 'Kết quả'] } }] }] }, 1);
+  assert.equal(segment.visualBeats.length, 2);
+  assert.equal(segment.visualBeats[1].diagram?.steps.length, 2);
 });
 
 test('visual beats create short transitions and independent camera movement', () => {

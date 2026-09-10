@@ -103,6 +103,11 @@ function refreshFlowSessionOnce(signal?: AbortSignal) {
   return flowSessionRefreshInFlight;
 }
 
+export async function refreshGoogleFlowSession(signal?: AbortSignal) {
+  await refreshFlowSessionOnce(signal);
+  return flowAgentStatus(signal);
+}
+
 async function requestWithSessionRecovery<T>(request: () => Promise<Response>, signal?: AbortSignal) {
   try {
     return await parseResponse<T>(await request());
@@ -124,7 +129,7 @@ async function requestWithSessionRecovery<T>(request: () => Promise<Response>, s
   }
 }
 
-export async function generateGoogleFlowImage(prompt: string, outputFile: string, options: { model?: string; size?: string; referenceImagePath?: string; signal?: AbortSignal } = {}) {
+export async function generateGoogleFlowImage(prompt: string, outputFile: string, options: { model?: string; size?: string; referenceImagePath?: string; signal?: AbortSignal; idempotencyKey?: string } = {}) {
   await validateGoogleFlowSession(undefined, options.signal);
   const reference = options.referenceImagePath ? await readFile(options.referenceImagePath) : undefined;
   const extension = options.referenceImagePath?.toLowerCase().match(/\.(png|jpe?g|webp)$/)?.[1];
@@ -137,7 +142,11 @@ export async function generateGoogleFlowImage(prompt: string, outputFile: string
       response_format: 'b64_json',
       ...(reference ? { image_base64: `data:${mime};base64,${reference.toString('base64')}` } : {}),
     });
-  const idempotencyKey = `autosub-image-${createHash('sha256').update(`${outputFile}\n${prompt}\n${randomUUID()}`).digest('hex').slice(0, 32)}`;
+  // A caller may keep the same key across a transport timeout and replay the
+  // original paid request. A fresh key remains the default for a new, explicit
+  // generation so clicking "Tạo lại" still creates a new take.
+  const idempotencyKey = options.idempotencyKey?.trim()
+    || `autosub-image-${createHash('sha256').update(`${outputFile}\n${prompt}\n${randomUUID()}`).digest('hex').slice(0, 32)}`;
   const result = await requestWithSessionRecovery<{ data?: Array<{ b64_json?: string }> }>(() => fetch(`${baseUrl()}/v1/images/generations`, {
     method: 'POST', signal: options.signal,
     headers: { ...headers(true), 'Idempotency-Key': idempotencyKey }, body,

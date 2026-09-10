@@ -3,9 +3,10 @@ import type { AnimationAsset, AnimationCommandType, AnimationProject, CompositeS
 import { ANIMATION_PROJECT_VERSION, defaultTransform } from '../../shared/animationStudio';
 import { AnimationCanvas } from '../animationStudio/AnimationCanvas';
 import { ChevronDown, Download, Image, Layers3, Maximize, Pause, Play, Plus, Save, Settings2, Sparkles, Square, Trash2, Type, Volume2, X } from '../components/Icons';
-import { aiVideoUrl, animationAssetUrl, api, friendlyErrorMessage } from '../lib/api';
+import { aiVideoUrl, animationAssetUrl, api, friendlyErrorMessage, type AnimationDirectorJobStatus } from '../lib/api';
 import { capabilityAssignments } from '../lib/settings';
 import type { AIProvider, AiVideoJobStatus, AppSettings } from '../types';
+import { buildRenderTimeline } from '../remotion/timeline';
 import './AnimationStudioPage.css';
 
 const now = () => new Date().toISOString();
@@ -80,9 +81,40 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [persisted, setPersisted] = useState(false);
   const [brief, setBrief] = useState('Điều gì xảy ra nếu Mặt Trăng biến mất?');
   const [directing, setDirecting] = useState(false);
+  const [directorJob, setDirectorJob] = useState<AnimationDirectorJobStatus>();
+  const [directorJobId, setDirectorJobId] = useState(() => { try { return localStorage.getItem('autosub.animation-director-job-id') || ''; } catch { return ''; } });
+  const autoOpenDirector = useRef(false);
+  const [directorPollRevision, setDirectorPollRevision] = useState(0);
   const [targetMinutes, setTargetMinutes] = useState('1');
   const [directorError, setDirectorError] = useState('');
   const [directorWarning, setDirectorWarning] = useState('');
+  useEffect(() => {
+    if (!directorJobId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const job = await api.animationDirectorJob(directorJobId);
+        if (disposed) return;
+        setDirectorJob(job);
+        const active = job.status === 'queued' || job.status === 'running';
+        setDirecting(active);
+        if (!active) {
+          if (job.error) setDirectorError(job.error);
+          if (job.hasResult && autoOpenDirector.current) {
+            const result = await api.animationDirectorResult(job.id);
+            if (!disposed) { applyDirectorProject(result); autoOpenDirector.current = false; }
+          }
+          return;
+        }
+      } catch (error) {
+        if (!disposed) setDirectorError(friendlyErrorMessage(error, 'Mất kết nối theo dõi job; sẽ kiểm tra lại, không gửi lệnh tạo mới.'));
+      }
+      if (!disposed) timer = setTimeout(poll, 1500);
+    };
+    void poll();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [directorJobId, directorPollRevision]);
   const [batching, setBatching] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [libraryAssets, setLibraryAssets] = useState<AnimationAsset[]>([]);
@@ -332,21 +364,47 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     setDirectorError(''); setDirectorWarning(''); setDirecting(true);
     try {
       const assetGeneration = autoGenerateAssets ? selectedAssetGeneration() : undefined;
-      const directed = await api.directAnimationProject({ brief, project, provider: directorProvider, model: directorAssignment.model, targetDurationSeconds: Math.round(requestedMinutes * 60), narration: { provider: ttsProvider, model: ttsAssignment.model, voice: selectedVoice, speed: 1 }, ...(assetGeneration ? { assetGeneration } : {}) });
-      setProject(directed);
-      setSceneId(directed.scenes[0]?.id || '');
-      setSelectedLayerId('');
-      setTimeMs(0);
-      setSequenceTimeMs(0);
-      setSequenceMode(false);
-      setPlaying(false);
-      setPersisted(false);
-      setDirectorWarning(directed.generationWarnings?.join('\n') || '');
-      onNotice(`AI Director đã dựng ${directed.scenes.length} scene có thể chỉnh sửa.`);
-    } catch (error) { setDirectorError(friendlyErrorMessage(error, 'AI Director không thể dựng scene.')); }
-    finally { setDirecting(false); }
+      const job = await api.startAnimationDirectorJob({ brief, project, provider: directorProvider, model: directorAssignment.model, targetDurationSeconds: Math.round(requestedMinutes * 60), narration: { provider: ttsProvider, model: ttsAssignment.model, voice: selectedVoice, speed: 1 }, ...(assetGeneration ? { assetGeneration } : {}) });
+      autoOpenDirector.current = true;
+      setDirectorJob(job); setDirectorJobId(job.id);
+      try { localStorage.setItem('autosub.animation-director-job-id', job.id); } catch { /* server result is still retained */ }
+    } catch (error) { setDirectorError(friendlyErrorMessage(error, 'AI Director không thể dựng scene.')); setDirecting(false); }
+  };
+  const applyDirectorProject = (directed: AnimationProject) => {
+    setProject(directed); setSceneId(directed.scenes[0]?.id || ''); setSelectedLayerId('');
+    setTimeMs(0); setSequenceTimeMs(0); setSequenceMode(false); setPlaying(false); setPersisted(false);
+    setDirectorWarning(directed.generationWarnings?.join('\n') || '');
+    onNotice(`AI Director đã dựng ${directed.scenes.length} scene có thể chỉnh sửa.`);
+  };
+  const restoreDirectorResult = async () => {
+    if (!directorJob) return;
+    try { applyDirectorProject(await api.animationDirectorResult(directorJob.id)); }
+    catch (error) { setDirectorError(friendlyErrorMessage(error, 'Không đọc được kết quả.')); }
+  };
+  const resumeDirector = async () => {
+    if (!directorJob) return;
+    if (directorJob.status === 'interrupted' && !window.confirm('Backend đã dừng giữa chừng. Hãy kiểm tra Flow không còn tác vụ đang chạy hoặc kết quả chưa được tải về. Chỉ tiếp tục sau khi kiểm tra để tránh tạo trùng. Bạn đã kiểm tra chưa?')) return;
+    try {
+      const input = await api.animationDirectorInput(directorJob.id);
+      const currentProvider = (id: string) => { const found = providers.find((item) => item.id === id && item.enabled); if (!found) throw new Error('Provider của job không còn sẵn sàng. Kiểm tra Cài đặt.'); return found; };
+      input.provider = currentProvider(input.provider.id);
+      if (input.narration) input.narration.provider = currentProvider(input.narration.provider.id);
+      if (input.assetGeneration?.provider) input.assetGeneration.provider = currentProvider(input.assetGeneration.provider.id);
+      const job = await api.startAnimationDirectorJob(input, directorJob.id);
+      autoOpenDirector.current = true; setDirectorJob(job); setDirecting(true); setDirectorError('');
+      // Resume uses the same id; reset the polling effect explicitly.
+      setDirectorPollRevision((value) => value + 1);
+    } catch (error) { setDirectorError(friendlyErrorMessage(error, 'Không tiếp tục được job.')); }
+  };
+  const cancelDirector = async () => {
+    if (!directorJob) return;
+    try { setDirectorJob(await api.cancelAnimationDirectorJob(directorJob.id)); }
+    catch (error) { setDirectorError(friendlyErrorMessage(error, 'Không gửi được yêu cầu dừng.')); }
   };
   const directBatch = async () => {
+    const requestedMinutes = Number(targetMinutes.replace(',', '.'));
+    if (!Number.isFinite(requestedMinutes) || requestedMinutes <= 0) { onNotice('Hãy nhập thời lượng video lớn hơn 0 phút.', 'error'); return; }
+    if (!ttsProvider || !ttsAssignment?.model) { onNotice('Hãy cấu hình provider/model TTS để tạo voiceover.', 'error'); return; }
     if (!directorProvider || !directorAssignment?.model) { onNotice('Hãy cấu hình provider/model AI.', 'error'); return; }
     if (autoGenerateAssets && usingFlowAgentAssets && !flowAgent?.connected) { onNotice('Flow Agent chưa sẵn sàng. Hãy mở Google Flow và tải lại tab.', 'error'); return; }
     const briefs = brief.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
@@ -354,7 +412,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     setBatching(true);
     try {
       const assetGeneration = autoGenerateAssets ? selectedAssetGeneration() : undefined;
-      const result = await api.batchDirectAnimationProjects({ briefs, template: project, provider: directorProvider, model: directorAssignment.model, ...(assetGeneration ? { assetGeneration } : {}) });
+      const result = await api.batchDirectAnimationProjects({ briefs, template: project, provider: directorProvider, model: directorAssignment.model, targetDurationSeconds: Math.round(requestedMinutes * 60), narration: { provider: ttsProvider, model: ttsAssignment.model, voice: ttsVoice || ttsProvider.voices?.[0]?.id || '', speed: 1 }, ...(assetGeneration ? { assetGeneration } : {}) });
       const first = result.results.find((item) => item.project)?.project;
       if (first) { setProject(first); setSceneId(first.scenes[0]?.id || ''); setPersisted(true); }
       onNotice(`Batch hoàn tất ${result.completed}/${result.total} project${result.failed ? `, lỗi ${result.failed}` : ''}.`, result.failed ? 'error' : 'success');
@@ -403,9 +461,18 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const restoreVersion = async (versionId: string) => { try { const restored = await api.restoreAnimationProjectVersion(project.id, versionId); setProject(restored); setSceneId(restored.scenes[0]?.id || ''); setSelectedLayerId(''); setTimeMs(0); setHistoryOpen(false); onNotice('Đã khôi phục version project.'); } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể khôi phục version.'), 'error'); } };
   const exportJson = () => { const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${project.name.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'animation-project'}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); };
   const exportSrt = () => {
-    let offsetMs = 0; let cueNumber = 1; const cues: string[] = [];
+    let cueNumber = 1; const cues: string[] = [];
+    const renderRanges = buildRenderTimeline(project);
     for (const item of compositeScenes) {
+      const range = renderRanges.find((candidate) => candidate.scene.id === item.id);
+      const offsetMs = range ? Math.round(range.from / Math.max(1, project.fps) * 1000) : 0;
       const subtitle = item.layers.find((layer) => layer.type === 'text' && layer.name.startsWith('Voiceover · Subtitle'));
+      if (subtitle?.captionTimings?.length) {
+        for (const timing of subtitle.captionTimings) {
+          cues.push(`${cueNumber++}\n${srtTimestamp(offsetMs + timing.startMs)} --> ${srtTimestamp(offsetMs + timing.endMs)}\n${timing.text}\n`);
+        }
+        continue;
+      }
       const words = String(subtitle?.text || item.narration || '').trim().split(/\s+/).filter(Boolean);
       const groups = Array.from({ length: Math.ceil(words.length / 7) }, (_, index) => words.slice(index * 7, index * 7 + 7));
       let usedWords = 0;
@@ -415,7 +482,6 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         const end = offsetMs + Math.round(item.durationMs * usedWords / Math.max(1, words.length));
         cues.push(`${cueNumber++}\n${srtTimestamp(start)} --> ${srtTimestamp(end)}\n${group.join(' ')}\n`);
       }
-      offsetMs += item.durationMs;
     }
     if (!cues.length) { onNotice('Project chưa có lời dẫn để xuất SRT.', 'error'); return; }
     const blob = new Blob([`\uFEFF${cues.join('\n')}`], { type: 'application/x-subrip;charset=utf-8' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${project.name.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'autosub-animation'}.srt`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -506,7 +572,13 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       <div className="animation-director-heading"><span><Sparkles size={16} aria-hidden="true" /> AI Director</span><small>{directorProvider ? `${directorProvider.name} · ${directorAssignment?.model || ''}` : 'Chưa cấu hình AI Director'}</small></div>
       <label className="animation-director-prompt"><span className="sr-only">Ý tưởng hoặc kịch bản</span><textarea value={brief} onChange={(event) => setBrief(event.target.value)} placeholder="Mô tả video bạn muốn tạo…" /></label>
       <div className="animation-director-options"><label className="animation-duration"><span>Thời lượng video</span><input aria-label="Thời lượng video tính bằng phút" type="number" min="0.1" step="0.5" value={targetMinutes} onChange={(event) => setTargetMinutes(event.target.value)} /><span>phút</span></label><label className="animation-director-voice"><span>Giọng đọc</span>{ttsVoices.length ? <select aria-label="Chọn giọng đọc" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} title={ttsProvider?.name}>{ttsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name || voice.id}{voice.language ? ` · ${voice.language}` : ''}</option>)}</select> : <input aria-label="Voice ID" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} placeholder={ttsProvider ? 'Nhập Voice ID' : 'Chưa cấu hình TTS'} disabled={!ttsProvider} />}</label><label className="animation-subtitle-toggle"><input type="checkbox" checked={showSubtitles} onChange={(event) => setShowSubtitles(event.target.checked)} /><span>Phụ đề</span></label><label className="animation-subtitle-size"><span>Cỡ chữ</span><input aria-label="Cỡ chữ phụ đề" type="number" min="16" max="120" value={subtitleFontSize} onChange={(event) => updateSubtitleFontSize(Math.max(16, Math.min(120, Number(event.target.value) || 16)))} /></label>{subtitleLayer && <button className="button quiet animation-edit-subtitle" type="button" onClick={() => setSelectedLayerId(subtitleLayer.id)}>Sửa câu hiện tại</button>}<label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tự tạo asset thiếu</span></label>{autoGenerateAssets && <select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => { const value = event.target.value; setImageProviderId(value); setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1'); }}><option value="flow-agent">Flow Agent · Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : ' · chưa kết nối'}</option>{providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}<button className="button quiet" type="button" disabled={batching || directing} onClick={() => void directBatch()}>{batching ? 'Đang chạy…' : 'Tạo hàng loạt'}</button><button className="button primary" type="button" disabled={directing || batching || brief.trim().length < 10 || (autoGenerateAssets && usingFlowAgentAssets && !flowAgent?.connected) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang viết kịch bản và tạo voice…' : 'Dựng video hoàn chỉnh'}</button><button className="button animation-flow-motion" type="button" disabled={startingMotion || Boolean(motionJob && activeMotionStates.has(motionJob.status)) || !flowAgent?.connected || !compositeScenes.length} onClick={() => void createMotionVideo()}><Sparkles size={14} aria-hidden="true" /> {startingMotion ? 'Đang bắt đầu…' : motionJob && activeMotionStates.has(motionJob.status) ? `${motionJob.progressPercent}% · ${motionJob.stage}` : 'Tạo video chuyển động AI'}</button>{motionJob && activeMotionStates.has(motionJob.status) && <button className="button animation-flow-cancel" type="button" onClick={() => void cancelMotionVideo()}><X size={14} aria-hidden="true" /> Dừng tạo video AI</button>}{motionJob?.status === 'completed' && motionJob.result && <a className="button animation-flow-result" href={aiVideoUrl(motionJob.id, true)}><Download size={14} aria-hidden="true" /> Tải bản AI</a>}{motionJob?.status === 'failed' && <p className="animation-flow-error" role="alert">{motionJob.error || 'Flow Agent không tạo được video chuyển động.'}</p>}</div>
-      {directorError && <div className="animation-director-error" role="alert"><details><summary>Không thể dựng video. Xem lỗi</summary><p>{directorError}</p></details><button type="button" aria-label="Đóng thông báo lỗi" onClick={() => setDirectorError('')}><X size={14} aria-hidden="true" /></button></div>}
+      {directorJob && <div className="animation-director-job">
+        <p role="status" aria-live="polite">{directorJob.stage}</p>
+        {directing && <button className="button quiet" type="button" onClick={() => void cancelDirector()}>Dừng dựng animation</button>}
+        {['failed', 'interrupted', 'cancelled'].includes(directorJob.status) && <button className="button quiet" type="button" onClick={() => void resumeDirector()}>Tiếp tục job đã lưu</button>}
+        {directorJob.hasResult && <button className="button quiet" type="button" onClick={() => void restoreDirectorResult()}>Mở kết quả đã lưu</button>}
+      </div>}
+      {directorError && <div className="animation-director-error" role="alert"><details><summary>Lỗi hoặc gián đoạn kết nối. Xem chi tiết</summary><p>{directorError}</p></details><button type="button" aria-label="Đóng thông báo lỗi" onClick={() => setDirectorError('')}><X size={14} aria-hidden="true" /></button></div>}
       {directorWarning && <div className="animation-director-error warning" role="status"><details><summary>Video đang dùng ảnh thay thế. Xem chi tiết</summary><p>{directorWarning}</p></details><button type="button" aria-label="Đóng cảnh báo" onClick={() => setDirectorWarning('')}><X size={14} aria-hidden="true" /></button></div>}
     </div>
     <details className="animation-edit-disclosure"><summary>Chỉnh sửa bằng AI <ChevronDown size={14} aria-hidden="true" /></summary>

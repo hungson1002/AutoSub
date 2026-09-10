@@ -12,11 +12,35 @@ import { batchDirectAnimationProjects, directAnimationProject, editAnimationProj
 import { enqueueAnimationProjectRender, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
 import { generateAnimationAsset, generateAnimationNarration, getAnimationAssetFile, listAnimationAssets, registerAnimationAsset, resolveAnimationAssets, updateAnimationAsset } from '../services/animationAssets';
 import { autoFixAnimationQuality, checkAnimationQuality } from '../services/animationQuality';
+import { buildAnimationAssetManifest } from '../services/animationManifest';
+import { animationDirectorJobs } from '../services/animationDirectorJobs';
 
 const message = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
 export async function animationStudioRoutes(app: FastifyInstance) {
   await initializeAnimationRenderJobs();
+  await animationDirectorJobs.initialize();
+  app.post('/api/animation-studio/director-jobs', async (request, reply) => {
+    try { const body = request.body as { input: Parameters<typeof directAnimationProject>[0]; resumeId?: string }; return reply.code(202).send(await animationDirectorJobs.start(body.input, body.resumeId)); }
+    catch (error) { return reply.code(400).send({ error: message(error, 'Không thể bắt đầu job Animation.') }); }
+  });
+  app.get('/api/animation-studio/director-jobs', async (request) => animationDirectorJobs.list((request.query as { projectId?: string }).projectId));
+  app.get('/api/animation-studio/director-jobs/:id', async (request, reply) => {
+    try { return animationDirectorJobs.get((request.params as { id: string }).id); }
+    catch (error) { return reply.code(404).send({ error: message(error, 'Không tìm thấy job.') }); }
+  });
+  app.get('/api/animation-studio/director-jobs/:id/result', async (request, reply) => {
+    try { return await animationDirectorJobs.result((request.params as { id: string }).id); }
+    catch (error) { return reply.code(404).send({ error: message(error, 'Chưa có kết quả.') }); }
+  });
+  app.get('/api/animation-studio/director-jobs/:id/input', async (request, reply) => {
+    try { return await animationDirectorJobs.input((request.params as { id: string }).id); }
+    catch (error) { return reply.code(404).send({ error: message(error, 'Không đọc được đầu vào job.') }); }
+  });
+  app.post('/api/animation-studio/director-jobs/:id/cancel', async (request, reply) => {
+    try { return await animationDirectorJobs.cancel((request.params as { id: string }).id); }
+    catch (error) { return reply.code(400).send({ error: message(error, 'Không dừng được job.') }); }
+  });
   app.addContentTypeParser('video/webm', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
 
   app.get('/api/animation-studio/assets', async (request) => listAnimationAssets(String((request.query as { q?: string }).q || '')));
@@ -66,6 +90,10 @@ export async function animationStudioRoutes(app: FastifyInstance) {
   });
   app.post('/api/animation-studio/quality-check', async (request) => ({ issues: checkAnimationQuality(request.body as Parameters<typeof checkAnimationQuality>[0]) }));
   app.post('/api/animation-studio/quality-fix', async (request) => autoFixAnimationQuality(request.body as Parameters<typeof autoFixAnimationQuality>[0]));
+  app.post('/api/animation-studio/asset-manifest', async (request, reply) => {
+    try { return buildAnimationAssetManifest(request.body as Parameters<typeof buildAnimationAssetManifest>[0]); }
+    catch (error) { return reply.code(400).send({ error: message(error, 'Không thể tạo manifest asset.') }); }
+  });
   app.post('/api/animation-studio/projects/validate', async (request) => {
     const issues = validateAnimationProject(request.body);
     return { valid: issues.length === 0, issues };

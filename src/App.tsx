@@ -9,6 +9,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { ReviewPage } from "./pages/ReviewPage";
 import { VoiceClonePage } from "./pages/VoiceClonePage";
 import { DouyinPage } from "./pages/DouyinPage";
+import { DouyinWorkspace } from './components/DouyinWorkspace';
 import { ProductAdPage } from "./pages/ProductAdPage";
 import { AutoPipelinePage } from "./pages/AutoPipelinePage";
 import { AiVideoPage } from "./pages/AiVideoPage";
@@ -23,6 +24,7 @@ import {
 
 export default function App() {
   const [page, setPage] = useState<Page>("translate");
+  const [douyinDraft, setDouyinDraft] = useState('');
   const [providers, setProviders] = useState<AIProvider[]>(() =>
     storage.providers(),
   );
@@ -195,8 +197,15 @@ export default function App() {
             onNotice={notice}
           />
         )}
+        {page === 'douyin-search' && <main className="page douyin-page"><DouyinWorkspace onAdd={(urls) => {
+          setDouyinDraft((current) => [current.trim(), ...urls.filter((url) => !current.includes(url))].filter(Boolean).join('\n'));
+          setPage('douyin');
+          notice(`Đã chuyển ${urls.length} link sang tab tải video. Chưa bắt đầu tải.`);
+        }} /></main>}
         {page === "douyin" && (
           <DouyinPage
+            initialText={douyinDraft}
+            onTextChange={setDouyinDraft}
             onAssetChange={setAsset}
             onOpenExtract={(a) => {
               setAsset(a);

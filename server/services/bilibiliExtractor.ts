@@ -72,6 +72,31 @@ export function isBilibiliUrl(rawUrl: string) {
   }
 }
 
+class BilibiliHttpError extends Error {
+  constructor(public status: number) { super(`Bilibili trả về mã HTTP ${status}.`); }
+}
+
+export function readBilibiliPageMetadata(html: string): BilibiliViewData {
+  // Read embedded JSON only. Never execute scripts from a remote page.
+  const marker = /window\.__INITIAL_STATE__\s*=\s*/g.exec(html);
+  if (!marker) throw new Error('Trang Bilibili không chứa thông tin video công khai.');
+  const start = marker.index + marker[0].length;
+  let depth = 0, quoted = false, escaped = false;
+  for (let i = start; i < Math.min(html.length, start + 3_000_000); i++) {
+    const char = html[i];
+    if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false; continue; }
+    if (char === '"') quoted = true;
+    else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) {
+      const state = JSON.parse(html.slice(start, i + 1));
+      const video = state.videoData;
+      if (!video || typeof video.bvid !== 'string' || !Number.isSafeInteger(video.cid) || video.cid <= 0 || typeof video.title !== 'string') break;
+      return video;
+    }
+  }
+  throw new Error('Không đọc được thông tin video trên trang Bilibili.');
+}
+
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
     headers: BILIBILI_HEADERS,
@@ -79,7 +104,7 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
       ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
       : AbortSignal.timeout(15_000),
   });
-  if (!response.ok) throw new Error(`Bilibili trả về mã HTTP ${response.status}.`);
+  if (!response.ok) throw new BilibiliHttpError(response.status);
   return response.json() as Promise<T>;
 }
 
@@ -118,10 +143,18 @@ export async function resolveBilibiliUrl(rawUrl: string, signal?: AbortSignal, q
 
   const isBvid = /^BV/i.test(idMatch[1]);
   const lookup = isBvid ? `bvid=${encodeURIComponent(idMatch[1])}` : `aid=${encodeURIComponent(idMatch[1])}`;
-  const view = await getJson<{ code: number; message?: string; data?: BilibiliViewData }>(
-    `https://api.bilibili.com/x/web-interface/view?${lookup}`,
-    signal,
-  );
+  let view: { code: number; message?: string; data?: BilibiliViewData };
+  try {
+    view = await getJson<typeof view>(`https://api.bilibili.com/x/web-interface/view?${lookup}`, signal);
+  } catch (error) {
+    if (!(error instanceof BilibiliHttpError) || error.status !== 412) throw error;
+    const publicUrl = `https://www.bilibili.com/video/${isBvid ? idMatch[1] : `av${idMatch[1]}`}/`;
+    const response = await fetch(publicUrl, { headers: BILIBILI_HEADERS, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error(`Bilibili từ chối cả trang công khai (HTTP ${response.status}). Hãy kiểm tra video trên trình duyệt rồi thử lại sau.`);
+    const data = readBilibiliPageMetadata(await response.text());
+    if (isBvid ? data.bvid !== idMatch[1] : String(data.aid) !== idMatch[1]) throw new Error('Thông tin trang Bilibili không khớp video yêu cầu.');
+    view = { code: 0, data };
+  }
   if (view.code !== 0 || !view.data) {
     throw new Error(view.message || 'Không thể đọc thông tin video Bilibili.');
   }

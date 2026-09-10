@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AIProvider, AIVoice, AppSettings, ProviderAssignment, ReviewAspectRatio, ReviewJobStatus, VideoAsset } from '../types';
-import { api, friendlyErrorMessage, MAX_BROWSER_UPLOAD_BYTES, reviewVideoUrl } from '../lib/api';
+import { api, friendlyErrorMessage, MAX_BROWSER_UPLOAD_BYTES, reviewVideoUrl, reviewSubtitleUrl } from '../lib/api';
 import { capabilityAssignments } from '../lib/settings';
 import { resolvedProviderType } from '../lib/providers';
 import { CapabilityAssignmentPicker } from '../components/CapabilityAssignmentPicker';
@@ -63,6 +63,7 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
   const [voice, setVoice] = useState('');
   const [voiceSpeed, setVoiceSpeed] = useState(1.15);
   const [testingVoice, setTestingVoice] = useState(false);
+  const [submittingJob, setSubmittingJob] = useState(false);
   const [cloneVoices, setCloneVoices] = useState<AIVoice[]>([]);
   const [job, setJob] = useState<ReviewJobStatus>();
   const [youtube, setYoutube] = useState<YouTubeConnection>({ connected: false });
@@ -214,11 +215,13 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
     }
   };
 
-  const startJob = async () => {
+  const startJob = async (retry = false) => {
+    if (submittingJob) return;
     if (!asset?.uploadId) { onNotice('Hãy chọn video và chờ lưu xong trước.', 'error'); return; }
     if (!sttProvider || !visionProvider || !scriptProvider || !ttsProvider || !sttAssignment.model || !visionAssignment.model || !scriptAssignment.model || !ttsAssignment.model) { onNotice('Cấu hình STT, Vision, Script hoặc TTS còn thiếu.', 'error'); return; }
     if (!voice) { onNotice('Hãy chọn Voice ID cho phần lồng tiếng.', 'error'); return; }
     try {
+      setSubmittingJob(true);
       const created = await api.createReviewJob({
         uploadId: asset.uploadId,
         sourceLanguage,
@@ -233,11 +236,12 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
         vision: { provider: visionProvider, model: visionAssignment.model },
         script: { provider: scriptProvider, model: scriptAssignment.model },
         tts: { provider: ttsProvider, model: ttsAssignment.model, voice, speed: voiceSpeed },
-      });
+      }, undefined, retry ? job?.id : undefined);
       localStorage.setItem(reviewJobStorageKey, created.id);
       setJob(created);
       onNotice('Đã bắt đầu dựng video review tự động.');
     } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo review job.'), 'error'); }
+    finally { setSubmittingJob(false); }
   };
 
   const cancelJob = async () => {
@@ -337,7 +341,7 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
           <div className="field"><span>Yêu cầu thêm <small>· không bắt buộc</small></span><textarea value={customPrompt} onChange={(event) => setCustomPrompt(event.target.value)} placeholder="Ví dụ: tập trung vào diễn xuất, tránh spoil đoạn kết…" /></div>
           <label className="toggle-row compact"><input type="checkbox" checked={burnSubtitles} onChange={(event) => setBurnSubtitles(event.target.checked)} /><i /><span>Đốt phụ đề tiếng Việt vào video</span></label>
           <div className="review-safety-note"><ShieldCheck size={16} /><span>AutoSub dùng đoạn hình để minh họa cho bài bình luận mới. Hệ thống không lật hình, tăng tốc hay cắt vụn nhằm né Content ID.</span></div>
-          <button className="button primary large full" disabled={running || mediaAction !== 'idle'} onClick={() => void startJob()}><WandSparkles size={16} /> {running ? 'Pipeline đang chạy…' : 'Tạo video review'} <span>→</span></button>
+          <button className="button primary large full" disabled={submittingJob || running || mediaAction !== 'idle'} onClick={() => void startJob()}><WandSparkles size={16} /> {running ? 'Pipeline đang chạy…' : 'Tạo video review'} <span>→</span></button>
         </section>
       </div>
 
@@ -348,7 +352,8 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
             <div className={`review-status ${job.status}`}><span>{activeReviewStates.has(job.status) && <LoaderCircle size={16} className="spin" />}{job.status === 'completed' && <Check size={16} />}{['failed', 'cancelled'].includes(job.status) && <X size={16} />}</span><div><strong>{job.stage}</strong><small>{job.error || job.warnings.at(-1)}</small></div><b>{job.progressPercent}%</b></div>
             <div className="progress-track review-progress"><div style={{ width: `${job.progressPercent}%` }} /></div>
             {running && <button className="button small ghost danger review-cancel" onClick={() => void cancelJob()}><X size={14} /> Hủy job</button>}
-            {job.status === 'completed' && <div className="review-result"><video controls preload="metadata" src={reviewVideoUrl(job.id)} /><div className="review-result-meta"><div><span>Thời lượng</span><strong>{formatDuration(job.result?.durationMs)}</strong></div><div><span>Số cảnh</span><strong>{job.plan?.segments.length || 0}</strong></div><a className="button primary" href={reviewVideoUrl(job.id, true)}>Tải MP4</a></div></div>}
+            {['failed', 'cancelled'].includes(job.status) && <div><button className="button primary" disabled={submittingJob || mediaAction !== 'idle'} onClick={() => void startJob(true)}>{submittingJob ? 'Đang tiếp tục…' : 'Thử lại'}</button><p>Dùng lại dữ liệu STT/Vision đã lưu; chạy lại từ bước kịch bản với cấu hình hiện tại.</p></div>}
+            {job.status === 'completed' && <div className="review-result"><video controls preload="metadata" src={reviewVideoUrl(job.id)} /><div className="review-result-meta"><div><span>Thời lượng</span><strong>{formatDuration(job.result?.durationMs)}</strong></div><div><span>Số cảnh</span><strong>{job.plan?.segments.length || 0}</strong></div><a className="button primary" href={reviewVideoUrl(job.id, true)}>Tải MP4</a><a className="button" href={reviewSubtitleUrl(job.id)} download="review.srt">Tải SRT</a></div></div>}
             {job.plan && <details className="review-plan" open={job.status === 'completed'}><summary>Kịch bản và danh sách cảnh</summary><div className="review-plan-heading"><strong>{job.plan.title}</strong>{job.plan.movieTitle && <p><b>Phim:</b> {job.plan.movieTitle}</p>}<p>{job.plan.description}</p>{job.plan.characters?.length ? <p><b>Nhân vật:</b> {job.plan.characters.map((character) => `${character.name} – ${character.role}`).join('; ')}</p> : null}{job.plan.lesson && <p><b>Ghi chú cuối:</b> {job.plan.lesson}</p>}</div><div className="review-segment-list">{job.plan.segments.map((segment, index) => <div key={segment.id}><span>{String(index + 1).padStart(2, '0')}</span><p>{segment.narration}</p><small>{formatDuration(segment.sourceStartMs)} → {formatDuration(segment.sourceEndMs)}</small></div>)}</div></details>}
           </>}
         </section>

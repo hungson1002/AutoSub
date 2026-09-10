@@ -1,6 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isBilibiliUrl, resolveBilibiliUrl } from './bilibiliExtractor';
+import { isBilibiliUrl, resolveBilibiliUrl, readBilibiliPageMetadata } from './bilibiliExtractor';
+
+test('page metadata parser reads JSON without executing trailing scripts', () => {
+  const videoData = { bvid: 'BVtest', cid: 123, title: 'A } " title', aid: 1 };
+  assert.deepEqual(readBilibiliPageMetadata(`window.__INITIAL_STATE__=${JSON.stringify({ videoData })};throw new Error('must not execute')`), videoData);
+  assert.throws(() => readBilibiliPageMetadata('window.__INITIAL_STATE__=alert(1)'));
+});
+
+test('metadata 412 falls back to public page without login and retains quality', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(new Headers(init?.headers).has('cookie'), false);
+    const url = String(input);
+    if (url.includes('/x/web-interface/view')) return new Response('', { status: 412 });
+    if (url.startsWith('https://www.bilibili.com/video/')) return new Response(`window.__INITIAL_STATE__=${JSON.stringify({ videoData: { bvid: 'BVtest', cid: 123, aid: 1, title: 'test', duration: 30 } })};`);
+    assert.match(url, /qn=16&/);
+    return Response.json({ code: 0, data: { timelength: 30000, durl: [{ url: 'https://cdn.example/video.mp4', length: 30000 }] } });
+  };
+  try { assert.equal((await resolveBilibiliUrl('https://www.bilibili.com/video/BVtest', undefined, 16)).title, 'test'); }
+  finally { globalThis.fetch = original; }
+});
 
 test('isBilibiliUrl accepts supported public video hosts', () => {
   assert.equal(isBilibiliUrl('https://www.bilibili.com/video/BV1xx411c7mD'), true);

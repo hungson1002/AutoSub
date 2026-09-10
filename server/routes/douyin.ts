@@ -10,6 +10,10 @@ import {
   cancelBatchItem,
 } from '../services/douyinDownloader';
 import { closeDouyinExtractor } from '../services/douyinExtractor';
+import { searchDouyinVideos } from '../services/douyinSearch';
+import { validateDouyinSearch } from '../services/douyinSearch';
+import { douyinCookieStore } from '../services/douyinCookie';
+import { runDouyinTool } from '../services/douyinTools';
 
 const THUMBNAIL_HOST_SUFFIXES = [
   '.hdslb.com',
@@ -31,6 +35,40 @@ function isSupportedThumbnailUrl(rawUrl: string) {
 }
 
 export async function douyinRoutes(app: FastifyInstance) {
+  app.post('/api/douyin/tools', { bodyLimit: 16000 }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const allowed = new Set(['http://localhost:5173', 'http://127.0.0.1:5173', `${request.protocol}://${request.headers.host}`]);
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.ip) || (request.headers.origin && !allowed.has(request.headers.origin))) return reply.code(403).send({ error: 'Chỉ dùng công cụ tài khoản từ AutoSub trên máy này.' });
+    try { return await runDouyinTool(request.body); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không hoàn tất thao tác.' }); }
+  });
+  app.route({
+    method: ['GET', 'PUT', 'DELETE'], url: '/api/douyin/search-cookie', bodyLimit: 24000,
+    handler: async (request, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      const origin = request.headers.origin;
+      const allowed = new Set(['http://localhost:5173', 'http://127.0.0.1:5173', `${request.protocol}://${request.headers.host}`]);
+      if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.ip) || (origin && !allowed.has(origin))) return reply.code(403).send({ error: 'Chỉ quản lý cookie trên máy AutoSub.' });
+      try {
+        if (request.method === 'PUT') {
+          const cookie = (request.body as { cookie?: unknown })?.cookie;
+          validateDouyinSearch({ keyword: 'cookie', cookie });
+          if (typeof cookie !== 'string' || !cookie.trim()) return reply.code(400).send({ error: 'Nhập cookie trước khi lưu.' });
+          await douyinCookieStore.save(cookie.trim());
+        }
+        if (request.method === 'DELETE') await douyinCookieStore.save('');
+        return { saved: await douyinCookieStore.has(), environment: !!process.env.DY_COOKIES?.trim() };
+      } catch { return reply.code(400).send({ error: 'Không lưu/đọc được cookie. Kiểm tra quyền Windows và định dạng cookie.' }); }
+    },
+  });
+  app.post('/api/douyin/search', { bodyLimit: 24000 }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const origin = request.headers.origin;
+    const trustedOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173', `${request.protocol}://${request.headers.host}`]);
+    if (origin && !trustedOrigins.has(origin)) return reply.code(403).send({ error: 'Chỉ mở tìm kiếm từ giao diện AutoSub.' });
+    try { return await searchDouyinVideos(request.body); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không tìm kiếm được Douyin.' }); }
+  });
   app.addHook('onClose', closeDouyinExtractor);
 
   app.get('/api/douyin/thumbnail', async (request, reply) => {

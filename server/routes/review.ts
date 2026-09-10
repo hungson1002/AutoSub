@@ -1,7 +1,7 @@
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import type { CreateReviewJobInput } from '../services/reviewJobs';
-import { cancelReviewJob, createReviewJob, getReviewJob, getReviewResult } from '../services/reviewJobs';
+import { cancelReviewJob, createReviewJob, retryReviewJob, getReviewJob, getReviewResult, getReviewSubtitles } from '../services/reviewJobs';
 import { beginYouTubeConnection, disconnectYouTube, finishYouTubeConnection, markReviewYouTubeDecision, refreshReviewYouTubeStatus, startReviewYouTubeUpload, youtubeConnectionStatus } from '../services/youtubeReview';
 
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
@@ -11,6 +11,24 @@ function sendRouteError(reply: { code: (status: number) => { send: (value: unkno
 }
 
 export async function reviewRoutes(app: FastifyInstance) {
+  app.get('/api/review/jobs/:id/subtitles.srt', async (request, reply) => {
+    try {
+      const result = await getReviewSubtitles(String((request.params as { id: string }).id));
+      return reply.type('application/x-subrip; charset=utf-8')
+        .header('Content-Disposition', 'attachment; filename="review.srt"')
+        .header('Content-Length', result.size)
+        .send(createReadStream(result.path));
+    } catch (error) {
+      return sendRouteError(reply, error, 'Phụ đề review chưa sẵn sàng.', 404);
+    }
+  });
+  app.post('/api/review/jobs/:id/retry', async (request, reply) => {
+    try {
+      return reply.code(202).send(await retryReviewJob(String((request.params as { id: string }).id), request.body as CreateReviewJobInput));
+    } catch (error) {
+      return sendRouteError(reply, error, 'Không thể thử lại review job.');
+    }
+  });
   app.post('/api/review/jobs', async (request, reply) => {
     try {
       const job = await createReviewJob(request.body as CreateReviewJobInput);

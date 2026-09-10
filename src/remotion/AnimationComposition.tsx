@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { Audio } from '@remotion/media';
-import { AbsoluteFill, Img, Sequence, interpolate, useCurrentFrame, useVideoConfig } from 'remotion';
+import { AbsoluteFill, Img, OffthreadVideo, Sequence, interpolate, useCurrentFrame, useVideoConfig } from 'remotion';
 import type { AnimationAsset, AnimationCommand, AnimationProject, CompositeScene, EvaluatedLayer } from './types';
 import { evaluateScene } from '../animationStudio/evaluator';
 import { buildRenderTimeline } from './timeline';
@@ -46,6 +46,10 @@ function spriteStyle(asset: AnimationAsset, layer: EvaluatedLayer, scene: Compos
 }
 
 function SubtitleText({ layer, timeMs }: { layer: EvaluatedLayer; timeMs: number }) {
+  if (layer.captionTimings?.length) {
+    const active = layer.captionTimings.find((timing) => timeMs >= timing.startMs && timeMs < timing.endMs);
+    return <>{active?.text || ''}</>;
+  }
   const timings = layer.wordTimings || [];
   if (!timings.length) return <>{layer.text || layer.name}</>;
   const found = timings.findIndex((timing) => timeMs < timing.endMs);
@@ -91,12 +95,12 @@ function SceneComposition({ scene, project, origin, showSubtitles, sceneDuration
     <div style={{ position: 'absolute', inset: 0, transformOrigin: '50% 50%', transform: `translate(${camera.position.x}px, ${camera.position.y}px) rotate(${camera.rotation}deg) scale(${camera.scale.x}, ${camera.scale.y})`, opacity: clamp(camera.opacity, 0, 1) }}>
       {evaluated.layers.filter((layer) => layer.type !== 'audio' && (showSubtitles || !subtitleName(layer.name))).map((layer) => <VisualLayer key={layer.id} layer={layer} assets={project.assets} scene={scene} timeMs={timeMs} origin={origin} evaluatedLayers={evaluated.layers} />)}
     </div>
-    {scene.layers.filter((layer) => layer.type === 'audio' && layer.assetId).map((layer) => {
+    {scene.layers.filter((layer) => layer.type === 'audio' && layer.visible && layer.assetId).map((layer) => {
       const asset = project.assets.find((item) => item.id === layer.assetId); if (!asset) return null;
       const from = Math.max(0, Math.round((layer.startMs || 0) / 1000 * fps));
       const duration = layer.durationMs ? Math.max(1, Math.round(layer.durationMs / 1000 * fps)) : undefined;
       const music = asset.tags.some((tag) => /^(?:music|bgm|nhac)$/i.test(tag));
-      const hasVoice = scene.layers.some((item) => item.type === 'audio' && item.name.startsWith('Voiceover'));
+      const hasVoice = scene.layers.some((item) => item.type === 'audio' && item.visible && item.name.startsWith('Voiceover'));
       const volume = clamp((layer.volume ?? layer.transform.opacity) * (music && hasVoice ? .3 : 1), 0, 1);
       return <Sequence key={layer.id} from={from} durationInFrames={duration}><Audio src={assetUrl(asset.uri, origin)} volume={volume} /></Sequence>;
     })}
@@ -105,5 +109,10 @@ function SceneComposition({ scene, project, origin, showSubtitles, sceneDuration
 
 export function AnimationComposition({ project, showSubtitles, assetOrigin }: AnimationCompositionProps) {
   const timeline = buildRenderTimeline(project);
-  return <AbsoluteFill style={{ backgroundColor: '#090d13' }}>{timeline.map((range) => range.scene.renderMode === 'composite' ? <Sequence key={range.scene.id} from={range.from} durationInFrames={range.durationInFrames} premountFor={Math.min(project.fps, range.from)}><SceneComposition scene={range.scene} project={project} origin={assetOrigin} showSubtitles={showSubtitles} sceneDurationInFrames={range.durationInFrames} transitionInFrames={range.transitionInFrames} transitionOutFrames={range.transitionOutFrames} /></Sequence> : null)}</AbsoluteFill>;
+  return <AbsoluteFill style={{ backgroundColor: '#090d13' }}>{timeline.map((range) => {
+    if (range.scene.renderMode === 'generated-video' && !range.scene.source?.uri) throw new Error(`Scene ${range.scene.name} has no video source.`);
+    return <Sequence key={range.scene.id} from={range.from} durationInFrames={range.durationInFrames} premountFor={Math.min(project.fps, range.from)}>{range.scene.renderMode === 'composite'
+      ? <SceneComposition scene={range.scene} project={project} origin={assetOrigin} showSubtitles={showSubtitles} sceneDurationInFrames={range.durationInFrames} transitionInFrames={range.transitionInFrames} transitionOutFrames={range.transitionOutFrames} />
+      : <OffthreadVideo src={assetUrl(range.scene.source!.uri, assetOrigin)} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />}</Sequence>;
+  })}</AbsoluteFill>;
 }

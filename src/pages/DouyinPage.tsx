@@ -82,19 +82,24 @@ function formatEta(seconds?: number) {
 }
 
 export function DouyinPage({
+  initialText = '',
+  onTextChange,
   onAssetChange,
   onOpenExtract,
   onOpenReview,
   onOpenEditor,
   onNotice,
 }: {
+  initialText?: string;
+  onTextChange?: (text: string) => void;
   onAssetChange: (asset?: VideoAsset) => void;
   onOpenExtract: (asset: VideoAsset) => void;
   onOpenReview: (asset: VideoAsset) => void;
   onOpenEditor: (asset: VideoAsset) => void;
   onNotice: (message: string, kind?: "success" | "error") => void;
 }) {
-  const [inputText, setInputText] = useState("");
+  const [inputText, setInputText] = useState(initialText);
+  useEffect(() => { onTextChange?.(inputText); }, [inputText, onTextChange]);
   const [detectedUrls, setDetectedUrls] = useState<string[]>([]);
   const [batchJob, setBatchJob] = useState<DouyinBatchJob>();
   const [activeBatchId, setActiveBatchId] = useState<string>();
