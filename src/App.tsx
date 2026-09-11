@@ -197,7 +197,7 @@ export default function App() {
             onNotice={notice}
           />
         )}
-        {page === 'douyin-search' && <main className="page douyin-page"><DouyinWorkspace onAdd={(urls) => {
+        {page === 'douyin-search' && <main className="page douyin-page"><DouyinWorkspace settings={settings} providers={providers} onAdd={(urls) => {
           setDouyinDraft((current) => [current.trim(), ...urls.filter((url) => !current.includes(url))].filter(Boolean).join('\n'));
           setPage('douyin');
           notice(`Đã chuyển ${urls.length} link sang tab tải video. Chưa bắt đầu tải.`);

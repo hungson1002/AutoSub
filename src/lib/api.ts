@@ -98,7 +98,7 @@ export interface StorageSnapshot {
   categories: Array<{ id: string; label: string; description: string; sizeBytes: number; items: StorageItem[] }>;
 }
 
-type ApiError = Error & { detail?: string; status?: number; code?: string };
+type ApiError = Error & { detail?: string; status?: number; code?: string; context?: "export" };
 
 const quotaErrorPattern =
   /usage[_ -]?exceeded|insufficient[_ -]?quota|quota.{0,24}(exceed|exhaust|limit|empty)|(?:credit|credits).{0,24}(exhaust|used|limit|insufficient)|billing|monthly limit|plan limit/i;
@@ -118,6 +118,8 @@ export function friendlyErrorMessage(
         ? error
         : "";
   if (!raw) return fallback;
+  // Local render failures are not provider errors (even with HTTP 500).
+  if (typed?.context === "export") return raw;
   const status = typeof typed?.status === "number" ? typed.status : undefined;
   const lower = raw.toLowerCase();
   if (/google flow|flow client|recaptcha/i.test(raw)) return raw;
@@ -215,7 +217,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-const readError = async (response: Response, fallback: string) => {
+const readError = async (response: Response, fallback: string, context?: "export") => {
   const data = await response.json().catch(() => ({}));
   const genericFastifyError =
     data.error === "Bad Request" || data.error === "Internal Server Error";
@@ -225,12 +227,13 @@ const readError = async (response: Response, fallback: string) => {
       : data.error || data.message || fallback;
   const error = new Error(
     friendlyErrorMessage(
-      Object.assign(new Error(String(rawMessage)), { status: response.status }),
+      Object.assign(new Error(String(rawMessage)), { status: response.status, context }),
       fallback,
     ),
   ) as ApiError;
   error.detail = typeof data.detail === "string" ? data.detail : undefined;
   error.status = response.status;
+  error.context = context;
   error.code = typeof data.code === "string" ? data.code : undefined;
   throw error;
 };
@@ -253,11 +256,13 @@ function decodeBase64Json<T>(value: string | null): T | undefined {
 }
 
 export const api = {
+  douyinTrends: () => request<{ items: Array<{ topic: string; rank: number; heat: number | null }>; fetchedAt: string }>('/api/douyin/trends'),
+  assessDouyinTopic: (input: { topic: string; provider: AIProvider; model: string; items: Array<{ id: string; title: string }> }, signal?: AbortSignal) => request<{ items: Array<{ id: string; verdict: 'match' | 'uncertain' | 'off-topic'; reason: string }> }>('/api/douyin/relevance', { method: 'POST', body: JSON.stringify(input), signal }),
   runDouyinTool: (input: { operation: string; params: Record<string, string>; cursor: string; confirmed?: boolean; requestId?: string }) => request<{ data: unknown; write: boolean }>('/api/douyin/tools', { method: 'POST', body: JSON.stringify(input) }),
   douyinCookieStatus: () => request<{ saved: boolean; environment: boolean }>('/api/douyin/search-cookie'),
   saveDouyinCookie: (cookie: string) => request<{ saved: boolean; environment: boolean }>('/api/douyin/search-cookie', { method: 'PUT', body: JSON.stringify({ cookie }) }),
   deleteDouyinCookie: () => request<{ saved: boolean; environment: boolean }>('/api/douyin/search-cookie', { method: 'DELETE' }),
-  searchDouyin: (input: { keyword: string; sort: string; publishTime: string; cookie?: string; offset?: number; count?: number; searchId?: string; filterDuration?: string; searchRange?: string }) => request<{ warning: string; hasMore: boolean; nextOffset: number; searchId: string; items: Array<{ id: string; title: string; author: string; url: string; coverUrl?: string; duration: number; likes: number }> }>('/api/douyin/search', { method: 'POST', body: JSON.stringify(input) }),
+  searchDouyin: (input: { keyword: string; sort: string; publishTime: string; cookie?: string; offset?: number; count?: number; searchId?: string; filterDuration?: string; searchRange?: string; exactKeyword?: boolean; excludeKeywords?: string }) => request<{ warning: string; hasMore: boolean; nextOffset: number; searchId: string; items: Array<{ id: string; title: string; author: string; url: string; coverUrl?: string; duration: number; likes: number; comments: number; shares: number; publishedAt: number; views: number | null }> }>('/api/douyin/search', { method: 'POST', body: JSON.stringify(input) }),
   inspectStorage: (signal?: AbortSignal) => request<StorageSnapshot>('/api/storage', { signal }),
   deleteStorageItems: (items: Array<Pick<StorageItem, 'categoryId' | 'name'>>) => request<{ deletedCount: number; freedBytes: number; errors: Array<{ categoryId: string; name: string; error: string }> }>('/api/storage/delete', { method: 'POST', body: JSON.stringify({ items }) }),
   createAnimationProject: (input: { name: string; width: number; height: number; fps: number }) =>
@@ -752,6 +757,7 @@ export const api = {
       crf: number;
       keepAudio: boolean;
       originalVolume: number;
+      dubVolume?: number;
       burnSubtitles: boolean;
       separateVocals: boolean;
       blurRegions?: BlurRegion[];
@@ -776,6 +782,7 @@ export const api = {
         crf: options.crf,
         keepAudio: options.keepAudio,
         originalVolume: options.originalVolume,
+        dubVolume: options.dubVolume,
         burnSubtitles: options.burnSubtitles,
         separateVocals: options.separateVocals,
         blurRegions: options.blurRegions || [],
@@ -802,7 +809,7 @@ export const api = {
       body: form,
       signal,
     });
-    if (!response.ok) await readError(response, "Không thể xuất video.");
+    if (!response.ok) await readError(response, "Không thể xuất video.", "export");
     return response.blob();
   },
   exportAudio: async (
@@ -821,7 +828,7 @@ export const api = {
       body: JSON.stringify(options),
       signal,
     });
-    if (!response.ok) await readError(response, "Không thể xuất audio.");
+    if (!response.ok) await readError(response, "Không thể xuất audio.", "export");
     return response.blob();
   },
   getExportProgress: (id: string, signal?: AbortSignal) =>

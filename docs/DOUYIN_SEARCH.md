@@ -16,7 +16,20 @@ git -C workdir/tools/DouYin_Spider apply ../../../scripts/douyin-spider-optional
 
 Bản vá nằm trong source AutoSub; không chứa cookie. Đã kiểm tra trực tiếp truy vấn `搜索历史v`, trang đầu và trang tiếp theo đều trả video sau khi vá.
 
-Trang tải Douyin/Bilibili có mục **Tìm video Douyin**. Nhập từ khóa, chọn thứ tự/thời gian, chọn kết quả rồi thêm link vào quy trình tải hiện có. Mỗi lần tìm tối đa 20 video, không tự tải, bình luận, thích hoặc nhắn tin.
+Tab **Tìm video Douyin** cho chọn mục tiêu 10/20/25 video. Adapter quét tối đa 6 trang hoặc 70 giây mỗi lượt, giữ phần dư cuối trang và cho Tải thêm; không bảo đảm Douyin trả đủ số lượng. Không tự tải, bình luận, thích hoặc nhắn tin.
+
+## Bộ lọc nội dung
+
+- Nổi bật 7 ngày: tìm theo lượt thích trong 7 ngày của từ khóa, không phải bảng trending toàn Douyin.
+- Trên 1 giờ: gửi bộ lọc upstream trên 5 phút rồi chỉ giữ video có thời lượng thực lớn hơn 3.600 giây. Video thiếu thời lượng không được nhận.
+- Đúng cụm từ: kiểm tra tiêu đề/hashtag với Unicode chuẩn hóa, không phân biệt hoa thường; không tự dịch hoặc chấm điểm ngữ nghĩa.
+- Loại trừ: các cụm ngăn bằng dấu phẩy; loại video chứa bất kỳ cụm nào trong tiêu đề.
+- Các bộ lọc cục bộ chạy trước khi đếm mục tiêu, tiếp tục phân trang nếu chưa đủ. Kết quả rỗng không có nghĩa toàn Douyin không có video phù hợp.
+- Thẻ kết quả có thời lượng giờ:phút:giây, ngày đăng và lượt thích/bình luận/chia sẻ. Sắp xếp kết quả đã lấy không phải xếp hạng toàn nền tảng.
+- Nút dịch từ khóa dùng provider/model dịch trong Cài đặt, chỉ gọi khi người dùng bấm; hiển thị đề xuất để duyệt trước khi áp dụng. Có thể phát sinh phí provider. Đây là dịch từ khóa, không phải đánh giá ngữ nghĩa từng video.
+- Đánh giá chủ đề AI: dùng model dịch đã cấu hình, chạy tuần tự nhóm tối đa 20 video chưa đánh giá. Phân loại `match`, `uncertain`, `off-topic` từ tiêu đề/hashtag, không phân tích nội dung hình/âm thanh. Có nút dừng; lỗi giữ kết quả đã xong, lần tiếp theo chỉ xử lý phần chưa đánh giá. Tùy chọn ẩn lệch chủ đề vẫn giữ các video chưa chắc/chưa đánh giá. Không tự gửi yêu cầu AI nếu người dùng chưa bấm.
+- Bảng xu hướng đã có trong trang tìm kiếm: endpoint Douyin `aweme.snssdk.com/aweme/v1/hot/search/list/`, tham khảo giao thức từ https://github.com/SnailDev/douyin-hot-hub/blob/main/douyin.py. Đây là độ nóng **chủ đề**, không phải lượt xem/xếp hạng từng video. Lấy khi bấm nút, tối đa 50 mục, cache 5 phút, hiển thị thời điểm lấy. Chọn chủ đề điền bộ lọc tìm kiếm qua repo cv-cat; lỗi cập nhật giữ bảng cũ và ghi rõ chưa cập nhật. Đã gọi live thành công, 49 chủ đề. Không sao chép code repo hoặc gửi cookie sang nguồn bên thứ ba.
+- Ảnh thẻ sát mép, chỉ phần thông tin bên dưới có padding. Tiêu đề dài có thể mở rộng, ảnh lỗi có liên kết dự phòng. Lượt xem chỉ hiện khi `play_count` dương; thiếu/0 được ghi “Không công khai” vì không thể phân biệt số 0 thật với dữ liệu bị ẩn.
 
 ## Nguồn tích hợp
 

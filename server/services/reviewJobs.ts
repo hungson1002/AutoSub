@@ -40,8 +40,8 @@ const jobDirectory = (id: string) => path.join(jobsRoot, safeJobId(id));
 const jobFile = (id: string) => path.join(jobDirectory(id), 'job.json');
 const resultFile = (id: string) => path.join(jobDirectory(id), 'result', 'review.mp4');
 const subtitleFile = (id: string) => path.join(jobDirectory(id), 'result', 'review.srt');
-const reviewThreads = String(Math.round(clamp(Number(process.env.AUTOSUB_REVIEW_THREADS || 4), 1, 16)));
-const reviewConcurrency = Math.round(clamp(Number(process.env.AUTOSUB_REVIEW_CONCURRENCY || 2), 1, 4));
+const reviewThreads = String(Math.round(clamp(Number(process.env.AUTOSUB_REVIEW_THREADS || 8), 1, 16)));
+const reviewConcurrency = Math.round(clamp(Number(process.env.AUTOSUB_REVIEW_CONCURRENCY || 3), 1, 4));
 
 export async function reviewMapConcurrent<T, R>(items: T[], limit: number, signal: AbortSignal, task: (item: T, index: number) => Promise<R>, onComplete?: (completed: number) => Promise<unknown>): Promise<R[]> {
   const results = new Array<R>(items.length);

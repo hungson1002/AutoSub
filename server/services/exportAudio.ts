@@ -4,6 +4,7 @@ export type ExportAudioFilterOptions = {
   backgroundInputIndex?: number;
   keepAudio: boolean;
   originalVolume?: number;
+  dubVolume?: number;
   jobDubIncludesBackground?: boolean;
   originalInputLabel?: string;
 };
@@ -31,12 +32,14 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
     jobDubIncludesBackground = false,
     originalInputLabel = "0:a",
   } = options;
+  const dubVolume = clamp(Number(options.dubVolume ?? 1), 0, 1).toFixed(3);
+  const dubFilter = `volume=${dubVolume},${normalizeDub}`;
 
   if (hasDub) {
     if (dubInputIndex === undefined)
       throw new Error("Thiếu audio input của dub track.");
     if (jobDubIncludesBackground) {
-      return `[${dubInputIndex}:a]${normalizeDub},${safeLimiter},apad[audioout]`;
+      return `[${dubInputIndex}:a]${dubFilter},${safeLimiter},apad[audioout]`;
     }
     if (backgroundInputIndex !== undefined) {
       const volume = clamp(
@@ -44,7 +47,7 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
         0,
         1,
       ).toFixed(3);
-      return `[${backgroundInputIndex}:a]volume=${volume}[background];[${dubInputIndex}:a]${normalizeDub}[dub];[background][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,${safeLimiter},apad[audioout]`;
+      return `[${backgroundInputIndex}:a]volume=${volume}[background];[${dubInputIndex}:a]${dubFilter}[dub];[background][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,${safeLimiter},apad[audioout]`;
     }
     if (keepAudio) {
       const volume = clamp(
@@ -52,9 +55,9 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
         0,
         1,
       ).toFixed(3);
-      return `[${originalInputLabel}]volume=${volume}[original];[${dubInputIndex}:a]${normalizeDub}[dub];[original][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,${safeLimiter},apad[audioout]`;
+      return `[${originalInputLabel}]volume=${volume}[original];[${dubInputIndex}:a]${dubFilter}[dub];[original][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,${safeLimiter},apad[audioout]`;
     }
-    return `[${dubInputIndex}:a]${normalizeDub},${safeLimiter},apad[audioout]`;
+    return `[${dubInputIndex}:a]${dubFilter},${safeLimiter},apad[audioout]`;
   }
 
   if (backgroundInputIndex !== undefined)
@@ -62,12 +65,22 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
   return keepAudio ? `[${originalInputLabel}]anull[audioout]` : "";
 }
 
-export type RetimeCue = { originalDurationMs: number; ttsDurationMs: number; timelineStartMs?: number; timelineShiftMs?: number };
+export type RetimeCue = { originalDurationMs: number; ttsDurationMs: number; finalAudioDurationMs?: number; timelineStartMs?: number; timelineShiftMs?: number };
 
-export const retimedWindows = (metadata: RetimeCue[]) => {
+export function assertDubbingSourceDuration(sourceDurationMs: number, metadata: RetimeCue[]) {
+  const sourceEnd = metadata.reduce((end, cue) => {
+    if (!Number.isFinite(cue.timelineStartMs)) return end;
+    return Math.max(end, Number(cue.timelineStartMs) - Number(cue.timelineShiftMs || 0) + cue.originalDurationMs);
+  }, 0);
+  if (sourceEnd > sourceDurationMs + 5000) {
+    throw new Error(`Video nguồn chỉ dài ${(sourceDurationMs / 1000).toFixed(1)} giây nhưng timeline lồng tiếng cần ${(sourceEnd / 1000).toFixed(1)} giây. Hãy chọn lại đúng bản phim đầy đủ hoặc tạo lại phụ đề và lồng tiếng cho video hiện tại. Không thể ghép hai timeline này mà giữ đúng lời với hình.`);
+  }
+}
+
+export const retimedWindows = (metadata: RetimeCue[], sourceDurationMs = Infinity) => {
   const candidates = metadata.flatMap((cue) => {
     const durationMs = Math.max(1, Number(cue.originalDurationMs) || 1);
-    const speechMs = Math.max(1, Number(cue.ttsDurationMs) || 1);
+    const speechMs = Math.max(1, Number(cue.finalAudioDurationMs ?? cue.ttsDurationMs) || 1);
     if (speechMs <= durationMs || !Number.isFinite(cue.timelineStartMs)) return [];
     const startMs = Math.max(0, Number(cue.timelineStartMs) - Number(cue.timelineShiftMs || 0));
     return [{ startMs, endMs: startMs + durationMs, scale: speechMs / durationMs }];
@@ -75,14 +88,14 @@ export const retimedWindows = (metadata: RetimeCue[]) => {
   let cursorMs = 0;
   return candidates.flatMap((cue) => {
     const startMs = Math.max(cursorMs, cue.startMs);
-    const endMs = Math.max(startMs, cue.endMs);
+    const endMs = Math.max(startMs, Math.min(sourceDurationMs, cue.endMs));
     cursorMs = endMs;
     return endMs > startMs ? [{ startMs, endMs, scale: cue.scale }] : [];
   });
 };
 
 export const retimedDurationMs = (sourceDurationMs: number, metadata: RetimeCue[]) =>
-  Math.max(1, sourceDurationMs) + retimedWindows(metadata).reduce(
+  Math.max(1, sourceDurationMs) + retimedWindows(metadata, sourceDurationMs).reduce(
     (total, cue) => total + (cue.endMs - cue.startMs) * (cue.scale - 1),
     0,
   );

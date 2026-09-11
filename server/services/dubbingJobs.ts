@@ -157,8 +157,8 @@ const DEFAULTS = {
   minSpeed: 0.90,
   maxRewriteAttempts: 2,
   batchSize: 30,
-  ttsConcurrency: 3,
-  llmConcurrency: 2,
+  ttsConcurrency: 6,
+  llmConcurrency: 3,
   maxRetries: 3,
 } as const;
 
@@ -201,7 +201,7 @@ const resultDir = (id: string) => path.join(jobDir(id), 'result');
 const jobFile = (id: string) => path.join(jobDir(id), 'job.json');
 const cueFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.json`);
 const audioFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.wav`);
-const timelineRenderConcurrency = () => clamp(Math.round(Number(process.env.AUTOSUB_TIMELINE_CONCURRENCY) || 2), 1, 4);
+const timelineRenderConcurrency = () => clamp(Math.round(Number(process.env.AUTOSUB_TIMELINE_CONCURRENCY) || 4), 1, 4);
 const TIMELINE_SEGMENT_CACHE_VERSION = 4;
 
 export const buildTimelineMixFilter = (inputCount: number, durationMs: number) => {

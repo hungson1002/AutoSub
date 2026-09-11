@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -15,6 +15,7 @@ import {
   getBatchJob,
   isLikelyMp4Header,
   recommendedBilibiliConnections,
+  validateDownloadedVideo,
 } from './douyinDownloader';
 import { douyinMediaFromDetail } from './douyinExtractor';
 
@@ -107,9 +108,9 @@ test('batch queue accepts new links and cancels one pending item', () => {
 
 test('Bilibili turbo profile uses more connections for ordinary files and backs off for huge files', () => {
   assert.equal(recommendedBilibiliConnections(16 * 1024 * 1024), 4);
-  assert.equal(recommendedBilibiliConnections(512 * 1024 * 1024), 8);
-  assert.equal(recommendedBilibiliConnections(2 * 1024 * 1024 * 1024), 6);
-  assert.equal(recommendedBilibiliConnections(5 * 1024 * 1024 * 1024), 4);
+  assert.equal(recommendedBilibiliConnections(512 * 1024 * 1024), 12);
+  assert.equal(recommendedBilibiliConnections(2 * 1024 * 1024 * 1024), 8);
+  assert.equal(recommendedBilibiliConnections(5 * 1024 * 1024 * 1024), 6);
 });
 
 test('douyinMediaFromDetail prefers a complete MP4 stream and keeps metadata', () => {
@@ -160,6 +161,17 @@ test('download validation rejects empty or non-video responses', () => {
 test('MP4 signature validation checks the ftyp box', () => {
   assert.equal(isLikelyMp4Header(Buffer.from('000000206674797069736f6d00000200', 'hex')), true);
   assert.equal(isLikelyMp4Header(Buffer.from('<html>blocked</html>')), false);
+});
+
+test('download validation rejects a byte-truncated MP4 instead of marking it completed', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'autosub-truncated-video-'));
+  const target = path.join(tempDir, 'video.mp4');
+  const bytes = Buffer.alloc(2048);
+  bytes.write('ftyp', 4, 'ascii');
+  try {
+    await writeFile(target, bytes);
+    await assert.rejects(validateDownloadedVideo(target, bytes.length, bytes.length * 2), /chưa đủ dữ liệu/);
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
 });
 
 test('single-stream downloader retries when the CDN terminates the response', async () => {

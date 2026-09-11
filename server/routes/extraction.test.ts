@@ -40,7 +40,7 @@ test('missing extraction progress is reported as failed instead of running forev
   }
 });
 
-test('STT extraction chunks oversized Groq audio after receiving only JSON uploadId', async () => {
+test('STT extraction chunks oversized Groq audio and drops transcript from a silent fixture', async () => {
   const directory = await createUploadSession();
   const uploadId = path.basename(directory);
   const audioPath = path.join(directory, 'source-large.wav');
@@ -89,8 +89,7 @@ test('STT extraction chunks oversized Groq audio after receiving only JSON uploa
     assert.ok(calls.every((size) => size <= GROQ_DIRECT_AUDIO_LIMIT_BYTES));
     const result = response.json() as { cues: Array<{ startMs: number }>; uploadId: string };
     assert.equal(result.uploadId, uploadId);
-    assert.equal(result.cues.length, 2);
-    assert.ok((result.cues[1]?.startMs || 0) >= 600000);
+    assert.equal(result.cues.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
     await app.close();

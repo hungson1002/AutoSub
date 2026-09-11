@@ -168,7 +168,7 @@ export async function resolveBilibiliUrl(rawUrl: string, signal?: AbortSignal, q
   const play = await getJson<{
     code: number;
     message?: string;
-    data?: { durl?: BilibiliDurl[]; timelength?: number };
+    data?: { durl?: BilibiliDurl[]; timelength?: number; quality?: number; accept_quality?: number[] };
   }>(
     // Do not send platform=html5: for some long public videos Bilibili then
     // returns only a truncated Akamai URL and omits the working backup CDN.
@@ -179,6 +179,9 @@ export async function resolveBilibiliUrl(rawUrl: string, signal?: AbortSignal, q
   const downloadUrl = httpsUrl(stream?.url);
   if (play.code !== 0 || !downloadUrl) {
     throw new Error(play.message || 'Bilibili không trả về luồng MP4 công khai.');
+  }
+  if (play.data?.quality && play.data.quality < quality) {
+    throw new Error(`Bilibili chỉ trả về chất lượng ${play.data.quality === 16 ? '360p' : `mã ${play.data.quality}`} thay vì ${quality === 64 ? '720p' : '360p'}. Hãy đăng nhập Bilibili hoặc chọn chất lượng thấp hơn.`);
   }
 
   const fullDurationMs = (page.duration || view.data.duration || 0) * 1000;

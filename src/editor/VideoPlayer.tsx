@@ -172,6 +172,7 @@ type Props = {
   dubAudioMix?: {
     keepOriginal: boolean;
     originalVolume: number;
+    dubVolume?: number;
     separateVocals?: boolean;
   };
   slowVideoToMatchSpeech?: boolean;
@@ -298,6 +299,7 @@ export function VideoPlayer({
   const originalMixVolume = dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals
     ? dubAudioMix.originalVolume
     : 0;
+  const dubMixVolume = dubAudioMix?.dubVolume ?? 1;
   const muteOriginal = playingDub && originalMixVolume <= 0;
   const syncActiveCue = useCallback(
     (nextTimeMs: number) => {
@@ -326,8 +328,8 @@ export function VideoPlayer({
     if (!video.paused) void audio.play().catch(() => undefined);
   }, [audioMode, dubAudioUrl, sourceToTimelineMs]);
   useEffect(() => {
-    if (dubAudioRef.current) dubAudioRef.current.volume = volume;
-  }, [dubAudioUrl, volume]);
+    if (dubAudioRef.current) dubAudioRef.current.volume = clamp(volume * dubMixVolume, 0, 1);
+  }, [dubAudioUrl, volume, dubMixVolume]);
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;

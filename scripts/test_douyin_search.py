@@ -14,7 +14,7 @@ spec.loader.exec_module(adapter)
 
 
 class SearchTests(unittest.TestCase):
-    def run_pages(self, pages):
+    def run_pages(self, pages, **filters):
         from curl_cffi.requests import Session
         original = Session.request
         auth = types.ModuleType('builder.auth')
@@ -23,7 +23,7 @@ class SearchTests(unittest.TestCase):
         api.DouyinAPI = Mock()
         api.DouyinAPI.search_video_work.side_effect = pages
         try:
-            with patch.dict(sys.modules, {'builder.auth': auth, 'dy_apis.douyin_api': api}), patch('sys.stdin', io.StringIO(json.dumps({'keyword': 'test', 'sort': '0', 'publishTime': '0', 'cookie': 'fixture'}))), patch.object(sys, 'argv', ['adapter', '.']):
+            with patch.dict(sys.modules, {'builder.auth': auth, 'dy_apis.douyin_api': api}), patch('sys.stdin', io.StringIO(json.dumps({'keyword': 'test', 'sort': '0', 'publishTime': '0', 'cookie': 'fixture', **filters}))), patch.object(sys, 'argv', ['adapter', '.']):
                 return adapter.main(), api.DouyinAPI.search_video_work
         finally:
             Session.request = original
@@ -54,6 +54,26 @@ class SearchTests(unittest.TestCase):
     def test_requires_cookie_without_starting_login(self):
         with patch('sys.stdin', io.StringIO('{}')), patch.dict('os.environ', {'DY_COOKIES': ''}):
             self.assertIn('error', adapter.main())
+
+    def test_hour_filter_scans_more_pages_and_maps_supported_provider_filter(self):
+        rows = [{'aweme_id': str(123456 + i), 'video': {'duration': value}} for i, value in enumerate([3600000, 3599999, None, 'bad', 'NaN', 'Infinity'])]
+        result, api = self.run_pages([('one', [], {'data': rows, 'has_more': 1, 'cursor': 20}), ('two', [], {'data': [{'aweme_id': '999999', 'video': {'duration': 3601000}}], 'has_more': 0, 'cursor': 40})], filterDuration='60+')
+        self.assertEqual([row['aweme_id'] for row in result['data']], ['999999'])
+        self.assertEqual(api.call_count, 2)
+        self.assertEqual(api.call_args.kwargs['filter_duration'], '5-10000')
+        self.assertEqual(api.call_args.kwargs['count'], '20')
+
+    def test_exact_phrase_and_exclusions_are_literal_unicode_normalized(self):
+        filters = {'keyword': '动画', 'exactKeyword': True, 'excludeKeywords': '广告, 直播'}
+        self.assertTrue(adapter.matches_filters({'desc': '精彩 #动画 合集'}, filters))
+        self.assertFalse(adapter.matches_filters({'desc': '旅游风景'}, filters))
+        self.assertFalse(adapter.matches_filters({'desc': '动画 直播'}, filters))
+        self.assertTrue(adapter.matches_filters({'desc': 'ＷＨＡＴ  IF test'}, {'keyword': 'what if', 'exactKeyword': True}))
+
+    def test_filtered_rows_do_not_satisfy_target(self):
+        result, api = self.run_pages([('one', [], {'data': [{'aweme_id': '123456', 'desc': 'wrong', 'video': {'duration': 1000}}], 'has_more': 1, 'cursor': 20}), ('two', [], {'data': [{'aweme_id': '999999', 'desc': 'test', 'video': {'duration': 1000}}], 'has_more': 0, 'cursor': 40})], exactKeyword=True)
+        self.assertEqual([row['aweme_id'] for row in result['data']], ['999999'])
+        self.assertEqual(api.call_count, 2)
 
     def test_calls_video_search_once_with_filters_and_no_creator_bootstrap(self):
         from curl_cffi.requests import Session

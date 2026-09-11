@@ -1,6 +1,26 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { buildExportAudioFilter, buildRetimedSourceAudioFilter, retimedDurationMs } from './exportAudio';
+import { assertDubbingSourceDuration, buildExportAudioFilter, buildRetimedSourceAudioFilter, retimedDurationMs } from './exportAudio';
+
+test('retiming follows processed audio duration used by the dubbing planner', () => {
+  assert.equal(retimedDurationMs(10000, [{ originalDurationMs: 1000, ttsDurationMs: 3000, finalAudioDurationMs: 1500, timelineStartMs: 1000 }]), 10500);
+});
+
+test('rejects a dub timeline belonging to a longer source before rendering', () => {
+  const metadata = [{ originalDurationMs: 1000, ttsDurationMs: 1000, timelineStartMs: 7738000, timelineShiftMs: 0 }];
+  assert.throws(() => assertDubbingSourceDuration(3928000, metadata), /đúng bản phim đầy đủ/);
+  assert.doesNotThrow(() => assertDubbingSourceDuration(7739000, metadata));
+});
+
+test('duration excludes cues beyond the actual source and clips a crossing cue', () => {
+  assert.equal(retimedDurationMs(10_000, [
+    { originalDurationMs: 4_000, ttsDurationMs: 8_000, timelineStartMs: 8_000 },
+    { originalDurationMs: 2_000, ttsDurationMs: 4_000, timelineStartMs: 15_000 },
+  ]), 12_000);
+  assert.equal(retimedDurationMs(10_000, [
+    { originalDurationMs: 1_000, ttsDurationMs: 2_000, timelineStartMs: 10_000 },
+  ]), 10_000);
+});
 
 test('an already mixed dubbing job is the only audio source during export', () => {
   const filter = buildExportAudioFilter({
@@ -72,4 +92,18 @@ test('a voice-only dub can still be mixed with original audio once', () => {
   assert.match(filter, /amix=inputs=2:duration=longest/);
   assert.match(filter, /alimiter=limit=0\.891:level=false/);
   assert.doesNotMatch(filter, /loudnorm=/);
+});
+
+test('export applies independent original and dubbing volume controls', () => {
+  const filter = buildExportAudioFilter({
+    hasDub: true,
+    dubInputIndex: 1,
+    keepAudio: true,
+    originalVolume: 0.2,
+    dubVolume: 0.65,
+  });
+
+  assert.match(filter, /\[0:a\]volume=0\.200\[original\]/);
+  assert.match(filter, /\[1:a\]volume=0\.650,/);
+  assert.match(filter, /amix=inputs=2:duration=longest/);
 });

@@ -10,6 +10,11 @@ test('cookie management rejects foreign origins and nonlocal clients', async () 
   try {
     const foreign = await app.inject({ method: 'PUT', url: '/api/douyin/search-cookie', headers: { origin: 'https://untrusted.example' }, payload: { cookie: 'fixture' } });
     assert.equal(foreign.statusCode, 403);
+    const relevance = await app.inject({ method: 'POST', url: '/api/douyin/relevance', headers: { origin: 'https://untrusted.example' }, payload: {} });
+    assert.equal(relevance.statusCode, 403);
+    const invalidRelevance = await app.inject({ method: 'POST', url: '/api/douyin/relevance', payload: { provider: { apiKey: 'secret-not-returned' } } });
+    assert.equal(invalidRelevance.statusCode, 400);
+    assert.ok(!invalidRelevance.body.includes('secret-not-returned'));
     const remote = await app.inject({ method: 'GET', url: '/api/douyin/search-cookie', remoteAddress: '192.0.2.1' });
     assert.equal(remote.statusCode, 403);
     const invalid = await app.inject({ method: 'PUT', url: '/api/douyin/search-cookie', payload: { cookie: '' } });
@@ -19,7 +24,9 @@ test('cookie management rejects foreign origins and nonlocal clients', async () 
 });
 
 test('Douyin search validates filters and never accepts multiline cookies', () => {
-  assert.deepEqual(validateDouyinSearch({ keyword: '  动画 ' }), { keyword: '动画', sort: '0', publishTime: '0', cookie: undefined, offset: 0, count: 20, searchId: '', filterDuration: '', searchRange: '0' });
+  assert.deepEqual(validateDouyinSearch({ keyword: '  动画 ' }), { keyword: '动画', sort: '0', publishTime: '0', cookie: undefined, offset: 0, count: 20, searchId: '', filterDuration: '', searchRange: '0', exactKeyword: false, excludeKeywords: '' });
+  assert.equal(validateDouyinSearch({ keyword: '动画', filterDuration: '60+', exactKeyword: true }).filterDuration, '60+');
+  for (const extra of [{ exactKeyword: 'true' }, { excludeKeywords: 42 }, { excludeKeywords: 'x'.repeat(301) }]) assert.throws(() => validateDouyinSearch({ keyword: 'x', ...extra }));
   for (const extra of [{ offset: -1 }, { offset: 0.5 }, { count: 999 }, { searchId: 'bad\nvalue' }, { filterDuration: 'bad' }, { searchRange: '4' }]) assert.throws(() => validateDouyinSearch({ keyword: 'x', ...extra }));
   for (const body of [{ keyword: '' }, { keyword: 'x', sort: '99' }, { keyword: 'x', publishTime: '-1' }, { keyword: 'x', cookie: 'a=b\r\nx=y' }]) assert.throws(() => validateDouyinSearch(body));
 });
@@ -31,6 +38,12 @@ test('Douyin search normalizes video results without trusting URLs or duplicates
   assert.equal(items[0].url, 'https://www.douyin.com/video/1234567890');
   assert.equal(items[0].duration, 12.3);
   assert.equal(items[0].likes, 42);
+  assert.equal(items[0].views, null);
+  assert.equal(normalizeDouyinSearch({ data: [{ ...video, statistics: { play_count: 23456 } }] })[0].views, 23456);
+  assert.equal(normalizeDouyinSearch({ data: [{ ...video, statistics: { play_count: 0 } }] })[0].views, null);
+  assert.equal(items[0].comments, 0);
+  assert.equal(items[0].shares, 0);
+  assert.equal(items[0].publishedAt, 0);
   assert.equal(items[0].coverUrl, 'https://p.example.byteimg.com/cover.jpg');
   assert.throws(() => normalizeDouyinSearch({ data: null }));
   const malformed = normalizeDouyinSearch({ data: [{ aweme_info: { ...video, video: { cover: { url_list: 'not-an-array' } } } }] });

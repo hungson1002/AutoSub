@@ -21,7 +21,7 @@ import {
   MAX_BROWSER_UPLOAD_BYTES,
 } from "../lib/api";
 import { storage } from "../lib/storage";
-import { translationBatchSize } from "../lib/translationConfig";
+import { translationBatchSize, translationConcurrency } from "../lib/translationConfig";
 import {
   AudioLines,
   Captions,
@@ -34,7 +34,9 @@ import {
   Scissors,
   Settings2,
   Upload,
+  Volume2,
 } from "../components/Icons";
+import { RangeInput } from "../components/RangeInput";
 import { VideoPlayer } from "../editor/VideoPlayer";
 import { SubtitleList } from "../editor/SubtitleList";
 import { SubtitleStylePanel } from "../editor/SubtitleStylePanel";
@@ -140,7 +142,7 @@ export function EditorPage({
     id: number;
     timeMs: number;
   }>();
-  const [panel, setPanel] = useState<"style" | "none">("none");
+  const [panel, setPanel] = useState<"style" | "audio" | "none">("none");
   const [blurOpen, setBlurOpen] = useState(false);
   const [blurEditMode, setBlurEditMode] = useState(false);
   const [logoOpen, setLogoOpen] = useState(false);
@@ -158,6 +160,7 @@ export function EditorPage({
   const [dubAudioMix, setDubAudioMix] = useState<{
     keepOriginal: boolean;
     originalVolume: number;
+    dubVolume?: number;
     separateVocals?: boolean;
   }>();
   const [dubbingJob, setDubbingJob] = useState<DubbingJobStatus>();
@@ -203,6 +206,21 @@ export function EditorPage({
   const uploadGuardRef = useRef(new LatestUploadGuard());
   const assetRef = useRef(asset);
   const selected = cues.find((cue) => cue.id === selectedId);
+  const effectiveDubAudioMix = {
+    keepOriginal: Boolean(dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals),
+    originalVolume: dubAudioMix?.originalVolume ?? 0.25,
+    dubVolume: dubAudioMix?.dubVolume ?? 1,
+    separateVocals: Boolean(dubAudioMix?.separateVocals),
+  };
+  const updateDubAudioMix = (patch: Partial<typeof effectiveDubAudioMix>) => {
+    setDubAudioMix((current) => ({
+      keepOriginal: current?.keepOriginal ?? false,
+      originalVolume: current?.originalVolume ?? 0.25,
+      dubVolume: current?.dubVolume ?? 1,
+      separateVocals: current?.separateVocals,
+      ...patch,
+    }));
+  };
   const editorMetrics = useMemo(() => {
     const enabled = cues.filter((cue) => cue.enabled);
     const average = (values: number[]) =>
@@ -908,46 +926,34 @@ export function EditorPage({
       }
       const batchSize = translationBatchSize(setup.mode);
       const totalBatches = Math.ceil(cues.length / batchSize);
-      for (let start = 0; start < cues.length; start += batchSize) {
-        const batch = cues.slice(start, start + batchSize);
-        const batchNumber = Math.floor(start / batchSize) + 1;
-        const target = Math.min(
-          94,
-          Math.max(8, ((start + batch.length * 0.88) / cues.length) * 100),
-        );
-        setTranslationStage(
-          `Đang gửi batch ${batchNumber}/${totalBatches} · cue ${start + 1}–${start + batch.length}`,
-        );
-        easeTranslationProgressTo(target);
-        const result = await api.translate(
-          provider,
-          setup.model,
-          batch,
-          setup.sourceLanguage,
-          setup.targetLanguage,
-          setup.style,
-          setup.customPrompt,
-          setup.glossary.filter((entry) => entry.enabled),
-          controller.signal,
-          next,
-          buildTranslationMemory(next, batch[0]?.id || "", 24),
-          translationGuide,
-        );
-        clearTranslationProgressTimer();
-        for (const item of result.items) {
-          const cue = next.find((candidate) => candidate.id === item.id);
-          if (cue) cue.translatedText = item.translation;
+      const starts = Array.from({ length: totalBatches }, (_, index) => index * batchSize);
+      let cursor = 0;
+      let completedCues = 0;
+      const workers = Array.from({ length: Math.min(starts.length, translationConcurrency(setup.mode)) }, async () => {
+        for (;;) {
+          const queueIndex = cursor++;
+          if (queueIndex >= starts.length) return;
+          const start = starts[queueIndex] ?? 0;
+          const batch = cues.slice(start, start + batchSize);
+          const batchNumber = queueIndex + 1;
+          setTranslationStage(`Đang dịch song song ${Math.min(starts.length, translationConcurrency(setup.mode))} batch · batch ${batchNumber}/${totalBatches}`);
+          const result = await api.translate(
+            provider, setup.model, batch, setup.sourceLanguage, setup.targetLanguage,
+            setup.style, setup.customPrompt, setup.glossary.filter((entry) => entry.enabled),
+            controller.signal, cues, buildTranslationMemory(cues, batch[0]?.id || "", 24), translationGuide,
+          );
+          for (const item of result.items) {
+            const cue = next.find((candidate) => candidate.id === item.id);
+            if (cue) cue.translatedText = item.translation;
+          }
+          completedCues += batch.length;
+          clearTranslationProgressTimer();
+          setTranslationProgress(Math.min(98, (completedCues / cues.length) * 100));
+          setTranslationStage(`Đã dịch ${completedCues}/${cues.length} cue · đang lưu kết quả`);
+          onCuesChange([...next]);
         }
-        const completed = Math.min(
-          98,
-          ((start + batch.length) / cues.length) * 100,
-        );
-        setTranslationProgress(completed);
-        setTranslationStage(
-          `Đã nhận batch ${batchNumber}/${totalBatches} · đang lưu kết quả`,
-        );
-        onCuesChange([...next]);
-      }
+      });
+      await Promise.all(workers);
       setTranslationProgress(100);
       setTranslationStage("Đã hoàn tất dịch toàn bộ subtitle");
       onNotice(
@@ -1155,8 +1161,8 @@ export function EditorPage({
           // Keep its text and windows strict; group fitting handles long speech.
           timingMode: "strict",
           batchSize: 30,
-          ttsConcurrency: 3,
-          llmConcurrency: 2,
+          ttsConcurrency: 6,
+          llmConcurrency: 3,
           maxRetries: 3,
           slowVideoToMatchSpeech: options.slowVideoToMatchSpeech,
           audioMix: options.audioMix,
@@ -1381,6 +1387,18 @@ export function EditorPage({
         <button onClick={() => setDubbingOpen(true)}>
           <AudioLines size={15} /> Lồng tiếng
         </button>
+        <button
+          className={panel === "audio" ? "active" : ""}
+          disabled={!dubAudioUrl}
+          title={dubAudioUrl ? "Trộn giọng gốc và giọng lồng tiếng" : "Hãy tạo bản lồng tiếng trước"}
+          aria-expanded={panel === "audio"}
+          onClick={() => {
+            if (logoOpen) closeLogoEditor();
+            setPanel(panel === "audio" ? "none" : "audio");
+          }}
+        >
+          <Volume2 size={15} /> Âm thanh
+        </button>
         <button className="toolbar-export" onClick={() => setExportOpen(true)}>
           <Download size={15} /> Xuất file
         </button>
@@ -1583,6 +1601,78 @@ export function EditorPage({
             </div>
           </aside>
         )}
+        {panel === "audio" && dubAudioUrl && (
+          <aside
+            className="floating-panel style-floating-panel audio-mix-floating-panel"
+            aria-label="Điều chỉnh âm thanh"
+          >
+            <div className="floating-head">
+              <span>
+                <Volume2 size={15} /> AUDIO MIX
+              </span>
+              <button className="icon-button" onClick={() => setPanel("none")}>
+                <span aria-hidden="true">×</span>
+              </button>
+            </div>
+            <div className="audio-mix-intro">
+              <strong>Bản phối đầu ra</strong>
+              <small>Nghe thử và video xuất dùng đúng các mức âm lượng bên dưới.</small>
+            </div>
+            <label
+              className={`toggle-row audio-source-toggle ${effectiveDubAudioMix.separateVocals ? "disabled" : ""}`}
+            >
+              <span>
+                Bật giọng gốc
+                <small>Phát âm thanh nguồn cùng bản lồng tiếng</small>
+              </span>
+              <input
+                type="checkbox"
+                checked={effectiveDubAudioMix.keepOriginal}
+                disabled={effectiveDubAudioMix.separateVocals}
+                onChange={(event) => updateDubAudioMix({ keepOriginal: event.target.checked })}
+              />
+              <i aria-hidden="true" />
+            </label>
+            {effectiveDubAudioMix.separateVocals && (
+              <div className="audio-mix-warning">
+                Bản lồng tiếng này đã trộn sẵn nhạc nền. Muốn bật giọng gốc riêng, hãy tạo lại bản lồng tiếng với tùy chọn giữ âm thanh gốc.
+              </div>
+            )}
+            <div className={`audio-level-control ${effectiveDubAudioMix.keepOriginal ? "" : "disabled"}`}>
+              <div>
+                <span>Giọng gốc</span>
+                <b>{Math.round(effectiveDubAudioMix.originalVolume * 100)}%</b>
+              </div>
+              <RangeInput
+                min={0}
+                max={1}
+                step={0.01}
+                value={effectiveDubAudioMix.originalVolume}
+                disabled={!effectiveDubAudioMix.keepOriginal}
+                aria-label="Âm lượng giọng gốc"
+                onChange={(event) => updateDubAudioMix({ originalVolume: Number(event.target.value) })}
+              />
+            </div>
+            <div className="audio-level-control">
+              <div>
+                <span>Giọng lồng tiếng</span>
+                <b>{Math.round(effectiveDubAudioMix.dubVolume * 100)}%</b>
+              </div>
+              <RangeInput
+                min={0}
+                max={1}
+                step={0.01}
+                value={effectiveDubAudioMix.dubVolume}
+                aria-label="Âm lượng giọng lồng tiếng"
+                onChange={(event) => updateDubAudioMix({ dubVolume: Number(event.target.value) })}
+              />
+            </div>
+            <div className="audio-mix-summary">
+              <span>PREVIEW = EXPORT</span>
+              <small>Mức trộn này được áp dụng cả khi xem trước và khi xuất MP4.</small>
+            </div>
+          </aside>
+        )}
       </section>
       <BlurEditor
         open={blurOpen}
@@ -1656,7 +1746,7 @@ export function EditorPage({
             ? dubbingJob.id
             : undefined
         }
-        dubbingAudioMix={dubbingJob?.config.audioMix}
+        dubbingAudioMix={dubAudioMix}
         slowVideoToMatchSpeech={dubbingJob?.config.slowVideoToMatchSpeech === true}
         onClose={() => setExportOpen(false)}
         onNotice={onNotice}

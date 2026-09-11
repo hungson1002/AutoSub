@@ -4,6 +4,26 @@ import json
 import os
 import sys
 import time
+import unicodedata
+
+
+def matches_filters(item, request):
+    # Literal title/hashtag matching, not an invented semantic relevance score.
+    normalize = lambda text: ' '.join(unicodedata.normalize('NFKC', str(text)).casefold().split())
+    title = normalize(item.get('desc', ''))
+    if request.get('exactKeyword') and normalize(request['keyword']) not in title:
+        return False
+    if any(normalize(term) in title for term in request.get('excludeKeywords', '').split(',') if term.strip()):
+        return False
+    if request.get('filterDuration') == '60+':
+        video = item.get('video')
+        duration = video.get('duration', item.get('duration', 0)) if isinstance(video, dict) else 0
+        try:
+            if not 3_600_000 < float(duration) < float('inf'):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def main():
@@ -46,12 +66,12 @@ def main():
                     raise TimeoutError()
                 warning = 'time_limit'
                 break
-            count = max(1, target - len(rows))
+            count = target
             try:
                 next_search_id, _, result = DouyinAPI.search_video_work(
                     auth, request['keyword'], offset=str(offset), count=str(count),
                     sort_type=request['sort'], publish_time=request['publishTime'],
-                    filter_duration=request.get('filterDuration', ''), search_range=request.get('searchRange', '0'),
+                    filter_duration='5-10000' if request.get('filterDuration') == '60+' else request.get('filterDuration', ''), search_range=request.get('searchRange', '0'),
                     search_id=search_id)
             except Exception:
                 if not rows:
@@ -75,8 +95,9 @@ def main():
                     continue
                 identifier = str(item.get('aweme_id', ''))
                 if identifier.isdigit() and 5 <= len(identifier) <= 30 and item.get('video') and not item.get('images') and identifier not in seen:
-                    rows.append(row)
                     seen.add(identifier)
+                    if matches_filters(item, request):
+                        rows.append(row)
             cursor = result.get('cursor')
             offset = cursor if isinstance(cursor, int) and cursor > offset else offset + count
             has_more = result.get('has_more') == 1 and offset <= 10000

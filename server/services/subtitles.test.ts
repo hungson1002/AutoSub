@@ -1,6 +1,51 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { normalizeCueTimeline, offsetSubtitleSegments, segmentsToCues } from './subtitles';
+import { filterLowConfidenceWhisperSegments, groupOcrResults, normalizeCueTimeline, offsetSubtitleSegments, segmentsToCues } from './subtitles';
+
+test('Whisper confidence filter removes a low-confidence no-speech hallucination', () => {
+  const segments = filterLowConfidenceWhisperSegments([
+    { start: 0, end: 2, text: 'real speech', no_speech_prob: 0.08, avg_logprob: -0.2 },
+    { start: 5, end: 8, text: 'hallucinated in silence', no_speech_prob: 0.94, avg_logprob: -1.8 },
+    { start: 9, end: 10, text: 'provider without metrics' },
+  ]);
+  assert.deepEqual(segments.map((segment) => segment.text), ['real speech', 'provider without metrics']);
+});
+
+test('OCR timing closes a subtitle on the next text or blank frame', () => {
+  const cues = groupOcrResults([
+    { text: 'Câu đầu', timestampMs: 1000 },
+    { text: 'Câu đầu', timestampMs: 1500 },
+    { text: '', timestampMs: 2000 },
+    { text: 'Câu sau', timestampMs: 3000 },
+    { text: '', timestampMs: 4000 },
+  ], false, 500);
+  assert.deepEqual(cues.map(({ startMs, endMs }) => ({ startMs, endMs })), [
+    { startMs: 1000, endMs: 2000 },
+    { startMs: 3000, endMs: 4000 },
+  ]);
+});
+
+test('OCR watermark filtering does not erase subtitles from short clips', () => {
+  const cues = groupOcrResults([
+    { text: 'Hello world', timestampMs: 0 },
+    { text: 'Hello world', timestampMs: 500 },
+    { text: '', timestampMs: 1000 },
+  ], true, 500);
+  assert.equal(cues.length, 1);
+  assert.equal(cues[0]?.originalText, 'Hello world');
+  assert.equal(cues[0]?.endMs, 1000);
+});
+
+test('OCR grouping selects the most stable reading across adjacent frames', () => {
+  const cues = groupOcrResults([
+    { text: 'I am going hom', timestampMs: 0 },
+    { text: 'I am going home', timestampMs: 500 },
+    { text: 'I am going home', timestampMs: 1000 },
+    { text: '', timestampMs: 1500 },
+  ], false, 500);
+  assert.equal(cues.length, 1);
+  assert.equal(cues[0]?.originalText, 'I am going home');
+});
 
 test('STT cue conversion preserves provider timestamps and silence gaps', () => {
   const cues = segmentsToCues([

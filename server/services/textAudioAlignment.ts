@@ -101,6 +101,22 @@ export function hasUsableWordTimestamps(cues: AlignmentCue[]) {
   return cues.some((cue) => usableWords(cue).length > 0);
 }
 
+/**
+ * A high-confidence VAD result is stronger evidence than a Whisper cue placed
+ * entirely inside silence. Lower-confidence silence detection never removes text.
+ */
+export function filterCuesOutsideSpeech<T extends AlignmentCue>(cues: T[], speechRegions: SpeechRegion[], confidence: RefinementConfidence) {
+  if (confidence !== 'high') return cues;
+  return cues.filter((cue) => {
+    const duration = Math.max(1, cue.endMs - cue.startMs);
+    const requiredOverlap = Math.min(120, Math.max(30, duration * 0.15));
+    return speechRegions.some((region) => {
+      const overlap = Math.min(cue.endMs, region.endMs) - Math.max(cue.startMs, region.startMs);
+      return overlap >= requiredOverlap;
+    });
+  });
+}
+
 function wordConfidence(words: Array<{ word: AlignmentWord; startMs: number; endMs: number }>) {
   const values = words.map(({ word }) => word.confidence ?? word.probability).filter(finite);
   return values.length ? Math.max(0, Math.min(1, values.reduce((sum, value) => sum + value, 0) / values.length)) : 0.96;

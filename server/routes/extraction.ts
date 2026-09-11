@@ -6,8 +6,9 @@ import { recognizeImage, transcribe, ProviderError } from '../adapters';
 import { ensureWorkdir, extractAudio, extractRoiFrames, run } from '../services/ffmpeg';
 import { resolveProviderType } from '../providers/base';
 import { cleanupUploadSession, createTemporarySession, resolveUpload, UploadReferenceError } from '../services/uploads';
-import { groupOcrResults, hasSignificantFrameChange, offsetSubtitleSegments, segmentsToCues } from '../services/subtitles';
-import { alignTranscriptToAudio } from '../services/textAudioAlignment';
+import { filterLowConfidenceWhisperSegments, groupOcrResults, hasSignificantFrameChange, offsetSubtitleSegments, segmentsToCues } from '../services/subtitles';
+import { alignTranscriptToAudio, filterCuesOutsideSpeech } from '../services/textAudioAlignment';
+import { detectSpeechRegions } from '../services/timestampRefinement';
 
 type ExtractionBody = {
   uploadId?: string;
@@ -88,7 +89,7 @@ async function transcribeGroqAudio(provider: AIProvider, model: string, audio: s
 
     const processed = await mapWithConcurrency(
       chunks,
-      boundedConcurrency(process.env.AUTOSUB_GROQ_STT_CONCURRENCY, 2, 4),
+      boundedConcurrency(process.env.AUTOSUB_GROQ_STT_CONCURRENCY, 3, 4),
       async (chunk, index) => {
         const chunkPath = path.join(chunkDir, chunk);
         const chunkSize = (await stat(chunkPath)).size;
@@ -147,14 +148,22 @@ export async function extractionRoutes(app: FastifyInstance) {
         ? await transcribeGroqAudio(body.provider, body.model, audio, body.language || 'Auto Detect', controller.signal, onSttProgress)
         : await transcribe(body.provider, body.model, audio, path.basename(audio), body.language || 'Auto Detect', controller.signal, onSttProgress);
       reportExtractionProgress(progressId, { percent: 88, stage: 'Đã nhận dạng xong · đang căn thời gian phụ đề' });
-      let providerCues = segmentsToCues(result.segments);
+      let providerCues = segmentsToCues(filterLowConfidenceWhisperSegments(result.segments));
       debugMedia('PROVIDER SEGMENTS', { cues: cueDebug(providerCues), wordTimestampCueCount: providerCues.filter((cue) => Array.isArray(cue.words) && cue.words.length > 0).length });
       debugMedia('STT PROVIDER CUES', { cues: cueDebug(providerCues) });
       if (!providerCues.length && result.text) {
         debugMedia('STT timestamp fallback activated', { reason: 'provider returned no segments', textLength: result.text.length });
         providerCues = [{ id: `stt-1-${Date.now()}`, index: 1, startMs: 0, endMs: 3000, originalText: result.text, translatedText: '', voiceGroup: 'G1', enabled: true }];
       }
-      const alignment = await alignTranscriptToAudio({ audioPath: audio, cues: providerCues, language: body.language || 'Auto Detect' });
+      reportExtractionProgress(progressId, { percent: 90, stage: 'Đang kiểm tra lời nói thật và loại phụ đề trong khoảng lặng' });
+      const speechScan = await detectSpeechRegions(audio).catch(() => undefined);
+      if (speechScan) providerCues = filterCuesOutsideSpeech(providerCues, speechScan.regions, speechScan.confidence);
+      const alignment = await alignTranscriptToAudio({
+        audioPath: audio,
+        cues: providerCues,
+        language: body.language || 'Auto Detect',
+        ...(speechScan ? { speechRegions: speechScan.regions, speechConfidence: speechScan.confidence } : {}),
+      });
       debugMedia('ALIGNMENT', { entries: alignment.entries.slice(0, 5), method: alignment.metadata.alignmentMethod, confidence: alignment.metadata.alignmentConfidence, timestampSource: alignment.metadata.timestampSource });
       debugMedia('FINAL CUES', { cues: cueDebug(alignment.cues), refinedCount: alignment.metadata.refinedCount, fallbackCount: alignment.metadata.fallbackCount, analysisMs: alignment.metadata.analysisMs });
       debugMedia('API RESPONSE', { uploadId: upload.uploadId, cueCount: alignment.cues.length, cues: cueDebug(alignment.cues) });
@@ -208,16 +217,16 @@ export async function extractionRoutes(app: FastifyInstance) {
       let recognized = 0;
       const results = (await mapWithConcurrency(
         changedFrames,
-        boundedConcurrency(process.env.AUTOSUB_OCR_CONCURRENCY, 4),
+        boundedConcurrency(process.env.AUTOSUB_OCR_CONCURRENCY, 6),
         async ({ framePath, frameIndex }) => {
           const text = await recognizeImage(body.provider!, body.model!, framePath, buildOcrPrompt(body.language));
           recognized += 1;
           reportExtractionProgress(progressId, { percent: changedFrames.length ? 45 + ((recognized / changedFrames.length) * 48) : 93, stage: `Vision provider · ${recognized}/${changedFrames.length} frame thay đổi`, processed: recognized, total: changedFrames.length });
-          return text ? { text, timestampMs: Math.round(frameIndex * 1000 / fps) } : undefined;
+          return { text: text || '', timestampMs: Math.round(frameIndex * 1000 / fps) };
         },
-      )).filter((item): item is { text: string; timestampMs: number } => Boolean(item));
+      ));
       reportExtractionProgress(progressId, { percent: 96, stage: `Đang nhóm ${results.length} kết quả thành SubtitleCue[]`, processed: frames.length, total: frames.length });
-      const cues = groupOcrResults(results, Boolean(body.filterWatermark));
+      const cues = groupOcrResults(results, Boolean(body.filterWatermark), Math.round(1000 / fps));
       reportExtractionProgress(progressId, { percent: 100, stage: `OCR hoàn tất · ${cues.length} cue`, status: 'completed', processed: frames.length, total: frames.length });
       return { cues, uploadId: upload.uploadId };
     } catch (error) {

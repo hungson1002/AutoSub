@@ -8,6 +8,26 @@ test("preserves actionable script-provider connection errors", () => {
   assert.equal(friendlyErrorMessage(new Error(message)), message);
 });
 import { LatestUploadGuard } from "./latestUpload";
+test("local export preserves HTTP 500 render diagnostics through the UI formatter", async () => {
+  const originalFetch = globalThis.fetch;
+  const message = "FFmpeg: Permission denied while writing output.mp4";
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: message }), {
+    status: 500, headers: { "content-type": "application/json" },
+  })) as typeof fetch;
+  try {
+    await assert.rejects(api.exportVideo(undefined, [], defaultStyle, {
+      exportId: "error-test", uploadId: "upload-test", resolution: "original",
+      crf: 20, originalVolume: 0.25, keepAudio: true, burnSubtitles: false, separateVocals: false,
+    }), (error: unknown) => {
+      assert.equal(friendlyErrorMessage(error), message);
+      return true;
+    });
+    await assert.rejects(api.exportAudio({ uploadId: "upload-test" }), (error: unknown) => {
+      assert.equal(friendlyErrorMessage(error), message);
+      return true;
+    });
+  } finally { globalThis.fetch = originalFetch; }
+});
 import { videoAssetUploadFile } from "./videoAsset";
 
 const responsePayload = {

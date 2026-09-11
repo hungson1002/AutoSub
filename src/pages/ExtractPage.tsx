@@ -13,7 +13,7 @@ import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
 import { TestedModelSelect } from '../components/TestedModelSelect';
 import { isCapabilityModelPassed } from '../lib/modelTests';
-import { translationBatchSize } from '../lib/translationConfig';
+import { mapTranslationBatches, translationBatchSize, translationConcurrency } from '../lib/translationConfig';
 
 export function ExtractPage({ providers, settings, initialAsset, onCuesChange, onAssetChange, onOpenEditor, onNotice }: { providers: AIProvider[]; settings: AppSettings; initialAsset?: VideoAsset; onCuesChange: (cues: SubtitleCue[]) => void; onAssetChange: (asset?: VideoAsset) => void; onOpenEditor: () => void; onNotice: (message: string, kind?: 'success' | 'error') => void }) {
   const [tab, setTab] = useState<'ocr' | 'stt'>('ocr');
@@ -220,17 +220,18 @@ export function ExtractPage({ providers, settings, initialAsset, onCuesChange, o
             const translatedCues = result.cues.map((cue) => ({ ...cue }));
             const batchSize = translationBatchSize('quality');
             const totalBatches = Math.ceil(result.cues.length / batchSize);
-            for (let start = 0; start < result.cues.length; start += batchSize) {
-              const batch = result.cues.slice(start, start + batchSize);
-              const batchNumber = Math.floor(start / batchSize) + 1;
-              setProgressStage(`Đang dịch batch ${batchNumber}/${totalBatches} · cue ${start + 1}–${start + batch.length}`);
+            const batches = Array.from({ length: totalBatches }, (_, index) => result.cues.slice(index * batchSize, (index + 1) * batchSize));
+            let translatedCount = 0;
+            await mapTranslationBatches(batches, translationConcurrency('quality'), async (batch, batchIndex) => {
+              setProgressStage(`Đang dịch song song · batch ${batchIndex + 1}/${totalBatches}`);
               const translated = await api.translate(translationProvider, translationAssignment.model, batch, sourceLanguage, 'Tiếng Việt', 'Review phim', '', storage.glossary().filter((entry) => entry.enabled), controller.signal, translatedCues, buildTranslationMemory(translatedCues, batch[0]?.id || '', 24), translationGuide);
               for (const item of translated.items) {
                 const cue = translatedCues.find((candidate) => candidate.id === item.id);
                 if (cue) cue.translatedText = item.translation;
               }
-              setProgress(Math.min(90, 65 + ((start + batch.length) / Math.max(result.cues.length, 1)) * 25));
-            }
+              translatedCount += batch.length;
+              setProgress(Math.min(90, 65 + (translatedCount / Math.max(result.cues.length, 1)) * 25));
+            });
             clearProgressTimers();
             nextCues = translatedCues;
             setProgress(90);

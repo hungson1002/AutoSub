@@ -9,6 +9,7 @@ import { createUploadSession, safeUploadName } from './uploads';
 import { extractDouyinMedia } from './douyinExtractor';
 import { isBilibiliUrl, resolveBilibiliUrl, type BilibiliQuality } from './bilibiliExtractor';
 import { run } from './ffmpeg';
+import { rankVideoCdns } from './videoCdn';
 
 export function extractDouyinUrls(text: string): string[] {
   if (!text) return [];
@@ -132,8 +133,11 @@ export function isLikelyMp4Header(header: Uint8Array) {
   return hex.includes('ftyp') || hex.includes('moov');
 }
 
-async function validateDownloadedVideo(filePath: string, downloadedBytes: number, _expectedBytes: number) {
+export async function validateDownloadedVideo(filePath: string, downloadedBytes: number, expectedBytes: number, expectedDurationSeconds?: number) {
   if (downloadedBytes < 1024) throw new Error(`Video tải về không hợp lệ (${downloadedBytes} byte).`);
+  if (expectedBytes > 0 && downloadedBytes < expectedBytes * 0.99) {
+    throw new Error(`Video tải chưa đủ dữ liệu (${downloadedBytes}/${expectedBytes} byte). Đang chuyển sang CDN dự phòng.`);
+  }
   const file = await open(filePath, 'r');
   try {
     const header = Buffer.alloc(32);
@@ -147,6 +151,17 @@ async function validateDownloadedVideo(filePath: string, downloadedBytes: number
   const stored = await stat(filePath);
   if (stored.size !== downloadedBytes) {
     throw new Error('Dung lượng video trên đĩa không khớp dữ liệu đã tải.');
+  }
+  if (expectedDurationSeconds && expectedDurationSeconds > 0) {
+    const probe = await run('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=nw=1:nk=1', filePath,
+    ]);
+    const actualDuration = Number(probe.stdout.trim());
+    const minimumDuration = expectedDurationSeconds - Math.max(5, expectedDurationSeconds * 0.01);
+    if (!Number.isFinite(actualDuration) || actualDuration < minimumDuration) {
+      throw new Error(`Video tải bị cắt ngắn (${actualDuration.toFixed(1)}/${expectedDurationSeconds.toFixed(1)} giây). Đang chuyển sang CDN dự phòng.`);
+    }
   }
 }
 
@@ -250,9 +265,11 @@ const activeControllers = new Map<string, AbortController>();
 const activeItemControllers = new Map<string, AbortController>();
 
 const MAX_BATCH_CONCURRENCY = 3;
-const PARALLEL_CHUNKS_PER_FILE = 6;
+const PARALLEL_CHUNKS_PER_FILE = 8;
 const RANGE_REQUEST_BYTES = 8 * 1024 * 1024;
-const BILIBILI_RANGE_REQUEST_BYTES = 64 * 1024 * 1024;
+// Bilibili's Akamai mirror performs substantially better with more medium
+// ranges than a few 64 MiB requests (especially after one connection stalls).
+const BILIBILI_RANGE_REQUEST_BYTES = 16 * 1024 * 1024;
 
 function updateBatchSummary(job: DouyinBatchJob) {
   job.completedItems = job.items.filter((item) => item.status === 'completed').length;
@@ -289,9 +306,9 @@ function startAddedItemImmediately(job: DouyinBatchJob, item: DouyinBatchItem) {
 export function recommendedBilibiliConnections(totalBytes: number) {
   if (!Number.isFinite(totalBytes) || totalBytes <= 0) return 6;
   if (totalBytes < 32 * 1024 * 1024) return 4;
-  if (totalBytes < 1536 * 1024 * 1024) return 8;
-  if (totalBytes < 4 * 1024 * 1024 * 1024) return 6;
-  return 4;
+  if (totalBytes < 1536 * 1024 * 1024) return 12;
+  if (totalBytes < 4 * 1024 * 1024 * 1024) return 8;
+  return 6;
 }
 
 export function createBatchJob(urls: string[], options: { autoStart?: boolean; bilibiliQuality?: BilibiliQuality } = {}): DouyinBatchJob {
@@ -627,7 +644,11 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
   };
 
-  const candidateUrls = [info.downloadUrl, ...(info.backupUrls || [])].filter(Boolean);
+  const sourceUrls = [info.downloadUrl, ...(info.backupUrls || [])].filter(Boolean);
+  // Compare small samples instead of staying on a slow primary CDN indefinitely.
+  const candidateUrls = info.platform === 'bilibili'
+    ? await rankVideoCdns(sourceUrls, downloadHeaders, signal)
+    : sourceUrls;
   const sessionDir = await createUploadSession();
   const uploadId = path.basename(sessionDir);
 
@@ -688,12 +709,13 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
         info.platform === 'bilibili' ? BILIBILI_RANGE_REQUEST_BYTES : RANGE_REQUEST_BYTES,
       );
 
-      await validateDownloadedVideo(targetFilePath, downloadedBytes, item.totalBytes);
+      await validateDownloadedVideo(targetFilePath, downloadedBytes, item.totalBytes, info.duration);
       downloadSuccess = true;
       break;
     } catch (err) {
       await rm(targetFilePath, { force: true }).catch(() => undefined);
-      if (!signal.aborted) {
+      const incomplete = err instanceof Error && /tải chưa đủ dữ liệu|bị cắt ngắn/i.test(err.message);
+      if (!signal.aborted && !incomplete) {
         try {
           downloadedBytes = await downloadWithFfmpegReconnect(
             url, targetFilePath, downloadHeaders, signal,
@@ -702,7 +724,7 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
               if (item.totalBytes > 0) item.progressPercent = Math.min(98, 10 + Math.round((current / item.totalBytes) * 88));
             },
           );
-          await validateDownloadedVideo(targetFilePath, downloadedBytes, item.totalBytes);
+          await validateDownloadedVideo(targetFilePath, downloadedBytes, item.totalBytes, info.duration);
           downloadSuccess = true;
           break;
         } catch (fallbackError) {

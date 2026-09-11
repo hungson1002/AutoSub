@@ -345,6 +345,9 @@ export function DouyinPage({
   };
 
   const handleRetryItem = (item: DouyinBatchItem) => {
+    if (item.platform === "bilibili" && item.bilibiliQuality) {
+      setBilibiliQuality(item.bilibiliQuality);
+    }
     setBatchJob(undefined);
     setInputText(item.originalUrl);
     setSubmitError("");
@@ -380,13 +383,6 @@ export function DouyinPage({
     } catch (error) {
       onNotice(friendlyErrorMessage(error, "Không thể hủy video này."), "error");
     }
-  };
-
-  const handleDownloadAnotherQuality = (item: DouyinBatchItem) => {
-    if (item.platform === "bilibili") {
-      setBilibiliQuality(item.bilibiliQuality === 16 ? 64 : 16);
-    }
-    handleRetryItem(item);
   };
 
   const isDownloading = activeBatchId !== undefined;
@@ -517,7 +513,7 @@ export function DouyinPage({
               onChange={(value) => setBilibiliQuality(Number(value) as BilibiliQuality)}
               disabled={submitting}
               options={[
-                { value: "64", label: "720p — chất lượng tốt", description: "Tải song song tối đa 8 kết nối" },
+                { value: "64", label: "720p — chất lượng tốt", description: "Tải song song tối đa 12 kết nối" },
                 { value: "16", label: "360p — siêu tốc", description: "File nhỏ hơn, phù hợp video dài" },
               ]}
             />
@@ -834,11 +830,11 @@ export function DouyinPage({
                           <button
                             className="button small ghost"
                             type="button"
-                            onClick={() => handleDownloadAnotherQuality(item)}
+                            onClick={() => handleRetryItem(item)}
                           >
                             <RefreshCw size={13} />
                             {item.platform === "bilibili"
-                              ? `Tải lại bản ${item.bilibiliQuality === 16 ? "720p" : "360p"}`
+                              ? `Tải lại ${item.bilibiliQuality === 64 ? "720p" : "360p"}`
                               : "Tải lại từ link"}
                           </button>
                           {item.coverUrl && (

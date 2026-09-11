@@ -122,3 +122,13 @@ test('resolveBilibiliUrl rejects a paid preview before downloading', async () =>
     globalThis.fetch = originalFetch;
   }
 });
+
+test('does not label a downgraded Bilibili stream as requested 720p', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => String(input).includes('/x/web-interface/view?')
+    ? Response.json({ code: 0, data: { aid: 4, bvid: 'BVdowngraded', cid: 44, title: 'test', duration: 60 } })
+    : Response.json({ code: 0, data: { quality: 16, timelength: 60000, durl: [{ url: 'https://cdn.example/360.mp4', size: 1000, length: 60000 }] } });
+  try {
+    await assert.rejects(resolveBilibiliUrl('https://www.bilibili.com/video/BVdowngraded', undefined, 64), /360p.*720p/);
+  } finally { globalThis.fetch = originalFetch; }
+});

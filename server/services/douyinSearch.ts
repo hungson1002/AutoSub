@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { workdir } from './ffmpeg';
 import { douyinCookieStore } from './douyinCookie';
 
-export interface DouyinSearchInput { keyword: string; sort: string; publishTime: string; cookie?: string; offset?: number; count?: number; searchId?: string; filterDuration?: string; searchRange?: string }
-export interface DouyinSearchItem { id: string; title: string; author: string; url: string; coverUrl?: string; duration: number; likes: number }
+export interface DouyinSearchInput { keyword: string; sort: string; publishTime: string; cookie?: string; offset?: number; count?: number; searchId?: string; filterDuration?: string; searchRange?: string; exactKeyword?: boolean; excludeKeywords?: string }
+export interface DouyinSearchItem { id: string; title: string; author: string; url: string; coverUrl?: string; duration: number; likes: number; comments: number; shares: number; publishedAt: number; views: number | null }
 export function validateDouyinSearch(value: unknown): DouyinSearchInput {
   const body = value as Partial<DouyinSearchInput> | undefined;
   if (!body || typeof body.keyword !== 'string' || !body.keyword.trim() || body.keyword.length > 100) throw new Error('Nhập từ khóa từ 1 đến 100 ký tự.');
@@ -14,9 +14,10 @@ export function validateDouyinSearch(value: unknown): DouyinSearchInput {
   if (!['0', '1', '2'].includes(sort) || !['0', '1', '7', '180'].includes(publishTime)) throw new Error('Bộ lọc tìm kiếm không hợp lệ.');
   if (body.cookie !== undefined && (typeof body.cookie !== 'string' || body.cookie.length > 20000 || /[\r\n]/.test(body.cookie))) throw new Error('Cookie không hợp lệ; dùng một dòng Cookie từ trình duyệt.');
   if (!Number.isInteger(body.offset ?? 0) || (body.offset ?? 0) < 0 || (body.offset ?? 0) > 10000 || ![10, 20, 25].includes(body.count ?? 20)
-    || !['', '0-1', '1-5', '5-10000'].includes(body.filterDuration ?? '') || !['0', '1', '2', '3'].includes(body.searchRange ?? '0')
+    || !['', '0-1', '1-5', '5-10000', '60+'].includes(body.filterDuration ?? '') || !['0', '1', '2', '3'].includes(body.searchRange ?? '0')
     || (body.searchId !== undefined && (typeof body.searchId !== 'string' || !/^[\w-]{0,200}$/.test(body.searchId)))) throw new Error('Bộ lọc hoặc phân trang không hợp lệ.');
-  return { keyword: body.keyword.trim(), sort, publishTime, cookie: body.cookie, offset: body.offset ?? 0, count: body.count ?? 20, searchId: body.searchId ?? '', filterDuration: body.filterDuration ?? '', searchRange: body.searchRange ?? '0' };
+  if ((body.exactKeyword !== undefined && typeof body.exactKeyword !== 'boolean') || (body.excludeKeywords !== undefined && (typeof body.excludeKeywords !== 'string' || body.excludeKeywords.length > 300))) throw new Error('Bộ lọc từ khóa không hợp lệ.');
+  return { keyword: body.keyword.trim(), sort, publishTime, cookie: body.cookie, offset: body.offset ?? 0, count: body.count ?? 20, searchId: body.searchId ?? '', filterDuration: body.filterDuration ?? '', searchRange: body.searchRange ?? '0', exactKeyword: body.exactKeyword ?? false, excludeKeywords: body.excludeKeywords?.trim() ?? '' };
 }
 
 export function normalizeDouyinSearch(raw: unknown): DouyinSearchItem[] {
@@ -37,7 +38,7 @@ export function normalizeDouyinSearch(raw: unknown): DouyinSearchItem[] {
       } catch { return false; }
     }) : undefined;
     const number = (value: unknown) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
-    return [{ id, title: String(item.desc || 'Video Douyin').slice(0, 1000), author: String(item.author?.nickname || '').slice(0, 150), url: `https://www.douyin.com/video/${id}`, coverUrl: cover, duration: number(item.video.duration ?? item.duration) / 1000, likes: number(item.statistics?.digg_count) }];
+    return [{ id, title: String(item.desc || 'Video Douyin').slice(0, 1000), author: String(item.author?.nickname || '').slice(0, 150), url: `https://www.douyin.com/video/${id}`, coverUrl: cover, duration: number(item.video.duration ?? item.duration) / 1000, likes: number(item.statistics?.digg_count), comments: number(item.statistics?.comment_count), shares: number(item.statistics?.share_count), publishedAt: number(item.create_time) <= Date.now() / 1000 ? number(item.create_time) : 0, views: number(item.statistics?.play_count) > 0 ? number(item.statistics.play_count) : null }];
   });
 }
 

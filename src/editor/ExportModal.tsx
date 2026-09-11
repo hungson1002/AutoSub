@@ -62,6 +62,7 @@ export function ExportModal({
   dubbingAudioMix?: {
     keepOriginal: boolean;
     originalVolume: number;
+    dubVolume?: number;
     separateVocals?: boolean;
   };
   slowVideoToMatchSpeech?: boolean;
@@ -164,11 +165,9 @@ export function ExportModal({
           uploadId: asset?.uploadId,
           resolution: "original",
           crf: 20,
-          // A dub track is already the selected audio mix. Re-adding the
-          // source video's audio here would bring the original dialogue back
-          // and create the same two-speaker echo as the old preview.
-          keepAudio: hasDub ? false : true,
+          keepAudio: hasDub ? Boolean(dubbingAudioMix?.keepOriginal && !dubbingAudioMix.separateVocals) : true,
           originalVolume: dubbingAudioMix?.originalVolume ?? 0.25,
+          dubVolume: dubbingAudioMix?.dubVolume ?? 1,
           burnSubtitles: Boolean(style.visible),
           separateVocals: false,
           blurRegions: exportBlurRegions,

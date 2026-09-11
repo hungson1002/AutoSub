@@ -4,7 +4,7 @@ import { api, buildTranslationMemory, friendlyErrorMessage, MAX_BROWSER_UPLOAD_B
 import { capabilityAssignments } from '../lib/settings';
 import { parseSubtitle } from '../lib/subtitles';
 import { storage } from '../lib/storage';
-import { translationBatchSize } from '../lib/translationConfig';
+import { mapTranslationBatches, translationBatchSize, translationConcurrency } from '../lib/translationConfig';
 import { CapabilityAssignmentPicker } from '../components/CapabilityAssignmentPicker';
 import { TestedModelSelect } from '../components/TestedModelSelect';
 import { SelectField } from '../components/SelectField';
@@ -100,13 +100,16 @@ export function AutoPipelinePage({ providers, settings, cues, asset, onCuesChang
         let guide = '';
         try { guide = (await api.translationGuide(provider, translation.model, nextCues, sourceLanguage, targetLanguage, 'Tự nhiên, phù hợp lồng tiếng', '', storage.glossary().filter((item) => item.enabled), controller.signal)).guide; } catch (error) { if (error instanceof DOMException && error.name === 'AbortError') throw error; }
         const batchSize = translationBatchSize('quality');
-        for (let start = 0; start < nextCues.length; start += batchSize) {
-          const batch = nextCues.slice(start, start + batchSize);
-          setMessage(`Đang dịch cue ${start + 1}–${start + batch.length}/${nextCues.length}…`);
+        const sourceCues = nextCues.map((cue) => ({ ...cue }));
+        const batches = Array.from({ length: Math.ceil(sourceCues.length / batchSize) }, (_, index) => sourceCues.slice(index * batchSize, (index + 1) * batchSize));
+        let translatedCount = 0;
+        await mapTranslationBatches(batches, translationConcurrency('quality'), async (batch) => {
+          setMessage(`Đang dịch song song · đã xong ${translatedCount}/${sourceCues.length} cue…`);
           const result = await api.translate(provider, translation.model, batch, sourceLanguage, targetLanguage, 'Tự nhiên, phù hợp lồng tiếng', '', storage.glossary().filter((item) => item.enabled), controller.signal, nextCues, buildTranslationMemory(nextCues, batch[0]?.id || '', 24), guide);
           for (const item of result.items) { const cue = nextCues.find((candidate) => candidate.id === item.id); if (cue) cue.translatedText = item.translation; }
-          setProgress(35 + ((start + batch.length) / Math.max(nextCues.length, 1)) * 25);
-        }
+          translatedCount += batch.length;
+          setProgress(35 + (translatedCount / Math.max(sourceCues.length, 1)) * 25);
+        });
         onCuesChange(nextCues);
       }
 
@@ -117,7 +120,7 @@ export function AutoPipelinePage({ providers, settings, cues, asset, onCuesChang
         setStage('dub', 62, 'Đang tạo dubbing job…');
         const enabled = nextCues.filter((cue) => cue.enabled);
         const entries = enabled.map((cue, index) => ({ id: cue.id, index: cue.index, startMs: cue.startMs, endMs: cue.endMs, originalText: cue.originalText, translatedText: cue.translatedText, text: cue.translatedText || cue.originalText, previousText: enabled[index - 1]?.translatedText || enabled[index - 1]?.originalText || '', nextText: enabled[index + 1]?.translatedText || enabled[index + 1]?.originalText || '', provider, model: tts.model, voice, speed: 1, volume: 1 }));
-        const created = await api.createDubbingJob(entries, { videoId: asset?.uploadId, timingMode: 'strict', batchSize: 30, ttsConcurrency: 3, llmConcurrency: 2, maxRetries: 3, audioMix: { mode: 'background', keepOriginal: true, originalVolume: .18 } }, controller.signal);
+        const created = await api.createDubbingJob(entries, { videoId: asset?.uploadId, timingMode: 'strict', batchSize: 30, ttsConcurrency: 6, llmConcurrency: 3, maxRetries: 3, audioMix: { mode: 'background', keepOriginal: true, originalVolume: .18 } }, controller.signal);
         dubbingJobId = created.jobId; if (asset?.uploadId) storage.saveDubbingJob(asset.uploadId, dubbingJobId);
         await api.startDubbingJob(dubbingJobId, controller.signal);
         for (;;) {

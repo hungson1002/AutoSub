@@ -19,7 +19,7 @@ export interface TranslationItem {
 }
 export interface TranslationMemoryItem { source: string; translation: string; }
 export interface SubtitleWord { word?: string; text?: string; start?: number; end?: number; startMs?: number; endMs?: number; probability?: number; confidence?: number; }
-export interface SubtitleSegment { id?: string; start?: number; end?: number; text?: string; words?: SubtitleWord[]; }
+export interface SubtitleSegment { id?: string; start?: number; end?: number; text?: string; words?: SubtitleWord[]; no_speech_prob?: number; avg_logprob?: number; compression_ratio?: number; }
 
 export type ReviewAspectRatio = 'original' | '16:9' | '9:16';
 export type ReviewJobState = 'queued' | 'transcribing' | 'scripting' | 'voicing' | 'rendering' | 'completed' | 'failed' | 'cancelled';

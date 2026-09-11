@@ -92,9 +92,13 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
     if (!container || position === undefined) return;
     const itemTop = position * CUE_SLOT_HEIGHT;
     const itemBottom = itemTop + CUE_SLOT_HEIGHT;
-    const padding = 10;
-    if (itemTop < container.scrollTop + padding || itemBottom > container.scrollTop + container.clientHeight - padding) {
-      container.scrollTo({ top: Math.max(0, itemTop - padding), behavior: 'auto' });
+    const safePadding = CUE_SLOT_HEIGHT * 0.35;
+    const safeTop = container.scrollTop + safePadding;
+    const safeBottom = container.scrollTop + container.clientHeight - safePadding;
+    if (itemTop < safeTop || itemBottom > safeBottom) {
+      const targetTop = Math.max(0, itemTop - (container.clientHeight - CUE_SLOT_HEIGHT) / 2);
+      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      container.scrollTo({ top: targetTop, behavior: reduceMotion ? 'auto' : 'smooth' });
     }
   }, [activeCueId, cuePositions]);
 

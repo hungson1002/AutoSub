@@ -13,7 +13,7 @@ import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { run, ensureWorkdir, preferredH264Encoder } from "../services/ffmpeg";
 import { getDubbingResult } from "../services/dubbingJobs";
-import { buildExportAudioFilter, buildRetimedSourceAudioFilter, retimedDurationMs, retimedWindows } from "../services/exportAudio";
+import { assertDubbingSourceDuration, buildExportAudioFilter, buildRetimedSourceAudioFilter, retimedDurationMs, retimedWindows } from "../services/exportAudio";
 import {
   cleanupUploadSession,
   createTemporarySession,
@@ -138,29 +138,20 @@ export function buildSlowVideoFilter(
   }>,
   output = "slowDubVideo",
 ) {
-  const slowed = retimedWindows(metadata);
-  if (!slowed.length) return `[${input}]setpts=PTS-STARTPTS[${output}]`;
-
-  const segments: Array<{ endMs?: number; scale: number }> = [];
-  let cursorMs = 0;
-  for (const cue of slowed) {
-    const { startMs, endMs } = cue;
-    if (startMs > cursorMs) segments.push({ endMs: startMs, scale: 1 });
-    if (endMs > startMs) segments.push({ endMs, scale: cue.scale });
-    cursorMs = endMs;
+  // Retiming each tiny segment and concatenating loses fractional frame
+  // durations at every boundary. Thousands of cues accumulate minutes of drift.
+  // Map the original timeline continuously instead, using the same windows
+  // as retimedDurationMs and the audio graph. Balance the sum to keep parser
+  // nesting logarithmic for long-form videos.
+  let terms = retimedWindows(metadata).map(({ startMs, endMs, scale }) =>
+    `clip((PTS-STARTPTS)*TB-${(startMs / 1000).toFixed(6)},0,${((endMs - startMs) / 1000).toFixed(6)})*${(scale - 1).toFixed(9)}`,
+  );
+  if (!terms.length) return `[${input}]setpts=PTS-STARTPTS[${output}]`;
+  while (terms.length > 1) {
+    terms = terms.flatMap((term, index) => index % 2 ? [] :
+      [index + 1 < terms.length ? `(${term}+${terms[index + 1]})` : term]);
   }
-  segments.push({ scale: 1 });
-
-  const timestamps = segments.slice(0, -1).map((segment) => ((segment.endMs || 0) / 1000).toFixed(6)).join("|");
-  const sources = segments.map((_segment, index) => `[retimeVideoSrc${index}]`).join("");
-  const parts = segments.map((_segment, index) => `[retimeVideoPart${index}]`).join("");
-  const filters = [`[${input}]segment=timestamps=${timestamps}${sources}`];
-  segments.forEach((segment, index) => {
-    const scale = Math.abs(segment.scale - 1) < 0.0000005 ? "" : `*${segment.scale.toFixed(9)}`;
-    filters.push(`[retimeVideoSrc${index}]setpts=(PTS-STARTPTS)${scale}[retimeVideoPart${index}]`);
-  });
-  filters.push(`${parts}concat=n=${segments.length}:v=1:a=0[${output}]`);
-  return filters.join(";");
+  return `[${input}]setpts='PTS-STARTPTS+(${terms[0]})/TB'[${output}]`;
 }
 
 /**
@@ -534,6 +525,7 @@ export async function exportRoutes(app: FastifyInstance) {
       crf?: number;
       keepAudio: boolean;
       originalVolume?: number;
+      dubVolume?: number;
       burnSubtitles?: boolean;
       separateVocals?: boolean;
       blurRegions?: Region[];
@@ -584,6 +576,8 @@ export async function exportRoutes(app: FastifyInstance) {
     if (options.dubbingJobId) {
       try {
         const result = await getDubbingResult(options.dubbingJobId);
+        const sourceProbe = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', input]);
+        assertDubbingSourceDuration(Number(sourceProbe.stdout.trim()) * 1000, result.metadata);
         jobDubPath = result.audioFile;
         if (result.job.config.slowVideoToMatchSpeech) slowVideoMetadata = result.metadata;
         jobKeepOriginal = Boolean(result.job.config.audioMix.keepOriginal && !result.job.config.audioMix.separateVocals);
@@ -883,12 +877,13 @@ export async function exportRoutes(app: FastifyInstance) {
         hasDub,
         dubInputIndex,
         backgroundInputIndex,
-        keepAudio: options.keepAudio || jobKeepOriginal,
-        originalVolume: jobOriginalVolume ?? options.originalVolume,
+        keepAudio: typeof options.keepAudio === "boolean" ? options.keepAudio : jobKeepOriginal,
+        originalVolume: options.originalVolume ?? jobOriginalVolume,
+        dubVolume: options.dubVolume,
         jobDubIncludesBackground,
-        originalInputLabel: slowVideoMetadata?.length && (options.keepAudio || jobKeepOriginal) ? "retimedOriginal" : "0:a",
+        originalInputLabel: slowVideoMetadata?.length && (typeof options.keepAudio === "boolean" ? options.keepAudio : jobKeepOriginal) ? "retimedOriginal" : "0:a",
       });
-      if (slowVideoMetadata?.length && (options.keepAudio || jobKeepOriginal)) {
+      if (slowVideoMetadata?.length && (typeof options.keepAudio === "boolean" ? options.keepAudio : jobKeepOriginal)) {
         filters.unshift(buildRetimedSourceAudioFilter(slowVideoMetadata));
       }
       if (audio) filters.push(audio);
@@ -900,7 +895,8 @@ export async function exportRoutes(app: FastifyInstance) {
       // Keep H.264 compatibility and benchmark the available encoders once per
       // server run. QVBR preserves the requested visual-quality target when
       // AMD AMF wins; otherwise the established x264 path remains unchanged.
-      const requestedQuality = String(Math.round(clamp(Number(options.crf ?? 20), 16, 35)));
+      const requestedCrf = Math.round(clamp(Number(options.crf ?? 20), 16, 35));
+      const requestedQuality = String(requestedCrf);
       const videoEncoder = copyVideoStream ? undefined : await preferredH264Encoder();
       if (copyVideoStream) {
         args.push("-c:v", "copy");
@@ -914,7 +910,10 @@ export async function exportRoutes(app: FastifyInstance) {
       } else {
         args.push(
           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high",
-          "-tag:v", "avc1", "-crf", requestedQuality, "-preset", "veryfast",
+          // Superfast is materially quicker on the local Ryzen CPU. Lower CRF
+          // by two points to preserve visual quality; the trade-off is only a
+          // somewhat larger output file.
+          "-tag:v", "avc1", "-crf", String(Math.max(14, requestedCrf - 2)), "-preset", "superfast",
         );
       }
       if (audio) args.push("-c:a", "aac", "-shortest");

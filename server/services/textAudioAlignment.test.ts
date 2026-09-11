@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   alignTranscriptToAudio,
+  filterCuesOutsideSpeech,
   type AlignmentCue,
 } from './textAudioAlignment';
 import { DEFAULT_TIMESTAMP_REFINEMENT } from './timestampRefinement';
@@ -12,6 +13,17 @@ import { cleanupUploadSession, createUploadSession } from './uploads';
 function cue(startMs: number, endMs: number, text: string, extra: Partial<AlignmentCue> = {}): AlignmentCue {
   return { id: text, index: 1, startMs, endMs, originalText: text, translatedText: '', voiceGroup: 'G1', enabled: true, ...extra };
 }
+
+test('high-confidence VAD removes Whisper cues located entirely in silence', () => {
+  const cues = [cue(0, 1200, 'spoken'), cue(3000, 4500, 'hallucinated')];
+  const filtered = filterCuesOutsideSpeech(cues, [{ startMs: 0, endMs: 1400 }], 'high');
+  assert.deepEqual(filtered.map((item) => item.originalText), ['spoken']);
+});
+
+test('low-confidence silence detection never removes transcript text', () => {
+  const cues = [cue(3000, 4500, 'keep me')];
+  assert.equal(filterCuesOutsideSpeech(cues, [], 'low').length, 1);
+});
 
 test('aligns the real regression shape with a long silence gap', async () => {
   const result = await alignTranscriptToAudio({

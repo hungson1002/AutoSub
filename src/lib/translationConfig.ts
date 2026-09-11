@@ -2,6 +2,24 @@ export type TranslationMode = 'quality' | 'fast';
 
 export const translationBatchSize = (mode: TranslationMode) => mode === 'quality' ? 20 : 32;
 
+// Translation batches are independent once the terminology/character guide
+// has been generated. Keep quality mode conservative for provider stability;
+// fast mode can use one more request without changing model or prompt quality.
+export const translationConcurrency = (mode: TranslationMode) => mode === 'quality' ? 2 : 3;
+
+export async function mapTranslationBatches<T, R>(items: T[], concurrency: number, task: (item: T, index: number) => Promise<R>) {
+  const output = new Array<R>(items.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(items.length, Math.max(1, concurrency)) }, async () => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      output[index] = await task(items[index] as T, index);
+    }
+  }));
+  return output;
+}
+
 export const translationModes = [
   { value: 'quality', label: 'Chất lượng', description: '20 cue/batch · nhiều ngữ cảnh hơn' },
   { value: 'fast', label: 'Nhanh', description: '32 cue/batch · ít lượt gọi hơn' },

@@ -14,6 +14,8 @@ import { searchDouyinVideos } from '../services/douyinSearch';
 import { validateDouyinSearch } from '../services/douyinSearch';
 import { douyinCookieStore } from '../services/douyinCookie';
 import { runDouyinTool } from '../services/douyinTools';
+import { assessDouyinTopic } from '../services/douyinRelevance';
+import { getDouyinTrends } from '../services/douyinTrends';
 
 const THUMBNAIL_HOST_SUFFIXES = [
   '.hdslb.com',
@@ -35,6 +37,18 @@ function isSupportedThumbnailUrl(rawUrl: string) {
 }
 
 export async function douyinRoutes(app: FastifyInstance) {
+  app.get('/api/douyin/trends', async (_request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try { return await getDouyinTrends(); }
+    catch { return reply.code(502).send({ error: 'Không lấy được bảng xu hướng Douyin. Thử lại hoặc mở bảng chính thức.' }); }
+  });
+  app.post('/api/douyin/relevance', { bodyLimit: 60000 }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const allowed = new Set(['http://localhost:5173', 'http://127.0.0.1:5173', `${request.protocol}://${request.headers.host}`]);
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.ip) || (request.headers.origin && !allowed.has(request.headers.origin))) return reply.code(403).send({ error: 'Chỉ đánh giá từ AutoSub trên máy này.' });
+    try { return await assessDouyinTopic(request.body); }
+    catch { return reply.code(400).send({ error: 'Không đánh giá được chủ đề. Kiểm tra model dịch/cấu hình; kết quả tìm kiếm vẫn được giữ.' }); }
+  });
   app.post('/api/douyin/tools', { bodyLimit: 16000 }, async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     const allowed = new Set(['http://localhost:5173', 'http://127.0.0.1:5173', `${request.protocol}://${request.headers.host}`]);
