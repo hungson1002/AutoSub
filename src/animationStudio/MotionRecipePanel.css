@@ -1,0 +1,9 @@
+.motion-recipe-panel { min-width:0; margin:0; padding:12px; border:1px solid #34404e; border-radius:8px; display:grid; gap:10px; }
+.motion-recipe-panel legend { padding:0 5px; font-size:12px; color:#e1e6ee; }
+.motion-recipe-panel p,.motion-recipe-panel [role=status] { margin:0; font-size:11px; line-height:1.5; color:#a9b7c6; }
+.motion-recipe-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
+.motion-recipe-panel button { min-height:34px; padding:7px; border:1px solid #34404e; border-radius:5px; background:#151e28; color:#dce3ea; font-size:11px; }
+.motion-recipe-panel button[aria-pressed=true] { border-color:#ff873d; color:#ffad78; background:#342820; }
+.motion-recipe-panel button:focus-visible { outline:2px solid #ff873d; outline-offset:2px; }
+.motion-recipe-panel button:disabled { opacity:.5; }
+.motion-recipe-panel svg { display:block; width:100%; max-height:130px; }

@@ -225,6 +225,35 @@ test('single-stream downloader retries when the CDN terminates the response', as
   }
 });
 
+test('parallel workers take successive small ranges and preserve exact file bytes', async () => {
+  const originalFetch = globalThis.fetch;
+  const size = 1024 * 1024;
+  const bytes = Buffer.alloc(8 * size);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
+  const starts: number[] = [];
+  globalThis.fetch = async (_url, init) => {
+    const range = new Headers(init?.headers).get('range')!;
+    const [, from, to] = /bytes=(\d+)-(\d+)/.exec(range)!;
+    const start = Number(from), end = Number(to);
+    if (end > 0) starts.push(start);
+    return new Response(bytes.subarray(start, end + 1), { status: 206 });
+  };
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'autosub-range-queue-'));
+  try {
+    const target = path.join(directory, 'video.mp4');
+    const progress: number[] = [];
+    assert.equal(await downloadTurboStream('https://cdn.example/video', target, bytes.length, {},
+      new AbortController().signal, (value) => progress.push(value), 2, size), bytes.length);
+    assert.deepEqual(starts.slice(0, 2), [0, size]);
+    assert.deepEqual([...starts].sort((a, b) => a - b), Array.from({ length: 8 }, (_, i) => i * size));
+    assert.ok(progress.every((value, i) => i === 0 || value >= progress[i - 1]));
+    assert.deepEqual(await readFile(target), bytes);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('parallel downloader resumes a Bilibili range after a terminated stream', async () => {
   const originalFetch = globalThis.fetch;
   const totalBytes = 6 * 1024 * 1024;

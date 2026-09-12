@@ -45,6 +45,25 @@ export type LongAnimationSegment = {
 
 type DirectorAssetRequest = NonNullable<DirectorReply['assetRequests']>[number];
 
+export function animationPerformancePlanIssues(segments: LongAnimationSegment[]) {
+  const issues: string[] = [];
+  let movingBeats = 0;
+  segments.forEach((segment, sceneIndex) => segment.visualBeats.forEach((beat, beatIndex) => {
+    const actorMotion = beat.actors?.some((actor) => actor.animation !== 'idle' || actor.fromX !== actor.toX);
+    const objectMotion = beat.objects?.some((object) => object.path.some((point) => {
+      const first = object.path[0];
+      return first && (point.x !== first.x || point.y !== first.y || point.rotation !== first.rotation);
+    }));
+    const performance = Boolean(beat.narrationCue && beat.action && (actorMotion || objectMotion));
+    if (performance) movingBeats++;
+    if (beat.purpose === 'action' && !performance) {
+      issues.push(`Cảnh ${sceneIndex + 1}, nhịp ${beatIndex + 1}: hành động chưa có sprite hoặc đối tượng chuyển động. Ảnh zoom và chữ hiện lần lượt không thể thay hành động.`);
+    }
+  }));
+  if (!movingBeats) issues.push('Kế hoạch chỉ có ảnh/chữ, chưa có animation thực. Cần lập lại hành động với sprite khả thi hoặc đối tượng chuyển động đúng nội dung.');
+  return issues;
+}
+
 export function animationActorPlanIssues(segments: LongAnimationSegment[], plan: Pick<DirectorReply, 'spriteRequests' | 'characterRequests'>, assets: AnimationAsset[], canGenerateSprites: boolean) {
   const capabilities = new Map(assets.filter((asset) => asset.sprite && asset.status !== 'rejected').map((asset) => [asset.id, Object.keys(asset.sprite!.clips)]));
   const issues: string[] = [];
@@ -235,6 +254,7 @@ If a recurring character needs real pose animation and no suitable sprite is in 
 For each beat you may add actors:[{assetId,animation,fromX,toX,y}] using ONLY actual sprite catalog IDs and clip names below; coordinates are normalized .1..9. Background prompts must omit actors that will be composited as sprites. Actor movement uses actual sprite frames, not image zoom. Catalog: ${JSON.stringify(spriteCatalog)}.
 For explanation/cause-effect/comparison beats add diagram:{steps:["short Vietnamese cause","short process","short result"]} with 2–3 factually supported labels, no invented statistics. These become separate editable cards with staggered movement, NOT text baked into an image. Use a diagram only when it explains a relationship more clearly than a scene; no minimum diagram quota. Do not add meaningless particles or arrows. Do not pretend a still image performs walking, chewing or pulling; when no matching sprite exists use an explanatory diagram for the process and a clearly illustrative still for context. Choose 1–6 meaningful beats; no fixed quota. Do not invent asset IDs.`;
   brief = `${brief}\n\n${performanceRules}\nYou can CREATE up to 3 new articulated 2D characters with root characterRequests:[{key:"hero",name:"...",kind:"stick|robot",color:"#54d8c2"}]. Reference key as actors.assetId; available clips are idle,walk,run,point,talk. Reuse the SAME key across scenes to lock identity. Create these stylized rigs ONLY if the user's brief explicitly requests stick figures or a simple robot presenter. Otherwise omit characterRequests entirely. Never substitute these rigs for a story's characters or animals. These are transparent vector sprites; backgrounds must match flat 2D style and leave space for the actors, not contain duplicates. Walking/running actors need travel fromX to toX; point/idle/talk should generally remain in place.\nFor a genuine A/B contrast use diagram:{layout:"comparison",steps:["A: concise defining feature","B: concise contrasting feature"]}. For causal explanations use layout:"process". Labels must express the actual distinction, not generic headings. Do not force comparisons into action-only topics. Keep each label under 50 characters for mobile readability.`;
+  brief += `\nREQUIRED DELIVERY: This is animation, not a narrated image slideshow. Every purpose=action beat must specify a feasible actors performance or independently moving objects, tied to an exact narrationCue and visible before/after action. Camera pan/zoom, idle actors, fades and text-card reveals alone do not qualify. Preserve deliberate establishing holds, but the overall film must contain substantive subject motion. Do not relabel action beats as establishing to bypass this requirement. If a required character action cannot be rendered with the supported assets/clips, report the missing capability rather than replace the character with a diagram or a still. Available sprite generation: ${input.assetGeneration?.generator === 'flow-agent' ? 'Flow enabled' : 'disabled; use existing matching assets only'}.`;
   const checkpoint = await loadAnimationCheckpoint<{ plan: DirectorReply; segments: LongAnimationSegment[]; sceneIds: string[] }>(checkpointKey);
   let plan: DirectorReply;
   let segments: LongAnimationSegment[];
@@ -253,7 +273,7 @@ For explanation/cause-effect/comparison beats add diagram:{steps:["short Vietnam
   segments = normalizeLongAnimationSegments(plan, sceneCount);
   // Repair motion planning before image requests, rather than hide slideshow warnings after rendering.
   const needsMotion = (segment: LongAnimationSegment) => !segment.visualBeats.some((b) => b.narrationCue && b.action && ( b.actors?.length || (b.diagram?.steps.length || 0) >= 2 || b.objects?.some((o) => o.path.some((p) => p.x !== o.path[0].x || p.y !== o.path[0].y || p.rotation !== o.path[0].rotation))));
-  if (segments.some(needsMotion) || animationActorPlanIssues(segments, plan, assets, input.assetGeneration?.generator === 'flow-agent').length) {
+  if (segments.some(needsMotion) || animationPerformancePlanIssues(segments).length || animationActorPlanIssues(segments, plan, assets, input.assetGeneration?.generator === 'flow-agent').length) {
     const repaired = jsonFromDirectorReply(await chat(input.provider, input.model, [{ role: 'system', content: `Repair animation planning, JSON with segments, spriteRequests and characterRequests. Preserve resource requests referenced by actors; include any newly required resources. Keep segment count/order and narration verbatim. Replan illustration-only segments with meaningful explanatory motion where the subject supports it. Never invent facts, unrelated diagrams or generic characters. Keep honest establishing shots if motion is inappropriate. ${performanceRules}` }, { role: 'user', content: JSON.stringify({ brief, segments, spriteRequests: plan.spriteRequests, characterRequests: plan.characterRequests }) }], undefined, 16_384));
     const candidate = normalizeLongAnimationSegments(repaired, sceneCount);
     if (candidate.length === segments.length && candidate.every((item, i) => item.narration === segments[i].narration)) { segments = candidate; plan = { ...plan, ...repaired }; continuity = String(plan.continuityBible || '').trim().slice(0, 1800); }
@@ -264,11 +284,11 @@ For explanation/cause-effect/comparison beats add diagram:{steps:["short Vietnam
   if (segments.length < sceneCount) throw new Error(`AI Director chỉ trả về ${segments.length}/${sceneCount} cảnh. Hãy thử dựng lại để bảo đảm đủ nhịp hình và thời lượng.`);
   if (segments.some((segment) => !segment.visualBeats.length)) throw new Error('Director trả cảnh không có kế hoạch hình/chuyển động. Không tự bịa ảnh để lấp cảnh.');
     sceneIds = segments.map(() => randomUUID());
-    const capabilityIssues = animationActorPlanIssues(segments, plan, assets, input.assetGeneration?.generator === 'flow-agent');
+    const capabilityIssues = [...animationPerformancePlanIssues(segments), ...animationActorPlanIssues(segments, plan, assets, input.assetGeneration?.generator === 'flow-agent')];
     if (capabilityIssues.length) throw new Error(capabilityIssues.join(' '));
     await saveAnimationCheckpoint(checkpointKey, { plan, segments, sceneIds });
   }
-  const capabilityIssues = animationActorPlanIssues(segments, plan, assets, input.assetGeneration?.generator === 'flow-agent');
+  const capabilityIssues = [...animationPerformancePlanIssues(segments), ...animationActorPlanIssues(segments, plan, assets, input.assetGeneration?.generator === 'flow-agent')];
   if (capabilityIssues.length) throw new Error(capabilityIssues.join(' '));
   const generationWarnings: string[] = [];
   const requests = (plan as DirectorReply & { characterRequests?: Array<{ key: string; name: string; kind: 'stick' | 'robot'; color?: string }> }).characterRequests;
@@ -288,6 +308,10 @@ For explanation/cause-effect/comparison beats add diagram:{steps:["short Vietnam
     catch (error) { if (error instanceof Error && error.name === 'AbortError') throw error; generationWarnings.push(error instanceof Error ? error.message : `Không tạo được sprite ${request.name}.`); }
   }
   for (const segment of segments) for (const beat of segment.visualBeats) for (const actor of beat.actors || []) actor.assetId = characterIds.get(actor.assetId) || actor.assetId;
+  // Resolve actual generated assets before spending on backgrounds or voice.
+  // Failed sprite generation must not silently become a narrated still.
+  const missingPerformances = animationActorPlanIssues(segments, {}, assets, false);
+  if (missingPerformances.length) throw new Error([...missingPerformances, ...generationWarnings].join(' '));
   const totalWords = segments.reduce((total, segment) => total + segment.narration.split(/\s+/).length, 0);
   const targetMs = targetDurationSeconds * 1000;
   let allocatedMs = 0;

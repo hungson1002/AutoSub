@@ -8,6 +8,7 @@ import { AssignmentSummary } from '../components/AssignmentSummary';
 import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
 import { Check, CirclePlay, FileVideo, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Upload, WandSparkles, X } from '../components/Icons';
+import { loadVoicePreview, primeVoicePreview, VI_VOICE_PREVIEW_TEXT } from '../lib/voicePreview';
 
 type YouTubeConnection = { connected: boolean; channelId?: string; channelTitle?: string; error?: string };
 type MediaAction = 'idle' | 'uploading' | 'picking';
@@ -114,6 +115,10 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
     const next = ttsProviderType === 'hiiu-tts' ? ttsAssignment.model : voiceItems.some((item) => item.id === voice) ? voice : voiceItems[0]?.id || (ttsProviderType === 'openai-compatible' ? 'alloy' : '');
     if (next !== voice) setVoice(next);
   }, [ttsAssignment.model, ttsProvider?.id, ttsProviderType, voiceItems]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => primeVoicePreview(ttsProvider, ttsAssignment.model, voice, voiceSpeed), 250);
+    return () => window.clearTimeout(timer);
+  }, [ttsProvider?.id, ttsAssignment.model, voice, voiceSpeed]);
 
   useEffect(() => {
     if (ttsProviderType !== 'vieneu-local') return;
@@ -189,7 +194,7 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
     const requestId = voicePreviewRequestRef.current;
     setTestingVoice(true);
     try {
-      const blob = await api.testVoice(ttsProvider, ttsAssignment.model, voice, voiceSpeed, 'Đây là bản thử giọng cho video review của AutoSub.');
+      const blob = await loadVoicePreview(ttsProvider, ttsAssignment.model, voice, voiceSpeed, VI_VOICE_PREVIEW_TEXT);
       if (requestId !== voicePreviewRequestRef.current) return;
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);

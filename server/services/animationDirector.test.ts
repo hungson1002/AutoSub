@@ -3,6 +3,23 @@ import test from 'node:test';
 import { animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, directorRepairRule, jsonFromDirectorReply, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets } from './animationDirector';
 import { wavDurationMs } from './animationAssets';
 import { animationCraftRules } from './directorKnowledge';
+import { animationPerformancePlanIssues } from './animationDirector';
+import { evaluateScene } from '../../src/animationStudio/evaluator';
+import { defaultTransform } from '../../shared/animationStudio';
+
+test('rejects action stills and slide-only plans but compiles a moving subject', () => {
+  const segments = normalizeLongAnimationSegments({ segments: [{ narration: 'Quả bóng đi từ trái sang phải.', visualBeats: [{ purpose: 'action', visual: 'A ball', motion: 'push', narrationCue: 'Quả bóng đi từ trái sang phải', action: 'Ball travels left to right' }] }] }, 1);
+  assert.ok(animationPerformancePlanIssues(segments).length);
+  segments[0].visualBeats[0].objects = [{ name: 'Ball', shape: 'ellipse', fill: '#ff873d', width: .1, height: .1, path: [{ t: 0, x: .2, y: .4, rotation: 0 }, { t: 1, x: .8, y: .4, rotation: 180 }] }];
+  assert.deepEqual(animationPerformancePlanIssues(segments), []);
+  const performance = buildBeatPerformances({ sceneIndex: 0, durationMs: 5000, width: 1280, height: 720, assets: [], beats: segments[0].visualBeats });
+  const scene = { id: 'test', name: 'Ball travels', renderMode: 'composite' as const, durationMs: 5000, narration: segments[0].narration, order: 0, backgroundColor: '#000000', ...performance, camera: { transform: defaultTransform(), commands: [] } };
+  const before = evaluateScene(scene, 1000).layers.find((layer) => layer.type === 'shape')!;
+  const after = evaluateScene(scene, 4000).layers.find((layer) => layer.id === before.id)!;
+  assert.ok(after.transform.position.x > before.transform.position.x);
+  assert.ok(after.transform.rotation > before.transform.rotation);
+  assert.deepEqual(evaluateScene(scene, 1000).camera, evaluateScene(scene, 4000).camera);
+});
 
 test('actor preflight rejects missing or unsupported clips before image generation', () => {
   const segments = normalizeLongAnimationSegments({ segments: [{ narration: 'Nhân vật bước tới bàn.', visualBeats: [{ visual: 'A room', narrationCue: 'Nhân vật bước tới bàn', action: 'Walk towards table', actors: [{ assetId: 'hero', animation: 'walk', fromX: .2, toX: .6, y: .6 }] }] }] }, 1);

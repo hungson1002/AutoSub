@@ -919,7 +919,10 @@ export async function exportRoutes(app: FastifyInstance) {
       // AMD AMF wins; otherwise the established x264 path remains unchanged.
       const requestedCrf = Math.round(clamp(Number(options.crf ?? 20), 16, 35));
       const requestedQuality = String(requestedCrf);
-      const videoEncoder = copyVideoStream ? undefined : await preferredH264Encoder();
+      const [videoEncoder, durationProbe] = await Promise.all([
+        copyVideoStream ? undefined : preferredH264Encoder(),
+        run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", input], requestAbort.signal),
+      ]);
       if (copyVideoStream) {
         args.push("-c:v", "copy");
       } else if (videoEncoder === "h264_amf") {
@@ -941,19 +944,6 @@ export async function exportRoutes(app: FastifyInstance) {
       if (audio) args.push("-c:a", "aac", "-shortest");
       else args.push("-an");
 
-      const durationProbe = await run(
-        "ffprobe",
-        [
-          "-v",
-          "error",
-          "-show_entries",
-          "format=duration",
-          "-of",
-          "default=nw=1:nk=1",
-          input,
-        ],
-        requestAbort.signal,
-      );
       const sourceDurationMs = Math.max(
         1,
         Number(durationProbe.stdout.trim()) * 1000,

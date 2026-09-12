@@ -10,9 +10,9 @@ export const MAX_VOICE_REFERENCE_BYTES = 25 * 1024 * 1024;
 export const MIN_VOICE_REFERENCE_SECONDS = 3;
 export const MAX_VOICE_REFERENCE_SECONDS = 15;
 const NORMALIZED_REFERENCE_SECONDS = 8;
-export const VOICE_REFERENCE_VERSION = 2;
+export const VOICE_REFERENCE_VERSION = 3;
 export const VOICE_REFERENCE_SAMPLE_RATE = 48_000;
-export const VOICE_REFERENCE_FILTER = 'silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.10:start_threshold=-45dB,areverse,loudnorm=I=-20:LRA=7:TP=-3';
+export const VOICE_REFERENCE_FILTER = 'silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.10:start_threshold=-45dB,areverse';
 
 export interface VoiceCloneProfile {
   id: string;

@@ -8,6 +8,7 @@ import { resolvedProviderType } from '../lib/providers';
 import { RangeInput } from '../components/RangeInput';
 import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
 import { CapabilityAssignmentPicker } from '../components/CapabilityAssignmentPicker';
+import { EN_VOICE_PREVIEW_TEXT, hasVoicePreview, loadVoicePreview as loadCachedVoicePreview, primeVoicePreview, VI_VOICE_PREVIEW_TEXT } from '../lib/voicePreview';
 
 const groups: VoiceGroup[] = ['G1', 'G2', 'G3'];
 export type VoiceConfig = { assignment: ProviderAssignment; voice: string; speed: number; volume: number };
@@ -47,8 +48,6 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const previewRequestRef = useRef(0);
-  const previewCacheRef = useRef(new Map<string, Blob>());
-  const previewPendingRef = useRef(new Map<string, Promise<Blob>>());
   const assignmentOptions = availableAssignments.length ? availableAssignments : [assignments.G1];
   const current = configs[active];
   const currentProvider = providers.find((item) => item.id === current.assignment.providerId);
@@ -133,26 +132,18 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   }, []);
   useEffect(() => listenForOtherDropdowns(voiceDropdownId.current, () => setVoiceOpen(false)), []);
 
-  const previewText = () => isGroq ? 'Hello, this is a voice test.' : 'Xin chào, giọng thử AutoSub.';
-  const previewCacheKey = (voiceId: string) => currentProvider
-    ? [currentProvider.id, current.assignment.model, voiceId, current.speed.toFixed(2), previewText()].join('::')
-    : '';
+  const previewText = () => isGroq ? EN_VOICE_PREVIEW_TEXT : VI_VOICE_PREVIEW_TEXT;
+  const previewModel = (voiceId: string) => isHiiuTts ? voiceId : current.assignment.model;
   const loadVoicePreview = (voiceId: string) => {
     if (!currentProvider) return Promise.reject(new Error('Chưa chọn TTS provider.'));
-    const key = previewCacheKey(voiceId);
-    const cached = previewCacheRef.current.get(key);
-    if (cached) return Promise.resolve(cached);
-    const pending = previewPendingRef.current.get(key);
-    if (pending) return pending;
-    const task = api.testVoice(currentProvider, current.assignment.model, voiceId, current.speed, previewText()).then((blob) => {
-      previewCacheRef.current.set(key, blob);
-      while (previewCacheRef.current.size > 24) previewCacheRef.current.delete(previewCacheRef.current.keys().next().value as string);
-      return blob;
-    }).finally(() => previewPendingRef.current.delete(key));
-    previewPendingRef.current.set(key, task);
-    return task;
+    return loadCachedVoicePreview(currentProvider, previewModel(voiceId), voiceId, current.speed, previewText());
   };
-  const primeVoice = (voiceId: string) => { if (voiceId && currentProvider && current.assignment.model) void loadVoicePreview(voiceId).catch(() => undefined); };
+  const primeVoice = (voiceId: string) => primeVoicePreview(currentProvider, previewModel(voiceId), voiceId, current.speed, previewText());
+
+  useEffect(() => {
+    if (!open || !current.voice) return;
+    primeVoice(current.voice);
+  }, [open, currentProvider?.id, current.assignment.model, current.speed, current.voice]);
 
   useEffect(() => {
     if (!voiceOpen || !currentProvider) return;
@@ -167,7 +158,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
     const previewRequest = previewRequestRef.current;
     setPreviewingVoice(voiceId);
     try {
-      const cached = previewCacheRef.current.has(previewCacheKey(voiceId));
+      const cached = hasVoicePreview(currentProvider, previewModel(voiceId), voiceId, current.speed, previewText());
       const blob = await loadVoicePreview(voiceId);
       if (previewRequestRef.current !== previewRequest) return;
       const url = URL.createObjectURL(blob);

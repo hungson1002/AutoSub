@@ -44,7 +44,7 @@ export async function dubbingRoutes(app: FastifyInstance) {
     if (!body.provider?.baseUrl || !body.model) return reply.code(400).type('application/json').send({ error: 'Test voice cần Provider và Model ID.' });
     if (!body.voice && resolveProviderType(body.provider) !== 'hiiu-tts') return reply.code(400).type('application/json').send({ error: 'Model TTS này yêu cầu Voice ID.' });
     try {
-      const text = body.text?.trim() || 'This is an AutoSub voice test.';
+      const text = body.text?.trim() || 'Xin chào, đây là bản nghe thử để bạn đánh giá màu giọng, độ rõ, nhịp nói và cảm xúc trước khi dùng cho toàn bộ video.';
       const speed = Math.round((Number(body.speed) || 1) * 100) / 100;
       const key = createHash('sha256').update(JSON.stringify({ masteringVersion: DUB_MASTERING_VERSION, providerId: body.provider.id, providerType: resolveProviderType(body.provider), baseUrl: body.provider.baseUrl, apiKey: body.provider.apiKey || '', model: body.model, voice: body.voice || '', speed, text })).digest('hex');
       const result = await cachedTtsPreview(key, async () => masterDubBuffer(await synthesize(body.provider!, body.model!, body.voice || '', text, { speed, format: 'wav' })));

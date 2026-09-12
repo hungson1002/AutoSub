@@ -82,10 +82,12 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
     return `{\\fn${font}\\fs${Math.round(effective.fontSize)}\\c${assColor(effective.textColor)}\\3c${edgeColor}\\b${effective.bold === true ? 1 : 0}\\i${effective.italic === true ? 1 : 0}\\bord${outline}}`;
   };
   const enabledCues = cues.filter((cue) => cue.enabled);
+  const defaultStyleTag = cueStyleTag(style);
   const layerLayout = layoutTimelineCues(enabledCues);
   const layers = new Map(layerLayout.items.map(({ cue, lane }) => [cue.id, layerLayout.laneCount - lane]));
   const lines = enabledCues.flatMap((cue) => {
-    const effective = { ...style, ...(cue.styleOverrides || {}) };
+    const effective = cue.styleOverrides ? { ...style, ...cue.styleOverrides } : style;
+    const effectiveStyleTag = cue.styleOverrides ? cueStyleTag(effective) : defaultStyleTag;
     const translated = cue.translatedText || cue.originalText;
     const content = effective.content === 'original' ? cue.originalText : effective.content === 'both' && cue.originalText.trim() !== translated.trim() ? `${cue.originalText}\\N${translated}` : translated;
     const escaped = content.replace(/\r?\n/g, '\\N').replace(/[{}]/g, '');
@@ -95,7 +97,7 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
     const paddingY = Math.max(0, Math.round(effective.boxPaddingY ?? 4));
     const paddingTag = effective.background === 'box' ? `{\\xbord${paddingX}\\ybord${paddingY}}` : '';
     const renderLayer = (layers.get(cue.id) ?? 0) * 2;
-    const dialogue = (layer: number, tags: string) => `Dialogue: ${layer},${assTime(cue.startMs)},${assTime(cue.endMs)},${styleName},,0,0,0,,${positionTag}${cueStyleTag(effective)}${tags}${escaped}`;
+    const dialogue = (layer: number, tags: string) => `Dialogue: ${layer},${assTime(cue.startMs)},${assTime(cue.endMs)},${styleName},,0,0,0,,${positionTag}${effectiveStyleTag}${tags}${escaped}`;
     const borderWidth = effective.background === 'box' ? Math.max(0, Math.round(effective.boxBorderWidth ?? 0)) : 0;
     const border = borderWidth > 0
       ? dialogue(renderLayer, `{\\1a&HFF&\\3c${assColor(effective.boxBorderColor ?? '#ffffff')}\\xbord${paddingX + borderWidth}\\ybord${paddingY + borderWidth}}`)

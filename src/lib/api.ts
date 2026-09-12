@@ -400,8 +400,12 @@ export const api = {
     contextCues: SubtitleCue[] = cues,
     translationMemory: TranslationMemoryItem[] = [],
     translationGuide = '',
-  ) =>
-    request<{ items: Array<{ id: string; translation: string }>; pendingCueIds?: string[]; warning?: string }>(
+  ) => {
+    const contextIndices = new Map<string, number>();
+    contextCues.forEach((cue, index) => {
+      if (!contextIndices.has(cue.id)) contextIndices.set(cue.id, index);
+    });
+    return request<{ items: Array<{ id: string; translation: string }>; pendingCueIds?: string[]; warning?: string }>(
       "/api/translate",
       {
         method: "POST",
@@ -410,7 +414,7 @@ export const api = {
           model,
           items: cues.map((cue) => {
             const durationMs = Math.max(cue.endMs - cue.startMs, 50);
-            const contextIndex = contextCues.findIndex((candidate) => candidate.id === cue.id);
+            const contextIndex = contextIndices.get(cue.id) ?? -1;
             const contextBefore = contextIndex < 0
               ? []
               : contextCues.slice(Math.max(0, contextIndex - 2), contextIndex).map((candidate) => candidate.originalText).filter(Boolean);
@@ -436,7 +440,8 @@ export const api = {
         }),
         signal,
       },
-    ),
+    );
+  },
   translationGuide: (
     provider: AIProvider,
     model: string | undefined,
@@ -736,7 +741,7 @@ export const api = {
     model: string,
     voice: string,
     speed: number,
-    text = "Đây là bản thử giọng đọc của AutoSub.",
+    text = "Xin chào, đây là bản nghe thử để bạn đánh giá màu giọng, độ rõ, nhịp nói và cảm xúc trước khi dùng cho toàn bộ video.",
   ) => {
     const response = await fetch("/api/dubbing/test", {
       method: "POST",

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test:animation-motion": "tsx --test shared/animationMotionRecipes.test.ts src/animationStudio/evaluator.test.ts",
     "dev": "concurrently \"vite\" \"tsx watch server/index.ts\"",
     "build": "tsc -b && vite build",
     "test:timeline": "tsx --test src/lib/subtitleTimeline.test.ts",

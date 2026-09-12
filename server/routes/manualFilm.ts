@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { workdir } from '../services/ffmpeg';
 import { mergeManualClips } from '../services/manualFilmMerge';
-import { generateGoogleFlowImage } from '../services/googleFlow';
+import { generateGoogleFlowImage, flowImageModels } from '../services/googleFlow';
 import { generateFilmVideoClip, assertFilmVideoAdapter } from '../services/filmVideoAdapter';
 import { connectManualNodes, invalidateManualChildren, manualInputs, type ManualFilmGraph } from '../../shared/manualFilm';
 
@@ -16,6 +16,10 @@ const graphSchema = z.object({ nodes: z.array(z.object({
   model: z.string().max(120), duration: z.union([z.literal(4), z.literal(6), z.literal(8)]), x: z.number().min(0).max(20000), y: z.number().min(0).max(20000),
 })).max(200), edges: z.array(z.object({ source: idSchema, target: idSchema })).max(1000) });
 export async function manualFilmRoutes(app: FastifyInstance) {
+  app.get('/api/manual-film/image-models', async (_req, reply) => {
+    try { return { models: await flowImageModels() }; }
+    catch { return reply.code(503).send({ error: 'Không đọc được danh sách model. Kiểm tra kết nối Flow Agent.' }); }
+  });
   const root = path.join(workdir, 'manual-film');
   const active = new Map<string, AbortController>();
   const locks = new Set<string>();
@@ -76,7 +80,14 @@ export async function manualFilmRoutes(app: FastifyInstance) {
           else if (outputKind === 'video') await generateFilmVideoClip({ prompt: `Duration: ${node.duration} seconds\n${prompt}`, outputFile, model: node.model, aspectRatio: aspect, references: reference ? { startImagePath: reference } : {}, signal: controller.signal });
           else await generateGoogleFlowImage(prompt, outputFile, { model: node.model, size: aspect === '16:9' ? '1920x1080' : '1080x1920', referenceImagePath: reference, signal: controller.signal });
           current.output = output; current.outputKind = outputKind; current.status = 'done'; current.stale = false;
-        } catch { current.status = 'failed'; current.error = node.kind === 'merge' ? 'Ghép video thất bại. Kiểm tra file clip và FFmpeg; bản ghép cũ vẫn được giữ.' : 'Tạo node thất bại. Kết quả trước vẫn giữ. Kiểm tra kết nối/credit Flow trước khi bấm tạo lại.'; }
+        } catch (error) {
+          current.status = 'failed';
+          let detail = error instanceof Error ? error.message : 'Lỗi không xác định.';
+          const secret = process.env.FLOW_AGENT_API_KEY?.trim();
+          if (secret) detail = detail.split(secret).join('[ẩn]');
+          detail = detail.replace(/Bearer\s+[^\s"']+/gi, 'Bearer [ẩn]').slice(0, 1200);
+          current.error = `${node.kind === 'merge' ? 'Ghép video' : 'Tạo node'} thất bại: ${detail} Kết quả trước vẫn được giữ.`;
+        }
         finally { try { await save(id, graph); } finally { active.delete(id); } }
       })().catch(() => undefined);
       return reply.code(202).send(graph);

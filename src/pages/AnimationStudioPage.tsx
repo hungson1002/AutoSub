@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import type { AnimationAsset, AnimationCommandType, AnimationProject, CompositeScene, SceneLayer } from '../../shared/animationStudio';
 import { ANIMATION_PROJECT_VERSION, defaultTransform } from '../../shared/animationStudio';
 import { AnimationCanvas } from '../animationStudio/AnimationCanvas';
+import { MotionRecipePanel } from '../animationStudio/MotionRecipePanel';
+import { applyMotionRecipe } from '../../shared/animationMotionRecipes';
 import { ChevronDown, Download, Image, Layers3, Maximize, Pause, Play, Plus, Save, Settings2, Sparkles, Square, Trash2, Type, Volume2, X } from '../components/Icons';
 import { aiVideoUrl, animationAssetUrl, api, friendlyErrorMessage, type AnimationDirectorJobStatus } from '../lib/api';
 import { capabilityAssignments } from '../lib/settings';
@@ -611,6 +613,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       <aside className="animation-inspector" aria-label="Thuộc tính layer">
         <div className="animation-panel-heading"><span>INSPECTOR</span>{selectedLayer && <button type="button" aria-label="Xóa layer" onClick={deleteLayer}><Trash2 size={14} /></button>}</div>
         {selectedLayer ? <div className="animation-inspector-fields">
+          {selectedLayer.type !== 'audio' && <MotionRecipePanel key={scene.id + selectedLayer.id} maxDurationMs={scene.durationMs} disabled={selectedLayer.locked} onApply={(recipe, duration, strength) => { setPlaying(false); updateScene((current) => applyMotionRecipe(current, selectedLayer.id, recipe, duration, strength)); setSelectedCommandId(''); setTimeMs(0); }} />}
           <label><span>Tên layer</span><input value={selectedLayer.name} onChange={(event) => updateLayer(selectedLayer.id, { name: event.target.value })} /></label>
           <div className="animation-field-row"><label><span>Hiển thị</span><input type="checkbox" checked={selectedLayer.visible} onChange={(event) => updateLayer(selectedLayer.id, { visible: event.target.checked })} /></label><label><span>Khóa</span><input type="checkbox" checked={selectedLayer.locked} onChange={(event) => updateLayer(selectedLayer.id, { locked: event.target.checked })} /></label></div>
           <label><span>Thứ tự layer</span><input type="number" value={selectedLayer.zIndex} onChange={(event) => updateLayer(selectedLayer.id, { zIndex: Number(event.target.value) })} /></label>

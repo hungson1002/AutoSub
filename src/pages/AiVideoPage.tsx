@@ -17,6 +17,11 @@ const workflowNodesKey = 'autosub.ai-video-workflow-nodes';
 // among those values per action instead of splitting every film into 4s cuts.
 const professionalShotSeconds = 8;
 const maxDurationSeconds = 20 * 60;
+const fallbackImageModels = [
+  { id: 'gem_pix_2', label: 'Nano Banana Pro' },
+  { id: 'harbor_seal', label: 'Nano Banana 2 Lite' },
+  { id: 'narwhal', label: 'Nano Banana 2' },
+];
 
 function formatDuration(seconds: number) {
   if (seconds < 60) return `${seconds} giây`;
@@ -33,6 +38,7 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
   const [videoModels, setVideoModels] = useState<string[]>(['Flow Agent Auto']);
   const [model, setModel] = useState<FilmVideoModel>('Flow Agent Auto');
   const [imageModel, setImageModel] = useState('narwhal');
+  const [imageModels, setImageModels] = useState(fallbackImageModels);
   const [aspectRatio, setAspectRatio] = useState<FlowVideoAspectRatio>('9:16');
   const [directionMode, setDirectionMode] = useState<'cinematic' | 'documentary' | 'commercial' | 'social-realism'>('cinematic');
   const [automationMode, setAutomationMode] = useState<'automatic' | 'manual'>('automatic');
@@ -63,6 +69,19 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
     refresh();
     const timer = window.setInterval(refresh, 5000);
     return () => { active = false; window.clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch('/api/manual-film/image-models', { signal: controller.signal })
+      .then(async (response) => response.ok ? response.json() as Promise<{ models: Array<{ id: string; label: string }> }> : Promise.reject(new Error('image models unavailable')))
+      .then(({ models: options }) => {
+        if (!options.length) return;
+        setImageModels(options);
+        setImageModel((current) => options.some((option) => option.id === current) ? current : (options[0]?.id || current));
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -345,6 +364,19 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
               ]} />
             </div>
             <div className="field">
+              <span>Model tạo ảnh</span>
+              <SelectField
+                ariaLabel="Model tạo ảnh nhân vật và storyboard"
+                value={imageModel}
+                onChange={setImageModel}
+                options={imageModels.map((option) => ({
+                  value: option.id,
+                  label: option.label,
+                  description: 'Dùng cho character sheet và storyboard',
+                }))}
+              />
+            </div>
+            <div className="field">
               <span>Model tạo video</span>
               <SelectField
                 ariaLabel="Model tạo video"
@@ -428,6 +460,7 @@ export function AiVideoPage({ providers, settings, onNotice }: { providers: AIPr
             videoModel={model}
             videoModels={videoModels}
             imageModel={imageModel}
+            imageModels={imageModels}
             automationMode={automationMode}
             workflowNodes={workflowNodes}
             onBriefChange={setBrief}

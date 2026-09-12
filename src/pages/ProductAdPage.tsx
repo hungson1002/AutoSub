@@ -8,6 +8,7 @@ import { AssignmentSummary } from '../components/AssignmentSummary';
 import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
 import { Check, CirclePlay, Download, Image as ImageIcon, LoaderCircle, RefreshCw, ShieldCheck, Trash2, Upload, WandSparkles, X } from '../components/Icons';
+import { loadVoicePreview, primeVoicePreview, VI_VOICE_PREVIEW_TEXT } from '../lib/voicePreview';
 
 type ProductImageDraft = {
   id: string;
@@ -144,6 +145,10 @@ export function ProductAdPage({ providers, settings, onNotice }: {
     if (next !== voice) setVoice(next);
   }, [ttsAssignment.model, ttsProvider?.id, ttsProviderType, voiceItems]);
   useEffect(() => {
+    const timer = window.setTimeout(() => primeVoicePreview(ttsProvider, ttsAssignment.model, voice, voiceSpeed), 250);
+    return () => window.clearTimeout(timer);
+  }, [ttsProvider?.id, ttsAssignment.model, voice, voiceSpeed]);
+  useEffect(() => {
     if (ttsProviderType !== 'vieneu-local') return;
     const controller = new AbortController();
     void api.listVieneuVoiceClones(controller.signal).then((result) => setCloneVoices(result.voices)).catch((error) => {
@@ -219,7 +224,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
     const requestId = voicePreviewRequestRef.current;
     setTestingVoice(true);
     try {
-      const blob = await api.testVoice(ttsProvider, ttsAssignment.model, voice, voiceSpeed, 'Một video quảng cáo tốt cần nói rõ lợi ích và trung thực về sản phẩm.');
+      const blob = await loadVoicePreview(ttsProvider, ttsAssignment.model, voice, voiceSpeed, VI_VOICE_PREVIEW_TEXT);
       if (requestId !== voicePreviewRequestRef.current) return;
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);

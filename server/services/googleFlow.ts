@@ -24,6 +24,15 @@ export class FlowSessionError extends Error {
   constructor(message: string, readonly code = 'FLOW_SESSION') { super(message); }
 }
 
+export async function flowImageModels() {
+  const response = await fetch(`${baseUrl()}/v1/models`, { headers: headers(), signal: AbortSignal.timeout(5000) });
+  const result = await parseResponse<{ data?: Array<{ id: string }> }>(response);
+  // Labels follow kodelyx/flow-agent README (206285a); send the API IDs unchanged.
+  const names: Record<string, string> = { harbor_seal: 'Nano Banana 2 Lite', narwhal: 'Nano Banana 2', gem_pix_2: 'Nano Banana Pro' };
+  return (result.data || []).filter((model) => typeof model.id === 'string' && model.id in names)
+    .map(({ id }) => ({ id, label: names[id] }));
+}
+
 class FlowCreditError extends Error {}
 
 async function parseResponse<T>(response: Response): Promise<T> {
@@ -36,8 +45,16 @@ async function parseResponse<T>(response: Response): Promise<T> {
     if (/CAPTCHA_FAILED/i.test(detail) && /manifest must request permission|cannot access contents/i.test(detail)) {
       throw new FlowSessionError('Extension Flow Agent đang chạy bản chưa có quyền truy cập flow.google.com. Mở opera://extensions, bấm Tải lại tại Flow Agent rồi tải lại tab Google Flow; AutoSub chưa gửi lượt tạo video.', 'FLOW_EXTENSION_PERMISSION');
     }
+    if (/CAPTCHA_FAILED/i.test(detail) && /grecaptcha not available/i.test(detail)) {
+      throw new FlowSessionError('Trang Google Flow chưa tải được script xác minh (grecaptcha not available). Mở tab Google Flow, tải lại trang và kiểm tra tiện ích chặn script nếu lỗi vẫn còn.', 'FLOW_SCRIPT_NOT_READY');
+    }
     if (/CAPTCHA_FAILED/i.test(detail)) throw new FlowSessionError(`Flow Agent chưa xác minh được phiên Google Flow: ${detail}`, 'CAPTCHA_FAILED');
     if (response.status === 402) throw new FlowCreditError(`Tài khoản Google Flow không đủ credit: ${detail}`);
+    // The bridge can wrap an upstream OAuth rejection in HTTP 400.
+    // An existing key does not mean Google still accepts it.
+    if (/invalid authentication credentials|expected OAuth 2 access token/i.test(detail)) {
+      throw new FlowSessionError('Google Flow từ chối token đăng nhập hiện tại. Mở đúng tài khoản Google Flow và đăng nhập lại nếu được yêu cầu.', 'NO_FLOW_KEY');
+    }
     if (response.status === 401 || response.status === 403) throw new Error(`Flow Agent từ chối xác thực (HTTP ${response.status}): ${detail}`);
     if (response.status === 429) throw new Error(`Google Flow đang giới hạn request hoặc tài khoản không đủ credit: ${detail}`);
     throw new Error(`Flow Agent HTTP ${response.status}: ${detail}`);
@@ -58,29 +75,38 @@ export async function flowAgentStatus(signal?: AbortSignal) {
 }
 
 export async function validateGoogleFlowSession(_credentials?: unknown, signal?: AbortSignal) {
-  const status = await flowAgentStatus(signal);
+  let status = await flowAgentStatus(signal);
   if (!status.installed) throw new FlowSessionError(`Flow Agent chưa chạy tại ${status.url}. Hãy cài Flow Agent và chạy lệnh “flow”.`);
   if (!status.extensionConnected) throw new FlowSessionError('Extension Flow Agent chưa kết nối. Hãy mở Google Flow trong Opera GX và giữ tab đăng nhập hoạt động.');
-  if (!status.hasFlowKey) throw new FlowSessionError('Flow Agent chưa lấy được Flow key. Hãy tải lại tab Google Flow sau khi bật extension.');
+  if (!status.hasFlowKey) {
+    await refreshFlowSessionOnce(signal);
+    status = await flowAgentStatus(signal);
+  }
+  if (!status.hasFlowKey) throw new FlowSessionError('Flow Agent chưa lấy được token sau khi tự mở và làm mới Google Flow. Hãy đăng nhập hoặc hoàn tất xác minh trên tab Flow vừa mở.');
   if (!status.connected) throw new FlowSessionError(status.error || `Flow Agent chưa sẵn sàng (${status.status}).`);
   return { ok: true as const };
 }
 
 async function refreshFlowSession(signal?: AbortSignal) {
-  const credits = await fetch(`${baseUrl()}/v1/credits`, { signal, headers: headers() }).then((response) => response.ok ? response.json() : {}).catch(() => ({})) as { clients?: Array<{ client_id?: string; ok?: boolean }> };
+  const deadline = AbortSignal.timeout(30_000);
+  signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const probeSignal = () => AbortSignal.any([signal!, AbortSignal.timeout(5_000)]);
+  const credits = await fetch(`${baseUrl()}/v1/credits`, { signal: probeSignal(), headers: headers() }).then((response) => response.ok ? response.json() : {}).catch(() => ({})) as { clients?: Array<{ client_id?: string; ok?: boolean }> };
   const clientIds = (credits.clients || []).map((client) => client.client_id).filter((id): id is string => Boolean(id));
   const targets: Array<string | undefined> = clientIds.length ? clientIds : [undefined];
   for (const clientId of targets) {
     const response = await fetch(`${baseUrl()}/v1/refresh-tokens`, {
-      method: 'POST', signal, headers: { ...headers(), ...(clientId ? { 'X-Client-Id': clientId } : {}) },
+      // Upstream waits six seconds between open_flow_tab and refresh_flow_tab.
+      // The five-second read-probe timeout must not abort that command.
+      method: 'POST', signal, headers: { ...headers(), 'X-Force-Refresh': '1', ...(clientId ? { 'X-Client-Id': clientId } : {}) },
     });
     if (!response.ok) throw new FlowSessionError(`Flow Agent không thể làm mới phiên (HTTP ${response.status}).`);
   }
 
   // /v1/refresh-tokens only confirms that the refresh command was queued.
   // Wait until the extension can actually reach Flow before retrying a request.
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    const checked = await fetch(`${baseUrl()}/v1/credits`, { signal, headers: headers() })
+  for (let attempt = 0; attempt < 12 && !signal.aborted; attempt += 1) {
+    const checked = await fetch(`${baseUrl()}/v1/credits`, { signal: probeSignal(), headers: headers() })
       .then((response) => response.ok ? response.json() : {})
       .catch(() => ({})) as { clients?: Array<{ client_id?: string; ok?: boolean }> };
     const clients = checked.clients || [];
@@ -88,7 +114,7 @@ async function refreshFlowSession(signal?: AbortSignal) {
       ? clients.some((client) => client.ok === true && client.client_id && clientIds.includes(client.client_id))
       : clients.some((client) => client.ok === true);
     if (ready) return;
-    if (attempt < 39) await wait(1_500, signal);
+    if (attempt < 11 && !signal.aborted) await wait(1_500, signal).catch(() => undefined);
   }
   throw new FlowSessionError('Flow Agent đã thử làm mới nhưng extension vẫn chưa xác thực được với Google Flow. Mở opera://extensions, bấm Tải lại tại Flow Agent, sau đó tải lại tab flow.google.com. AutoSub chưa gửi lại lượt tạo.', 'FLOW_SESSION_REFRESH_FAILED');
 }
@@ -112,6 +138,8 @@ async function requestWithSessionRecovery<T>(request: () => Promise<Response>, s
   try {
     return await parseResponse<T>(await request());
   } catch (error) {
+    // Missing page scripts are not missing tokens: force_refresh invalidates
+    // the current token but cannot repair a blocked/unloaded reCAPTCHA script.
     let shouldRefresh = error instanceof FlowSessionError && error.code === 'NO_FLOW_KEY';
     if (error instanceof FlowCreditError) {
       // Older Flow Agent builds converted an unauthenticated credit probe into

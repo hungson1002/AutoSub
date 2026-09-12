@@ -116,7 +116,7 @@ test('concurrent library writes and measured TTS reruns preserve outputs without
 
 test('Director resumes the accepted plan and shares duplicate submissions', async () => {
   let calls = 0;
-  const plan = { name: 'Checkpoint integration', continuityBible: 'Flat 2D blue diagrams', segments: Array.from({ length: 4 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân. Đây là kết quả.', visualBeats: [{ purpose: 'explain', narrationCue: 'Đây là nguyên nhân', action: 'Show cause then result', visual: '', motion: 'locked', transition: 'cut', diagram: { layout: 'process', steps: ['Nguyên nhân', 'Kết quả'] } }], motionGraphic: 'none' })) };
+  const plan = { name: 'Checkpoint integration', continuityBible: 'Flat 2D blue diagrams', segments: Array.from({ length: 4 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân. Đây là kết quả.', visualBeats: [{ purpose: 'explain', narrationCue: 'Đây là nguyên nhân', action: 'Show cause then result', visual: '', motion: 'locked', transition: 'cut', diagram: { layout: 'process', steps: ['Nguyên nhân', 'Kết quả'] }, objects: [{ name: 'Signal', shape: 'ellipse', fill: '#54d8c2', width: .08, height: .08, path: [{ t: 0, x: .2, y: .5, rotation: 0 }, { t: 1, x: .8, y: .5, rotation: 0 }] }] }], motionGraphic: 'none' })) };
   const server = createServer(async (req, res) => {
     for await (const _chunk of req) { /* drain */ }
     calls++;

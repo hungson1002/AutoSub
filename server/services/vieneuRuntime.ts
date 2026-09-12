@@ -6,8 +6,8 @@ import path from 'node:path';
 import { ProviderError } from '../adapters/errors';
 import { run, temporaryRoot, workdir } from './ffmpeg';
 
-const VIENEU_VERSION = '3.3.0';
-const SEA_G2P_VERSION = '0.9.0';
+const VIENEU_VERSION = '3.6.4';
+const SEA_G2P_VERSION = '0.9.1';
 const RUNTIME_ROOT = path.join(workdir, 'vieneu', 'runtime');
 const TEMP_ROOT = path.join(temporaryRoot, 'vieneu');
 const BRIDGE_SCRIPT = path.join(process.cwd(), 'server', 'services', 'vieneu_bridge.py');

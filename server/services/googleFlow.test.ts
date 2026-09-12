@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { flowAgentStatus, generateGoogleFlowImage, generateGoogleFlowVideo, validateGoogleFlowSession } from './googleFlow';
 
-test('a missing extension key refreshes the active browser session and retries once', async () => {
+for (const failure of ['NO_FLOW_KEY', 'Request had invalid authentication credentials. Expected OAuth 2 access token']) test(`${failure} refreshes the active browser session and retries once`, async () => {
   const originalFetch = globalThis.fetch;
   let generations = 0;
   let refreshes = 0;
@@ -21,7 +21,7 @@ test('a missing extension key refreshes the active browser session and retries o
     if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
     generations++;
     keys.push(String((init?.headers as Record<string, string>)?.['Idempotency-Key'] || ''));
-    if (generations === 1) return new Response(JSON.stringify({ detail: 'NO_FLOW_KEY' }), { status: 400 });
+    if (generations === 1) return new Response(JSON.stringify({ detail: failure }), { status: 400 });
     return Response.json({ data: [{ b64_json: Buffer.alloc(128, 7).toString('base64') }] });
   };
   try {
@@ -32,6 +32,22 @@ test('a missing extension key refreshes the active browser session and retries o
     assert.equal(refreshes, 1);
     assert.equal(keys[0], keys[1]);
     await rm(directory, { recursive: true, force: true });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('missing captcha script preserves the session and does not retry generation', async () => {
+  const originalFetch = globalThis.fetch;
+  let generations = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
+    assert.ok(url.endsWith('/v1/images/generations'), 'Must not refresh tokens or probe credits for a script error');
+    generations++;
+    return Response.json({ detail: 'CAPTCHA_FAILED: grecaptcha not available' }, { status: 400 });
+  };
+  try {
+    await assert.rejects(generateGoogleFlowImage('test', 'unused.png'), /grecaptcha not available/);
+    assert.equal(generations, 1);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -62,6 +78,28 @@ test('Flow Agent preflight explains a missing extension', async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ status: 'starting', extension_connected: false, has_flow_key: false }), { status: 200 });
   try {
     await assert.rejects(validateGoogleFlowSession(), /Extension Flow Agent chưa kết nối/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('Flow Agent preflight automatically captures a missing token before generation', async () => {
+  const originalFetch = globalThis.fetch;
+  let refreshed = false;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: refreshed ? 'healthy' : 'unauthorized_or_disconnected', extension_connected: true, has_flow_key: refreshed });
+    if (url.endsWith('/v1/credits')) return Response.json({ clients: [{ client_id: 'opera-session', ok: refreshed }] });
+    if (url.endsWith('/v1/refresh-tokens')) {
+      const requestHeaders = init?.headers as Record<string, string>;
+      assert.equal(requestHeaders['X-Client-Id'], 'opera-session');
+      assert.equal(requestHeaders['X-Force-Refresh'], '1');
+      refreshed = true;
+      return Response.json({ nudged: 1 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  try {
+    await validateGoogleFlowSession();
+    assert.equal(refreshed, true);
   } finally { globalThis.fetch = originalFetch; }
 });
 

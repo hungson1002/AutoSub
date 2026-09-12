@@ -10,6 +10,16 @@ export function ManualFilmWorkflow({ videoModels, imageModel, onSetup, onInspect
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [imageModels, setImageModels] = useState<Array<{ id: string; label: string }>>([]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch('/api/manual-film/image-models', { signal: controller.signal }).then(async (response) => {
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      setImageModels(result.models);
+    }).catch((e) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Không tải được model ảnh.'); });
+    return () => controller.abort();
+  }, []);
   const [link, setLink] = useState<string>();
   const [selected, setSelected] = useState<string>();
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -71,7 +81,7 @@ export function ManualFilmWorkflow({ videoModels, imageModel, onSetup, onInspect
         <div className="ai-flow-stage" style={{ transform: `scale(${scale})`, width: Math.max(1600, ...graph.nodes.map((n) => n.x + 380)), height: Math.max(800, ...graph.nodes.map((n) => n.y + 700)) }}>
           <svg className="ai-flow-edges" width="100%" height="100%">{graph.edges.map((e) => { const a = graph.nodes.find((n) => n.id === e.source); const b = graph.nodes.find((n) => n.id === e.target); return a && b ? <path key={`${e.source}-${e.target}`} d={`M${a.x + 250},${a.y + 105} C${a.x + 250 + Math.max(70, Math.abs(b.x - a.x - 250) * .45)},${a.y + 105} ${b.x - Math.max(70, Math.abs(b.x - a.x - 250) * .45)},${b.y + 105} ${b.x},${b.y + 105}`} /> : null; })}</svg>
           {!graph.nodes.length && <p className="manual-film-empty">Canvas trống. Bấm “Kịch bản”, “Storyboard” hoặc loại node bạn muốn ở trên để bắt đầu.</p>}
-          {graph.nodes.map((n, index) => <article key={n.id} className={`ai-flow-node ${n.kind === 'script' ? 'input' : n.kind === 'direction' ? 'process' : n.kind === 'video' ? 'shot' : n.kind === 'merge' ? 'master' : 'character'} ${selected === n.id ? 'selected' : ''}`} onClick={(e) => { if (!(e.target as HTMLElement).closest('button,video')) { setSelected(n.id); setLibraryOpen(false); } }} style={{ left: n.x, top: n.y }} aria-label={`${titles[n.kind]} ${index + 1}`}>
+          {graph.nodes.map((n, index) => <article key={n.id} className={`ai-flow-node ${n.kind === 'script' ? 'input' : n.kind === 'direction' ? 'process' : n.kind === 'video' ? 'shot' : n.kind === 'merge' ? 'master' : 'character'} ${n.status === 'running' ? 'running' : ''} ${selected === n.id ? 'selected' : ''}`} onClick={(e) => { if (!(e.target as HTMLElement).closest('button,video')) { setSelected(n.id); setLibraryOpen(false); } }} style={{ left: n.x, top: n.y }} aria-label={`${titles[n.kind]} ${index + 1}`}>
             <header onPointerDown={(e) => { if (disabled || (e.target as HTMLElement).closest('button')) return; e.stopPropagation(); drag.current = { id: n.id, x: e.clientX, y: e.clientY, left: n.x, top: n.y }; viewport.current?.setPointerCapture(e.pointerId); }}><span>{n.kind === 'script' ? 'INPUT' : n.kind === 'direction' ? 'AI DIRECTOR' : n.kind.toUpperCase()} {String(index + 1).padStart(2, '0')}</span><i className={n.status === 'done' ? 'ready' : ''}>{n.status === 'done' ? <Check size={11} /> : index + 1}</i><button type="button" disabled={disabled} aria-label={`Xóa node ${index + 1}`} onClick={() => commit({ nodes: graph.nodes.filter((p) => p.id !== n.id), edges: graph.edges.filter((e) => e.source !== n.id && e.target !== n.id) })}><Trash2 size={16} /></button></header>
             <div className="manual-film-ports"><button type="button" disabled={disabled || !link} onClick={() => { try { commit(connectManualNodes(graph, link!, n.id)); setLink(undefined); } catch (e) { setError((e as Error).message); } }} aria-label={`Đầu vào node ${index + 1}`} title="Đầu vào"></button><button type="button" disabled={disabled} aria-pressed={link === n.id} onClick={() => setLink(n.id)} aria-label={`Đầu ra node ${index + 1}`} title="Đầu ra"></button></div>
             {['script', 'direction'].includes(n.kind) ? <div className="ai-flow-node-copy" onClick={() => { setSelected(n.id); setLibraryOpen(false); }}><strong>{titles[n.kind]}</strong><p>{n.prompt || 'Chọn node để nhập nội dung ở bảng bên phải.'}</p></div> : <>
@@ -88,7 +98,8 @@ export function ManualFilmWorkflow({ videoModels, imageModel, onSetup, onInspect
         {(() => { const n = selectedNode; const source = graph.edges.filter((e) => e.target === n.id).map((e) => graph.nodes.find((p) => p.id === e.source)).find((p) => p?.outputKind === 'image'); return <>
           {source?.output && <div><small>Ảnh đầu vào từ {titles[source.kind]}</small><img className="manual-film-reference" src={media(source)} alt="Ảnh đầu vào của node" /></div>}
             {n.kind !== 'merge' && <label><span>Prompt</span><textarea rows={4} value={n.prompt} disabled={disabled} onChange={(e) => patch(n, { prompt: e.target.value })} placeholder="Nhập nội dung, hoặc nối từ node kịch bản…" /></label>}
-            {!['script', 'direction', 'merge'].includes(n.kind) && <label><span>Model tạo nội dung</span><select value={n.model} disabled={disabled} onChange={(e) => { const next = { ...graph, nodes: graph.nodes.map((p) => p.id === n.id ? { ...p, model: e.target.value } : p) }; commit(next); }}>{[...new Set(n.kind === 'video' ? [n.model, ...videoModels] : [n.model, imageModel, 'narwhal'])].map((model) => <option key={model}>{model}</option>)}</select></label>}
+            {n.prompt.includes(aspect === '16:9' ? '9:16' : '16:9') && <p role="alert">Prompt ghi tỷ lệ khác với khung hình đang chọn ({aspect}). Hãy sửa prompt hoặc tỷ lệ trước khi tạo để tránh kết quả sai bố cục.</p>}
+            {!['script', 'direction', 'merge'].includes(n.kind) && <label><span>Model tạo nội dung</span><select value={n.model} disabled={disabled} onChange={(e) => { const next = { ...graph, nodes: graph.nodes.map((p) => p.id === n.id ? { ...p, model: e.target.value } : p) }; commit(next); }}>{[...new Set(n.kind === 'video' ? [n.model, ...videoModels] : [n.model, ...imageModels.map((model) => model.id)])].map((model) => <option key={model} value={model}>{n.kind === 'video' ? model : imageModels.find((entry) => entry.id === model)?.label || `${model} · chưa xác minh`}</option>)}</select></label>}
             {n.kind === 'video' && <label><span>Thời lượng video</span><select value={n.duration} disabled={disabled} onChange={(e) => commit({ ...graph, nodes: graph.nodes.map((p) => p.id === n.id ? { ...p, duration: Number(e.target.value) } : p) })}>{[4, 6, 8].map((seconds) => <option key={seconds} value={seconds}>{seconds} giây</option>)}</select></label>}
             {graph.edges.filter((e) => e.target === n.id).map((e) => <button type="button" className="manual-film-unlink" key={e.source} disabled={disabled} onClick={() => commit({ ...graph, edges: graph.edges.filter((p) => p !== e) })}>Ngắt nguồn #{graph.nodes.findIndex((p) => p.id === e.source) + 1} ×</button>)}
 

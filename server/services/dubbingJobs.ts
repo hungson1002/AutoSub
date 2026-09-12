@@ -171,7 +171,9 @@ const DEFAULTS = {
 // Do not reuse audio generated before CapCut request serialization and stable
 // resource IDs were introduced. Old cache entries can contain a mismatched
 // provider response even though their file format is valid.
-const TTS_CACHE_VERSION = 'tts-v11-clear-expressive-speech';
+// Invalidate clips enrolled with the pre-3.6 custom speaker frontend. Reusing
+// those files would hide the voice-clone quality upgrade on existing jobs.
+const TTS_CACHE_VERSION = 'tts-v12-vieneu-official-speaker-encoder';
 const SPEECH_PREP_VERSION = 'speech-v3-pop-free-edges';
 export const ADAPTIVE_FIT_VERSION = 13;
 
@@ -631,7 +633,11 @@ async function saveCue(jobId: string, cue: StoredCue) {
 async function loadCues(jobId: string) {
   const files = await readdir(cueDir(jobId));
   const cues: StoredCue[] = [];
-  for (const file of files.filter((item) => item.endsWith('.json'))) cues.push(await readJson<StoredCue>(path.join(cueDir(jobId), file)));
+  const cueFiles = files.filter((item) => item.endsWith('.json'));
+  for (let offset = 0; offset < cueFiles.length; offset += 32) {
+    cues.push(...await Promise.all(cueFiles.slice(offset, offset + 32)
+      .map((file) => readJson<StoredCue>(path.join(cueDir(jobId), file)))));
+  }
   return cues.sort((left, right) => left.index - right.index);
 }
 
@@ -691,7 +697,9 @@ export async function createDubbingJob(input: CreateJobInput) {
   await mkdir(timelineDir(id), { recursive: true });
   await mkdir(resultDir(id), { recursive: true });
   for (const [ref, provider] of providers) await writeJsonAtomic(path.join(providerDir(id), `${safeName(ref)}.json`), provider);
-  for (const cue of storedCues) await saveCue(id, cue);
+  for (let offset = 0; offset < storedCues.length; offset += 32) {
+    await Promise.all(storedCues.slice(offset, offset + 32).map((cue) => saveCue(id, cue)));
+  }
   await writeJsonAtomic(jobFile(id), job);
   return job;
 }
@@ -932,8 +940,10 @@ class DubbingRunner {
       audioDurationMs: cue.metadata?.ttsDurationMs || cue.input.endMs - cue.input.startMs,
       targetDurationMs: cue.metadata?.targetDurationMs || cue.input.endMs - cue.input.startMs,
     })))).map((item) => [item.cueId, item.tempo]));
-    for (const cue of completed) {
-      if (!cue.audioFile || !cue.metadata || cue.metadata.adaptiveFitVersion === ADAPTIVE_FIT_VERSION) continue;
+    const fitConcurrency = timelineRenderConcurrency();
+    for (let offset = 0; offset < completed.length; offset += fitConcurrency) {
+      const results = await Promise.allSettled(completed.slice(offset, offset + fitConcurrency).map(async (cue) => {
+      if (!cue.audioFile || !cue.metadata || cue.metadata.adaptiveFitVersion === ADAPTIVE_FIT_VERSION) return;
       const tempo = adaptiveTempoById.get(cue.id) || 1;
       const sourcePath = path.join(jobDir(this.job.id), cue.audioFile);
       let provider = providers.get(cue.providerRef);
@@ -942,7 +952,6 @@ class DubbingRunner {
         providers.set(cue.providerRef, provider);
       }
       const cached = ttsCacheFiles(this.job.id, provider, cue.input, cue.metadata.finalDubbingText);
-      await ensurePreparedSpeech(cached.rawPath, cached.speechPath, this.controller.signal);
       const cleanSpeechPath = cached.speechPath;
       const cleanSpeech = await stat(cleanSpeechPath).catch(() => undefined);
       if (cleanSpeech?.isFile()) {
@@ -984,10 +993,17 @@ class DubbingRunner {
       cue.metadata = {
         ...cue.metadata,
         speedApplied: tempo,
-        finalAudioDurationMs: await probeDuration(sourcePath),
+        // At natural speed sourcePath is a byte-for-byte copy of the clean
+        // speech measured above; only stretched audio needs another probe.
+        finalAudioDurationMs: Math.abs(tempo - 1) > 0.005
+          ? await probeDuration(sourcePath)
+          : cue.metadata.ttsDurationMs,
         adaptiveFitVersion: ADAPTIVE_FIT_VERSION,
       };
       await saveCue(this.job.id, cue);
+      }));
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
     }
     const timelineItems = completed.map((cue) => ({
       cueId: cue.id,

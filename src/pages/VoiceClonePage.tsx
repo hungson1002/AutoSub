@@ -5,6 +5,7 @@ import { capabilityAssignments } from '../lib/settings';
 import { resolvedProviderType } from '../lib/providers';
 import { RangeInput } from '../components/RangeInput';
 import { AudioLines, Check, CirclePlay, Cpu, Download, FileAudio, LoaderCircle, Pause, Play, RefreshCw, ShieldCheck, Trash2, Upload, Volume2 } from '../components/Icons';
+import { loadVoicePreview, primeVoicePreview, VI_VOICE_PREVIEW_TEXT } from '../lib/voicePreview';
 
 const modelId = 'vieneu-v3-turbo';
 
@@ -36,8 +37,8 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
   const [creating, setCreating] = useState(false);
   const [deletingId, setDeletingId] = useState<string>();
   const [testing, setTesting] = useState(false);
-  const [previewText, setPreviewText] = useState('Xin chào, đây là bản thử giọng lồng tiếng tiếng Việt của AutoSub.');
-  const [speed, setSpeed] = useState(1.1);
+  const [previewText, setPreviewText] = useState(VI_VOICE_PREVIEW_TEXT);
+  const [speed, setSpeed] = useState(1);
   const [previewUrl, setPreviewUrl] = useState<string>();
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewTime, setPreviewTime] = useState(0);
@@ -89,6 +90,12 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
     setPreviewDuration(0);
   }, [previewUrl]);
 
+  useEffect(() => {
+    if (!selectedId || !provider || !previewText.trim()) return;
+    const timer = window.setTimeout(() => primeVoicePreview(provider, modelId, selectedId, speed, previewText.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [provider?.id, selectedId, speed, previewText]);
+
   const createClone = async () => {
     if (!name.trim()) { onNotice('Hãy đặt tên cho giọng clone.', 'error'); return; }
     if (!file) { onNotice('Hãy chọn mẫu giọng sạch, nói liên tục khoảng 6 đến 10 giây.', 'error'); return; }
@@ -138,12 +145,13 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
     if (!previewText.trim()) { onNotice('Hãy nhập câu cần đọc thử.', 'error'); return; }
     setTesting(true);
     try {
-      const blob = await api.testVoice(provider, modelId, selectedId, speed, previewText.trim());
+      const blob = await loadVoicePreview(provider, modelId, selectedId, speed, previewText.trim());
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
       const url = URL.createObjectURL(blob);
       audioUrlRef.current = url;
       setPreviewUrl(url);
-      onNotice('Đã dựng xong bản thử giọng.', 'success');
+      window.requestAnimationFrame(() => void previewAudioRef.current?.play().catch(() => setPreviewPlaying(false)));
+      onNotice('Đang phát bản nghe thử.', 'success');
     } catch (error) {
       onNotice(friendlyErrorMessage(error, 'Không thể tạo bản thử giọng.'), 'error');
     } finally {
@@ -212,7 +220,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
         <div className="section-title"><span>03 · NGHE THỬ</span><small>{selectedVoice?.name || 'Chưa chọn giọng'}</small></div>
         <div className="field"><span>Nội dung thử</span><textarea rows={4} maxLength={600} value={previewText} onChange={(event) => setPreviewText(event.target.value)} /></div>
         <div className="field"><span>Tốc độ <b className="value-badge">{speed.toFixed(2)}x</b></span><RangeInput min={0.9} max={1.5} step={0.05} value={speed} onChange={(event) => setSpeed(Number(event.target.value))} /></div>
-        <button type="button" className="button secondary full" disabled={testing || !selectedId || !previewText.trim()} onClick={() => void testVoice()}>{testing ? <LoaderCircle size={15} className="spin" /> : <CirclePlay size={16} />} {testing ? 'Đang dựng giọng...' : 'Tạo bản nghe thử'}</button>
+        <button type="button" className="button secondary full" disabled={testing || !selectedId || !previewText.trim()} onClick={() => void testVoice()}>{testing ? <LoaderCircle size={15} className="spin" /> : <CirclePlay size={16} />} {testing ? 'Đang chuẩn bị...' : 'Nghe thử giọng'}</button>
         {previewUrl && <div className="voice-clone-audio">
           <audio ref={previewAudioRef} autoPlay preload="metadata" src={previewUrl} onLoadedMetadata={(event) => setPreviewDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)} onDurationChange={(event) => setPreviewDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)} onTimeUpdate={(event) => setPreviewTime(event.currentTarget.currentTime)} onPlay={() => setPreviewPlaying(true)} onPause={() => setPreviewPlaying(false)} onEnded={() => setPreviewPlaying(false)} />
           <button type="button" className="voice-clone-audio-play" onClick={togglePreviewPlayback} aria-label={previewPlaying ? 'Tạm dừng bản nghe thử' : 'Phát bản nghe thử'}>{previewPlaying ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}</button>

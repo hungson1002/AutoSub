@@ -529,16 +529,20 @@ export async function downloadTurboStream(
   try {
     // Parallel multi-part download
     await fileHandle.truncate(totalBytes);
-    const chunkSize = Math.ceil(totalBytes / concurrency);
+    const chunkSize = Math.max(1, Math.min(rangeRequestBytes, Math.ceil(totalBytes / concurrency)));
+    let nextOffset = 0;
     let totalDownloaded = 0;
 
     const workerTasks = [];
     for (let i = 0; i < concurrency; i++) {
-      const start = i * chunkSize;
-      const end = Math.min(totalBytes - 1, (i + 1) * chunkSize - 1);
-      if (start > end) break;
-
       workerTasks.push((async () => {
+        // Claim the next small range only when this connection is ready.
+        // Fast workers can keep downloading instead of waiting for a slow
+        // connection to finish its original multi-hundred-MB partition.
+        while (nextOffset < totalBytes) {
+        const start = nextOffset;
+        const end = Math.min(totalBytes - 1, start + chunkSize - 1);
+        nextOffset = end + 1;
         let chunkOffset = start;
         let retryCount = 0;
 
@@ -562,19 +566,24 @@ export async function downloadTurboStream(
             }
 
             const reader = res.body.getReader();
+            try {
             while (chunkOffset <= requestEnd) {
               if (signal.aborted) throw new Error('Đã hủy tải video.');
               const { done, value } = await reader.read();
               if (done) break;
               if (value && value.length > 0) {
                 const length = Math.min(value.length, requestEnd - chunkOffset + 1);
-                await fileHandle.write(value, 0, length, chunkOffset);
-                chunkOffset += length;
-                totalDownloaded += length;
+                const { bytesWritten } = await fileHandle.write(value, 0, length, chunkOffset);
+                if (bytesWritten !== length) throw new Error('Incomplete file write');
+                chunkOffset += bytesWritten;
+                totalDownloaded += bytesWritten;
                 onProgress(totalDownloaded);
               }
             }
 
+            } finally {
+              await reader.cancel().catch(() => undefined);
+            }
             if (chunkOffset <= requestEnd) throw new Error('Kết nối tải kết thúc sớm.');
             retryCount = 0;
           } catch (error) {
@@ -589,6 +598,7 @@ export async function downloadTurboStream(
             }
             await new Promise((resolve) => setTimeout(resolve, Math.min(4_000, retryCount * 750)));
           }
+        }
         }
       })());
     }
@@ -660,7 +670,7 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
   const sourceUrls = [info.downloadUrl, ...(info.backupUrls || [])].filter(Boolean);
   // Compare small samples instead of staying on a slow primary CDN indefinitely.
   const candidateUrls = info.platform === 'bilibili'
-    ? await rankVideoCdns(sourceUrls, downloadHeaders, signal)
+    ? await rankVideoCdns(sourceUrls, downloadHeaders, signal, info.expectedBytes)
     : sourceUrls;
   const sessionDir = await createUploadSession();
   const uploadId = path.basename(sessionDir);
