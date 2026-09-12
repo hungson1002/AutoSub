@@ -40,7 +40,7 @@ export function ExportModal({
   asset,
   videoEdit = { aspectRatio: "original", trimStartMs: 0 },
   logo,
-  fontFile,
+  fontUpload,
   blurRegions = [],
   dubTrack,
   dubbingJobId,
@@ -55,7 +55,7 @@ export function ExportModal({
   asset?: VideoAsset;
   videoEdit?: VideoEditState;
   logo?: LogoOverlay;
-  fontFile?: File;
+  fontUpload?: { file: File; family: string };
   blurRegions?: BlurRegion[];
   dubTrack?: Blob;
   dubbingJobId?: string;
@@ -175,7 +175,8 @@ export function ExportModal({
           logo,
           dubTrack: hasDub ? dubTrack : undefined,
           dubbingJobId: hasDub ? dubbingJobId : undefined,
-          fontFile,
+          fontFile: fontUpload?.file,
+          fontFamilyAlias: fontUpload?.family,
         },
         controller.signal,
       );

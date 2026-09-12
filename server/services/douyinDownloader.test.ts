@@ -15,9 +15,11 @@ import {
   getBatchJob,
   isLikelyMp4Header,
   recommendedBilibiliConnections,
+  shouldRotateSlowVideoCdn,
   validateDownloadedVideo,
 } from './douyinDownloader';
 import { douyinMediaFromDetail } from './douyinExtractor';
+import { orderVideoCdnMeasurements } from './videoCdn';
 
 test('keeps an existing H.264 MP4 unchanged', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'autosub-h264-compatible-'));
@@ -111,6 +113,22 @@ test('Bilibili turbo profile uses more connections for ordinary files and backs 
   assert.equal(recommendedBilibiliConnections(512 * 1024 * 1024), 12);
   assert.equal(recommendedBilibiliConnections(2 * 1024 * 1024 * 1024), 8);
   assert.equal(recommendedBilibiliConnections(5 * 1024 * 1024 * 1024), 6);
+});
+
+test('Bilibili CDN ranking prioritizes measured throughput over completing the whole probe', () => {
+  const ranked = orderVideoCdnMeasurements([
+    { url: 'slow-complete', index: 0, speed: 220, bytes: 1024 * 1024, complete: true, partialContent: true },
+    { url: 'fast-partial', index: 1, speed: 1400, bytes: 700 * 1024, complete: false, partialContent: true },
+  ], 1024 * 1024);
+  assert.deepEqual(ranked.map((item) => item.url), ['fast-partial', 'slow-complete']);
+});
+
+test('slow Bilibili CDN rotation waits for a stable sample and requires a fallback', () => {
+  assert.equal(shouldRotateSlowVideoCdn(3 * 1024 * 1024, 15_000, true), true);
+  assert.equal(shouldRotateSlowVideoCdn(10 * 1024 * 1024, 15_000, true), false);
+  assert.equal(shouldRotateSlowVideoCdn(3 * 1024 * 1024, 10_000, true), false);
+  assert.equal(shouldRotateSlowVideoCdn(3 * 1024 * 1024, 15_000, false), false);
+  assert.equal(shouldRotateSlowVideoCdn(3 * 1024 * 1024, 15_000, true, 1), false);
 });
 
 test('douyinMediaFromDetail prefers a complete MP4 stream and keeps metadata', () => {

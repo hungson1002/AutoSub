@@ -1,4 +1,5 @@
 import type { DubbingMetadata, SubtitleCue, SubtitleStyle } from '../types';
+import { layoutTimelineCues } from './subtitleTimeline';
 
 const parseTime = (value: string) => {
   const normalized = value.trim().replace(',', '.');
@@ -47,6 +48,10 @@ export function cuesForDubbingTimeline(cues: SubtitleCue[], enabled: boolean) {
   });
 }
 
+export function isDubbableSubtitleCue(cue: SubtitleCue) {
+  return cue.sourceKind !== 'onscreen-text' && cue.enabled && Boolean((cue.translatedText || cue.originalText).trim());
+}
+
 export function cuesWithDubbingTimelineMetadata(cues: SubtitleCue[], metadata: DubbingMetadata[]) {
   const byId = new Map(metadata.map((item) => [item.cueId, item]));
   const sameLength = metadata.length === cues.length;
@@ -55,21 +60,56 @@ export function cuesWithDubbingTimelineMetadata(cues: SubtitleCue[], metadata: D
 
 const assTime = (ms: number) => { const safe = Math.max(0, Math.round(ms)); const h = Math.floor(safe / 3600000); const m = Math.floor((safe % 3600000) / 60000); const s = Math.floor((safe % 60000) / 1000); const cs = Math.floor((safe % 1000) / 10); return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`; };
 const assColor = (hex: string) => { const rgb = hex.replace('#', '').length === 6 ? hex.replace('#', '') : 'ffffff'; return `&H00${rgb.slice(4, 6)}${rgb.slice(2, 4)}${rgb.slice(0, 2)}`.toUpperCase(); };
+const assColorWithOpacity = (hex: string, opacity: number) => {
+  const color = assColor(hex).slice(4);
+  const alpha = Math.round((1 - Math.max(0, Math.min(1, opacity))) * 255).toString(16).padStart(2, '0');
+  return `&H${alpha}${color}`.toUpperCase();
+};
 export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
-  const fontFamily = style.fontFamily.split(',')[0]?.trim() || 'Arial'; const alignment = style.position === 'top' ? 8 : style.position === 'middle' || style.position === 'custom' ? 5 : 2; const borderStyle = style.background === 'box' ? 3 : 1; const backAlpha = Math.round((1 - style.backgroundOpacity) * 255).toString(16).padStart(2, '0'); const boxColor = assColor(style.backgroundColor ?? style.outlineColor).slice(4); const back = style.background === 'box' ? `&H${backAlpha}${boxColor}` : '&HFF000000';
+  const fontFamily = style.fontFamily.split(',')[0]?.trim() || 'Arial';
+  const alignment = style.position === 'top' ? 8 : style.position === 'middle' || style.position === 'custom' ? 5 : 2;
   // Values can come back from localStorage as the strings "true"/"false".
   // ASS treats any non-zero value as enabled, so do not use truthiness here.
   const isBold = style.bold === true;
   const isItalic = style.italic === true;
-  const positionTag = style.position === 'custom' ? `{\\an5\\pos(${Math.round(((style.customX ?? 50) / 100) * 1920)},${Math.round(((style.customY ?? 82) / 100) * 1080)})}` : '';
-  const lines = cues.filter((cue) => cue.enabled).map((cue) => { const translated = cue.translatedText || cue.originalText; const content = style.content === 'original' ? cue.originalText : style.content === 'both' && cue.originalText.trim() !== translated.trim() ? `${cue.originalText}\\N${translated}` : translated; const escaped = content.replace(/\r?\n/g, '\\N').replace(/[{}]/g, ''); return `Dialogue: 0,${assTime(cue.startMs)},${assTime(cue.endMs)},Default,,0,0,0,,${positionTag}${escaped}`; });
-  // This follows the preview: only the “Viền chữ” mode draws a stroke.  Box
-  // subtitles have a background but no surprise outline after export.
+  const defaultPositionTag = style.position === 'custom' ? `{\\an5\\pos(${Math.round(((style.customX ?? 50) / 100) * 1920)},${Math.round(((style.customY ?? 82) / 100) * 1080)})}` : '';
+  const cueStyleTag = (effective: SubtitleStyle) => {
+    const font = effective.fontFamily.split(',')[0]?.trim() || 'Arial';
+    const outline = effective.background === 'outline' ? Math.max(0, (effective.outlineWidth ?? 2) / 2) : 0;
+    const edgeColor = effective.background === 'box'
+      ? assColorWithOpacity(effective.backgroundColor ?? effective.outlineColor, effective.backgroundOpacity ?? 0.72)
+      : assColor(effective.outlineColor);
+    return `{\\fn${font}\\fs${Math.round(effective.fontSize)}\\c${assColor(effective.textColor)}\\3c${edgeColor}\\b${effective.bold === true ? 1 : 0}\\i${effective.italic === true ? 1 : 0}\\bord${outline}}`;
+  };
+  const enabledCues = cues.filter((cue) => cue.enabled);
+  const layerLayout = layoutTimelineCues(enabledCues);
+  const layers = new Map(layerLayout.items.map(({ cue, lane }) => [cue.id, layerLayout.laneCount - lane]));
+  const lines = enabledCues.flatMap((cue) => {
+    const effective = { ...style, ...(cue.styleOverrides || {}) };
+    const translated = cue.translatedText || cue.originalText;
+    const content = effective.content === 'original' ? cue.originalText : effective.content === 'both' && cue.originalText.trim() !== translated.trim() ? `${cue.originalText}\\N${translated}` : translated;
+    const escaped = content.replace(/\r?\n/g, '\\N').replace(/[{}]/g, '');
+    const positionTag = cue.screenPosition ? `{\\an5\\pos(${Math.round((cue.screenPosition.xPercent / 100) * 1920)},${Math.round((cue.screenPosition.yPercent / 100) * 1080)})}` : defaultPositionTag;
+    const styleName = effective.background === 'box' ? 'Box' : effective.background === 'none' ? 'None' : 'Outline';
+    const paddingX = Math.max(0, Math.round(effective.boxPaddingX ?? 10));
+    const paddingY = Math.max(0, Math.round(effective.boxPaddingY ?? 4));
+    const paddingTag = effective.background === 'box' ? `{\\xbord${paddingX}\\ybord${paddingY}}` : '';
+    const renderLayer = (layers.get(cue.id) ?? 0) * 2;
+    const dialogue = (layer: number, tags: string) => `Dialogue: ${layer},${assTime(cue.startMs)},${assTime(cue.endMs)},${styleName},,0,0,0,,${positionTag}${cueStyleTag(effective)}${tags}${escaped}`;
+    const borderWidth = effective.background === 'box' ? Math.max(0, Math.round(effective.boxBorderWidth ?? 0)) : 0;
+    const border = borderWidth > 0
+      ? dialogue(renderLayer, `{\\1a&HFF&\\3c${assColor(effective.boxBorderColor ?? '#ffffff')}\\xbord${paddingX + borderWidth}\\ybord${paddingY + borderWidth}}`)
+      : undefined;
+    return border ? [border, dialogue(renderLayer + 1, paddingTag)] : [dialogue(renderLayer + 1, paddingTag)];
+  });
   // CSS text-stroke and libass expand glyph edges differently. Half the UI
   // stroke value gives the closest visual weight at the same design scale.
   const outlineWidth = style.background === 'outline' ? Math.max(0, Math.round((style.outlineWidth ?? 2) * 5) / 10) : 0;
   const marginV = style.position === 'top' ? 97 : style.position === 'bottom' ? 108 : 0;
-  return `[Script Info]\nScriptType: v4.00+\nScaledBorderAndShadow: yes\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,${fontFamily},${style.fontSize},${assColor(style.textColor)},${assColor(style.textColor)},${assColor(style.outlineColor)},${back},${isBold ? -1 : 0},${isItalic ? -1 : 0},0,0,100,100,0,0,${borderStyle},${outlineWidth},0,${alignment},154,154,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;
+  const common = `${fontFamily},${style.fontSize},${assColor(style.textColor)},${assColor(style.textColor)}`;
+  const flags = `${isBold ? -1 : 0},${isItalic ? -1 : 0},0,0,100,100,0,0`;
+  const boxColor = assColorWithOpacity(style.backgroundColor ?? style.outlineColor, style.backgroundOpacity ?? 0.72);
+  return `[Script Info]\nScriptType: v4.00+\nScaledBorderAndShadow: yes\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Outline,${common},${assColor(style.outlineColor)},&HFF000000,${flags},1,${outlineWidth},0,${alignment},154,154,${marginV},1\nStyle: Box,${common},${boxColor},&HFF000000,${flags},3,0,0,${alignment},154,154,${marginV},1\nStyle: None,${common},&HFF000000,&HFF000000,${flags},1,0,0,${alignment},154,154,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;
 }
 
 export function subtitleStats(cue: SubtitleCue) { const seconds = Math.max((cue.endMs - cue.startMs) / 1000, 0.001); const chars = (cue.translatedText || cue.originalText).replace(/\s/g, '').length; return { cps: chars / seconds, duration: cue.endMs - cue.startMs }; }

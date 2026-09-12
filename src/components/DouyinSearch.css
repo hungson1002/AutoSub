@@ -90,3 +90,35 @@
 @media (prefers-reduced-motion: reduce) { .douyin-search-results article { transition: none; } }
 @media (max-width: 600px) { .douyin-search form { padding: 12px; } .douyin-search-heading h2 { font-size: 23px; } }
 @media (max-width: 600px) { .douyin-search { padding: 16px; } .douyin-search-fields > * { flex: 1 1 100%; } }
+
+/* Compact discovery cards: media owns the card, metadata stays one dense strip below. */
+.douyin-search-results { grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr)); gap: 12px; align-items: stretch; }
+.douyin-search-results article.douyin-video-card { position: relative; min-height: 0; overflow: visible; border-color: #293744; border-radius: 9px; background: #131a23; box-shadow: 0 7px 20px rgba(0,0,0,.13); transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease; }
+.douyin-search-results article.douyin-video-card:hover { transform: translateY(-2px); border-color: #465665; box-shadow: 0 11px 25px rgba(0,0,0,.2); }
+.douyin-search-results article.douyin-video-card.is-selected { border-color: #ff914d; box-shadow: 0 0 0 1px rgba(255,145,77,.2), 0 11px 25px rgba(0,0,0,.2); }
+.douyin-video-media { position: relative; isolation: isolate; overflow: visible; }
+.douyin-search-results .douyin-video-cover { aspect-ratio: 4 / 3; border-radius: 8px 8px 0 0; background: #080d12; }
+.douyin-search-results .douyin-video-cover:after { content: ''; position: absolute; z-index: 1; inset: auto 0 0; height: 42%; pointer-events: none; background: linear-gradient(transparent,rgba(4,7,10,.82)); }
+.douyin-video-select { position: absolute; z-index: 4; top: 8px; left: 8px; min-height: 28px !important; display: inline-flex !important; flex-direction: row !important; gap: 5px !important; padding: 4px 7px; border: 1px solid rgba(255,255,255,.22); border-radius: 6px; color: #fff; background: rgba(7,11,16,.78); box-shadow: 0 2px 8px rgba(0,0,0,.2); backdrop-filter: blur(6px); font-size: 10px !important; font-weight: 650; }
+.douyin-search .douyin-video-select input[type=checkbox] { width: 14px; height: 14px; margin: 0; }
+.douyin-video-media-meta { position: absolute; z-index: 3; right: 8px; bottom: 7px; left: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #fff; font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; text-shadow: 0 1px 3px #000; }
+.douyin-video-media-meta span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.douyin-video-media-meta time { padding: 2px 5px; border-radius: 4px; background: rgba(5,8,12,.76); }
+.douyin-video-body { min-height: 105px; padding: 10px 11px 9px; }
+.douyin-search-results h3 { min-height: 2.8em; margin: 0 0 7px; color: #e5ebf1; font-size: 13px; font-weight: 610; line-height: 1.4; }
+.douyin-video-title-clamped { -webkit-line-clamp: 2; min-height: 2.8em; }
+.douyin-video-byline { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.douyin-search-results .douyin-video-author { min-width: 0; flex: 1; margin: 0; overflow: hidden; color: #8797a8; font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.douyin-search-results .douyin-video-byline > a { width: 26px; min-height: 26px; flex: 0 0 26px; display: grid; place-items: center; margin: 0; border: 1px solid #2e3a47; border-radius: 5px; color: #9fafbe; }
+.douyin-search-results .douyin-video-byline > a:hover { color: #fff; border-color: #ff914d; background: rgba(255,145,77,.1); }
+.douyin-search-results .douyin-video-stats { min-height: 17px; display: flex; align-items: center; gap: 10px; margin: 8px 0 0; padding: 7px 0 0; border-top: 1px solid #25303b; color: #8192a3; font-size: 10px; font-variant-numeric: tabular-nums; }
+.douyin-video-stats > span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.douyin-video-stats > span.views { min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
+.douyin-search .douyin-card-assessment { position: absolute; z-index: 5; top: 8px; right: 8px; margin: 0; }
+.douyin-card-assessment summary { min-height: 28px; display: flex; align-items: center; padding: 4px 7px; border: 1px solid rgba(255,255,255,.18); border-radius: 6px; color: #d8e2eb; background: rgba(7,11,16,.8); backdrop-filter: blur(6px); font-size: 9px; font-weight: 650; list-style: none; }
+.douyin-card-assessment summary::-webkit-details-marker { display: none; }
+.douyin-card-assessment.verdict-match summary { color: #9ff0cf; border-color: rgba(72,205,157,.35); }
+.douyin-card-assessment.verdict-off-topic summary { color: #ffb0b5; border-color: rgba(255,107,116,.35); }
+.douyin-card-assessment p { position: absolute; top: 31px; right: 0; width: 190px; max-height: 90px; overflow: auto; margin: 0; padding: 9px; border: 1px solid #3a4856; border-radius: 6px; color: #c8d2dc; background: #111820; box-shadow: 0 12px 30px rgba(0,0,0,.42); font-size: 10px !important; }
+@media (max-width: 720px) { .douyin-search-results { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; } .douyin-video-select span { display: none; } }
+@media (max-width: 420px) { .douyin-search-results { grid-template-columns: 1fr; } }

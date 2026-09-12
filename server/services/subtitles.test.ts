@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { filterLowConfidenceWhisperSegments, groupOcrResults, normalizeCueTimeline, offsetSubtitleSegments, segmentsToCues } from './subtitles';
+import { filterLowConfidenceWhisperSegments, groupOcrResults, normalizeCueTimeline, offsetSubtitleSegments, parseOcrTextBlocks, segmentsToCues } from './subtitles';
 
 test('Whisper confidence filter removes a low-confidence no-speech hallucination', () => {
   const segments = filterLowConfidenceWhisperSegments([
@@ -45,6 +45,92 @@ test('OCR grouping selects the most stable reading across adjacent frames', () =
   ], false, 500);
   assert.equal(cues.length, 1);
   assert.equal(cues[0]?.originalText, 'I am going home');
+});
+
+test('OCR keeps stable screen text as one cue across briefly missed frames', () => {
+  const logo = JSON.stringify([{ text: 'AUTO SUB', kind: 'onscreen-text', xPercent: 90, yPercent: 8 }]);
+  const cues = groupOcrResults([
+    { text: logo, timestampMs: 0 },
+    { text: '', timestampMs: 500 },
+    { text: '', timestampMs: 1_000 },
+    { text: logo, timestampMs: 1_500 },
+    { text: logo, timestampMs: 2_000 },
+  ], false, 500);
+  assert.equal(cues.length, 1);
+  assert.equal(cues[0]?.startMs, 0);
+  assert.equal(cues[0]?.endMs, 2_500);
+});
+
+test('full-frame OCR keeps simultaneous visible text blocks as separate cues', () => {
+  const cues = groupOcrResults([
+    { text: 'Tiêu đề góc trên\nPhụ đề phía dưới', timestampMs: 0 },
+    { text: 'Tiêu đề góc trên\nPhụ đề phía dưới', timestampMs: 500 },
+    { text: '', timestampMs: 1000 },
+  ], false, 500);
+  assert.deepEqual(cues.map((cue) => ({ text: cue.originalText, startMs: cue.startMs, endMs: cue.endMs })), [
+    { text: 'Tiêu đề góc trên', startMs: 0, endMs: 1000 },
+    { text: 'Phụ đề phía dưới', startMs: 0, endMs: 1000 },
+  ]);
+});
+
+test('OCR text block parser accepts plain lines and common JSON output', () => {
+  assert.deepEqual(parseOcrTextBlocks('- Dòng đầu\n- Dòng sau\n- Dòng đầu'), ['Dòng đầu', 'Dòng sau']);
+  assert.deepEqual(parseOcrTextBlocks('{"regions":[{"text":"Góc trên"},{"text":"Góc dưới"}]}'), ['Góc trên', 'Góc dưới']);
+});
+
+test('OCR parser strips provider json labels and unwrapped object lines', () => {
+  const payload = `json
+{"text":"手术失败后的门外...","kind":"onscreen-text","xPercent":18,"yPercent":6},
+{"text":"她还那么年轻","kind":"subtitle","xPercent":50,"yPercent":81}`;
+  assert.deepEqual(parseOcrTextBlocks(payload), ['手术失败后的门外...', '她还那么年轻']);
+  const cues = groupOcrResults([{ text: payload, timestampMs: 0 }], false, 250);
+  assert.deepEqual(cues.map((cue) => ({ text: cue.originalText, kind: cue.sourceKind, position: cue.screenPosition })), [
+    { text: '手术失败后的门外...', kind: 'onscreen-text', position: { xPercent: 18, yPercent: 6 } },
+    { text: '她还那么年轻', kind: 'subtitle', position: { xPercent: 50, yPercent: 81 } },
+  ]);
+});
+
+test('full-frame OCR marks screen text so dubbing can exclude it', () => {
+  const payload = JSON.stringify([
+    { text: 'Tiêu đề', kind: 'onscreen-text', xPercent: 18, yPercent: 7 },
+    { text: 'Lời thoại', kind: 'subtitle', xPercent: 50, yPercent: 86 },
+  ]);
+  const cues = groupOcrResults([{ text: payload, timestampMs: 0 }], false, 500);
+  assert.deepEqual(cues.map((cue) => ({ text: cue.originalText, sourceKind: cue.sourceKind, screenPosition: cue.screenPosition })), [
+    { text: 'Tiêu đề', sourceKind: 'onscreen-text', screenPosition: { xPercent: 18, yPercent: 7 } },
+    { text: 'Lời thoại', sourceKind: 'subtitle', screenPosition: { xPercent: 50, yPercent: 86 } },
+  ]);
+});
+
+test('OCR corrects a title outside the lower caption band mislabelled as subtitle', () => {
+  const payload = JSON.stringify([
+    { text: 'Dám nhìn thẳng vào lưới hái tử thần', kind: 'subtitle', xPercent: 32, yPercent: 18 },
+  ]);
+  const cues = groupOcrResults([{ text: payload, timestampMs: 0 }], false, 500);
+  assert.equal(cues[0]?.sourceKind, 'onscreen-text');
+  assert.equal(cues[0]?.textOrigin, 'ocr');
+});
+
+test('OCR kind flicker at one screen position stays one onscreen text cue', () => {
+  const frame = (kind: string) => JSON.stringify([
+    { text: 'Tiêu đề cố định', kind, xPercent: 35, yPercent: 16 },
+  ]);
+  const cues = groupOcrResults([
+    { text: frame('subtitle'), timestampMs: 0 },
+    { text: frame('onscreen-text'), timestampMs: 500 },
+    { text: frame('subtitle'), timestampMs: 1_000 },
+  ], false, 500);
+  assert.equal(cues.length, 1);
+  assert.equal(cues[0]?.sourceKind, 'onscreen-text');
+  assert.equal(cues[0]?.startMs, 0);
+  assert.equal(cues[0]?.endMs, 1_500);
+});
+
+test('OCR positions from a cropped ROI are remapped onto the full video frame', () => {
+  const cues = groupOcrResults([
+    { timestampMs: 0, text: '[{"text":"标题","kind":"onscreen-text","xPercent":50,"yPercent":20}]' },
+  ], false, 250, { x: 10, y: 70, w: 80, h: 25 });
+  assert.deepEqual(cues[0]?.screenPosition, { xPercent: 50, yPercent: 75 });
 });
 
 test('STT cue conversion preserves provider timestamps and silence gaps', () => {

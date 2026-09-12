@@ -22,6 +22,10 @@ export function buildActiveCueIndex(cues: SubtitleCue[]): ActiveCueIndex {
 }
 
 export function findActiveCue(index: ActiveCueIndex, timeMs: number): SubtitleCue | undefined {
+  return findActiveCues(index, timeMs).at(-1);
+}
+
+export function findActiveCues(index: ActiveCueIndex, timeMs: number): SubtitleCue[] {
   let low = 0;
   let high = index.cues.length - 1;
   let candidate = -1;
@@ -37,11 +41,12 @@ export function findActiveCue(index: ActiveCueIndex, timeMs: number): SubtitleCu
     }
   }
 
+  const active: SubtitleCue[] = [];
   for (let position = candidate; position >= 0; position -= 1) {
     if ((index.maxEndMs[position] ?? Number.NEGATIVE_INFINITY) <= timeMs) break;
     const cue = index.cues[position];
-    if (cue && timeMs < cue.endMs) return cue;
+    if (cue && timeMs < cue.endMs) active.push(cue);
   }
 
-  return undefined;
+  return active.reverse();
 }

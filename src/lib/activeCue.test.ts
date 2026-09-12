@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { SubtitleCue } from '../types';
-import { buildActiveCueIndex, findActiveCue } from './activeCue';
+import { buildActiveCueIndex, findActiveCue, findActiveCues } from './activeCue';
 
 const cue = (id: string, index: number, startMs: number, endMs: number, enabled = true): SubtitleCue => ({
   id,
@@ -44,4 +44,14 @@ test('active cue index returns the latest overlapping cue', () => {
 
   assert.equal(findActiveCue(index, 6_500)?.id, 'latest');
   assert.equal(findActiveCue(index, 8_500)?.id, 'long');
+});
+
+test('active cue index returns every overlapping cue in reading order', () => {
+  const index = buildActiveCueIndex([
+    cue('top', 1, 0, 10_000),
+    cue('middle', 2, 1_000, 5_000),
+    cue('bottom', 3, 1_000, 5_000),
+  ]);
+
+  assert.deepEqual(findActiveCues(index, 2_000).map((item) => item.id), ['top', 'middle', 'bottom']);
 });

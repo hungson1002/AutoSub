@@ -555,6 +555,7 @@ export const api = {
     signal?: AbortSignal,
     progressId?: string,
     language?: string,
+    textScope: "subtitles" | "all" = "subtitles",
   ) =>
     request<{ cues: SubtitleCue[]; uploadId: string }>("/api/extract/ocr", {
       method: "POST",
@@ -565,6 +566,7 @@ export const api = {
         roi,
         samplingFps,
         filterWatermark,
+        textScope,
         progressId,
         language,
       }),
@@ -765,6 +767,7 @@ export const api = {
       dubTrack?: Blob;
       dubbingJobId?: string;
       fontFile?: File;
+      fontFamilyAlias?: string;
       videoEdit?: import("../types").VideoEditState;
     },
     signal?: AbortSignal,
@@ -802,6 +805,8 @@ export const api = {
       form.append("dubTrack", options.dubTrack, "dub-track.wav");
     if (options.fontFile)
       form.append("fontFile", options.fontFile, options.fontFile.name);
+    if (options.fontFile && options.fontFamilyAlias)
+      form.append("fontFamilyAlias", options.fontFamilyAlias);
     if (options.logo?.file)
       form.append("logoFile", options.logo.file, options.logo.file.name);
     const response = await fetch(`${MEDIA_BACKEND_ORIGIN}/api/export/video`, {

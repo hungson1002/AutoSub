@@ -311,6 +311,19 @@ export function recommendedBilibiliConnections(totalBytes: number) {
   return 6;
 }
 
+const SLOW_CDN_GRACE_MS = 15_000;
+const SLOW_CDN_MIN_BYTES_PER_SECOND = 512 * 1024;
+
+export function shouldRotateSlowVideoCdn(
+  downloadedBytes: number,
+  elapsedMs: number,
+  hasAlternative: boolean,
+  rotationsAlreadyUsed = 0,
+) {
+  if (!hasAlternative || rotationsAlreadyUsed >= 1 || elapsedMs < SLOW_CDN_GRACE_MS) return false;
+  return downloadedBytes / Math.max(1, elapsedMs / 1000) < SLOW_CDN_MIN_BYTES_PER_SECOND;
+}
+
 export function createBatchJob(urls: string[], options: { autoStart?: boolean; bilibiliQuality?: BilibiliQuality } = {}): DouyinBatchJob {
   const batchId = randomUUID();
   const items: DouyinBatchItem[] = urls.map((url) => ({
@@ -661,12 +674,19 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
   let downloadedBytes = 0;
   let downloadSuccess = false;
   let lastError: string | undefined;
+  let slowCdnRotations = 0;
 
-  for (const url of candidateUrls) {
+  for (const [candidateIndex, url] of candidateUrls.entries()) {
     if (signal.aborted) break;
 
+    const hasAlternativeCdn = candidateIndex < candidateUrls.length - 1;
+    const candidateController = new AbortController();
+    const candidateSignal = AbortSignal.any([signal, candidateController.signal]);
+    let candidateDownloadedBytes = 0;
+    let switchedForLowSpeed = false;
+    let slowCdnTimer: ReturnType<typeof setTimeout> | undefined;
+
     try {
-      const downloadStartedAt = Date.now();
       // Check content-length via fast probe
       let targetBytes = info.expectedBytes || 0;
       if (!targetBytes) {
@@ -683,14 +703,26 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
       }
 
       item.totalBytes = targetBytes;
+      const downloadStartedAt = Date.now();
+      if (info.platform === 'bilibili' && hasAlternativeCdn) {
+        slowCdnTimer = setTimeout(() => {
+          if (shouldRotateSlowVideoCdn(candidateDownloadedBytes, Date.now() - downloadStartedAt, true, slowCdnRotations)) {
+            switchedForLowSpeed = true;
+            slowCdnRotations += 1;
+            candidateController.abort();
+          }
+        }, SLOW_CDN_GRACE_MS + 250);
+        slowCdnTimer.unref?.();
+      }
 
       downloadedBytes = await downloadTurboStream(
         url,
         targetFilePath,
         targetBytes,
         downloadHeaders,
-        signal,
+        candidateSignal,
         (current) => {
+          candidateDownloadedBytes = current;
           item.downloadedBytes = current;
           const elapsedSeconds = Math.max(0.5, (Date.now() - downloadStartedAt) / 1000);
           item.downloadSpeedBytesPerSecond = Math.round(current / elapsedSeconds);
@@ -714,6 +746,10 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
       break;
     } catch (err) {
       await rm(targetFilePath, { force: true }).catch(() => undefined);
+      if (switchedForLowSpeed && !signal.aborted) {
+        lastError = 'CDN Bilibili hiện tại quá chậm; đang thử máy chủ dự phòng.';
+        continue;
+      }
       const incomplete = err instanceof Error && /tải chưa đủ dữ liệu|bị cắt ngắn/i.test(err.message);
       if (!signal.aborted && !incomplete) {
         try {
@@ -734,6 +770,8 @@ async function processDownloadItem(item: DouyinBatchItem, signal: AbortSignal) {
       } else {
         lastError = err instanceof Error ? err.message : 'Đã hủy tải video.';
       }
+    } finally {
+      if (slowCdnTimer) clearTimeout(slowCdnTimer);
     }
   }
 

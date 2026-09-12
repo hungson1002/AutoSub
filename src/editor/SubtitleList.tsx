@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SubtitleCue } from '../types';
 import { formatClock, subtitleStats } from '../lib/subtitles';
-import { RefreshCw, Trash2 } from '../components/Icons';
+import { Captions, RefreshCw, Trash2, Type } from '../components/Icons';
 
 type SubtitleCardProps = {
   cue: SubtitleCue;
@@ -23,9 +23,14 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
   const displayStartMs = hasRetimedCue ? cue.dubbing!.timelineStartMs! : cue.startMs;
   const displayEndMs = hasRetimedCue ? cue.dubbing!.timelineEndMs! : cue.endMs;
 
-  return <article className={`cue-card ${highlighted ? 'selected' : ''} ${cue.enabled ? '' : 'disabled'}`} onClick={() => onSelect(cue.id)}>
+  const isTextObject = cue.sourceKind === 'onscreen-text';
+  const cueKind = !isTextObject ? 'subtitle' : cue.textOrigin === 'manual' ? 'manual-text' : 'ocr-text';
+  const cueKindLabel = cueKind === 'subtitle' ? 'SUB' : cueKind === 'manual-text' ? 'TEXT' : 'OCR';
+
+  return <article className={`cue-card ${cueKind} ${highlighted ? 'selected' : ''} ${cue.enabled ? '' : 'disabled'}`} onClick={() => onSelect(cue.id)}>
     <div className="cue-meta">
       <span className="cue-index">#{String(cue.index).padStart(2, '0')}</span>
+      <span className={`cue-kind-badge ${cueKind}`}>{cueKindLabel}</span>
       <button type="button" className={`cue-enable ${cue.enabled ? 'active' : ''}`} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { enabled: !cue.enabled }); }}>{cue.enabled ? 'ON' : 'OFF'}</button>
       <button className="cue-delete" onClick={(event) => { event.stopPropagation(); onDelete(cue.id); }} aria-label="Xóa cue"><Trash2 size={14} /></button>
       <span title={hasRetimedCue ? 'Thời gian trên video đã làm chậm' : undefined}>{formatClock(displayStartMs)} → {formatClock(displayEndMs)}</span>
@@ -33,7 +38,7 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
       {cue.dubbing && <span className="cue-voice-badge">VOICE {cue.dubbing.speedApplied.toFixed(2)}×</span>}
     </div>
     <div className="cue-row">
-      <span>BẢN GỐC</span>
+      <span>{isTextObject ? 'VĂN BẢN' : 'BẢN GỐC'}</span>
       <textarea value={cue.originalText} onChange={(event) => onChange(cue.id, { originalText: event.target.value })} onClick={(event) => event.stopPropagation()} />
     </div>
     <div className="cue-row translation-row">
@@ -44,10 +49,16 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
       <label>{hasRetimedCue ? 'START GỐC' : 'START'} <input value={cue.startMs} type="number" onChange={(event) => onChange(cue.id, { startMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
       <label>{hasRetimedCue ? 'END GỐC' : 'END'} <input value={cue.endMs} type="number" onChange={(event) => onChange(cue.id, { endMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
       <div className={`cps ${stats.cps >= 20 ? 'danger' : stats.cps >= 17 ? 'warn' : ''}`}>CPS <b>{stats.cps.toFixed(1)}</b></div>
-      <div className="voice-pills">
-        {(['G1', 'G2', 'G3'] as const).map((group) => <button key={group} className={cue.voiceGroup === group ? 'active' : ''} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { voiceGroup: group }); }}>{group}</button>)}
+      <div className="cue-kind-switch" aria-label="Loại cue">
+        <button type="button" className={!isTextObject ? 'active' : ''} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { sourceKind: 'subtitle' }); }}>Phụ đề</button>
+        <button type="button" className={isTextObject ? 'active' : ''} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { sourceKind: 'onscreen-text', textOrigin: cue.textOrigin ?? 'manual' }); }}>Văn bản</button>
       </div>
-      <button type="button" className="cue-regenerate" disabled={!voiceReady || regenerating} title={voiceReady ? 'Tạo lại voice riêng cho cue này' : 'Hãy tạo dub track trước'} onClick={(event) => { event.stopPropagation(); onRegenerateVoice?.(cue); }}><RefreshCw size={11} className={regenerating ? 'spinning' : ''} /> {regenerating ? 'Đang tạo' : 'Tạo voice'}</button>
+      {!isTextObject && <>
+        <div className="voice-pills">
+          {(['G1', 'G2', 'G3'] as const).map((group) => <button key={group} className={cue.voiceGroup === group ? 'active' : ''} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { voiceGroup: group }); }}>{group}</button>)}
+        </div>
+        <button type="button" className="cue-regenerate" disabled={!voiceReady || regenerating} title={voiceReady ? 'Tạo lại voice riêng cho cue này' : 'Hãy tạo dub track trước'} onClick={(event) => { event.stopPropagation(); onRegenerateVoice?.(cue); }}><RefreshCw size={11} className={regenerating ? 'spinning' : ''} /> {regenerating ? 'Đang tạo' : 'Tạo voice'}</button>
+      </>}
     </div>
   </article>;
 });
@@ -59,7 +70,16 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
   const listRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<number | undefined>(undefined);
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 600 });
-  const cuePositions = useMemo(() => new Map(cues.map((cue, index) => [cue.id, index])), [cues]);
+  const [filter, setFilter] = useState<'subtitle' | 'text'>('subtitle');
+  const displayedCues = useMemo(() => cues.filter((cue) => filter === 'text'
+    ? cue.sourceKind === 'onscreen-text'
+    : cue.sourceKind !== 'onscreen-text'), [cues, filter]);
+  const cuePositions = useMemo(() => new Map(displayedCues.map((cue, index) => [cue.id, index])), [displayedCues]);
+
+  useEffect(() => {
+    const selected = cues.find((cue) => cue.id === selectedId);
+    if (selected) setFilter(selected.sourceKind === 'onscreen-text' ? 'text' : 'subtitle');
+  }, [cues, selectedId]);
 
   const updateViewport = useCallback(() => {
     if (scrollFrameRef.current !== undefined) return;
@@ -86,9 +106,10 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
   }, [updateViewport]);
 
   useEffect(() => {
-    if (!activeCueId) return;
+    const targetId = activeCueId ?? selectedId;
+    if (!targetId) return;
     const container = listRef.current;
-    const position = cuePositions.get(activeCueId);
+    const position = cuePositions.get(targetId);
     if (!container || position === undefined) return;
     const itemTop = position * CUE_SLOT_HEIGHT;
     const itemBottom = itemTop + CUE_SLOT_HEIGHT;
@@ -100,17 +121,22 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
       const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
       container.scrollTo({ top: targetTop, behavior: reduceMotion ? 'auto' : 'smooth' });
     }
-  }, [activeCueId, cuePositions]);
+  }, [activeCueId, cuePositions, selectedId]);
 
   const start = Math.max(0, Math.floor(viewport.scrollTop / CUE_SLOT_HEIGHT) - OVERSCAN_ITEMS);
-  const end = Math.min(cues.length, Math.ceil((viewport.scrollTop + viewport.height) / CUE_SLOT_HEIGHT) + OVERSCAN_ITEMS);
-  const visibleCues = cues.slice(start, end);
+  const end = Math.min(displayedCues.length, Math.ceil((viewport.scrollTop + viewport.height) / CUE_SLOT_HEIGHT) + OVERSCAN_ITEMS);
+  const visibleCues = displayedCues.slice(start, end);
 
-  return <div ref={listRef} className="subtitle-list" onScroll={updateViewport}>
-    {cues.length === 0 ? <div className="empty-list"><span>01</span><p>Subtitle list đang trống.</p><small>Import SRT/VTT hoặc trích xuất từ video để bắt đầu.</small></div> : <div className="subtitle-list-virtual-space" style={{ height: `${cues.length * CUE_SLOT_HEIGHT}px` }}>
+  return <div className="subtitle-list-shell">
+    <div className="cue-filter-tabs">
+      <button type="button" className={filter === 'subtitle' ? 'active' : ''} onClick={() => setFilter('subtitle')}><Captions size={13} /> Phụ đề <b>{cues.filter((cue) => cue.sourceKind !== 'onscreen-text').length}</b></button>
+      <button type="button" className={filter === 'text' ? 'active' : ''} onClick={() => setFilter('text')}><Type size={13} /> Văn bản <b>{cues.filter((cue) => cue.sourceKind === 'onscreen-text').length}</b></button>
+    </div>
+    <div ref={listRef} className="subtitle-list" onScroll={updateViewport}>
+    {displayedCues.length === 0 ? <div className="empty-list"><span>{filter === 'text' ? 'T' : '01'}</span><p>{filter === 'text' ? 'Chưa có văn bản trên màn hình.' : 'Danh sách phụ đề đang trống.'}</p><small>{filter === 'text' ? 'Thêm text ngay trên timeline hoặc chạy OCR toàn màn hình.' : 'Import SRT/VTT hoặc trích xuất từ video để bắt đầu.'}</small></div> : <div className="subtitle-list-virtual-space" style={{ height: `${displayedCues.length * CUE_SLOT_HEIGHT}px` }}>
       {visibleCues.map((cue, offset) => <div key={cue.id} className="subtitle-list-item" style={{ height: `${CUE_SLOT_HEIGHT}px`, transform: `translateY(${(start + offset) * CUE_SLOT_HEIGHT}px)` }}><SubtitleCard
         cue={cue}
-        highlighted={activeCueId ? activeCueId === cue.id : selectedId === cue.id}
+        highlighted={selectedId === cue.id || activeCueId === cue.id}
         onSelect={onSelect}
         onChange={onChange}
         onDelete={onDelete}
@@ -120,5 +146,6 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
         slowVideoToMatchSpeech={slowVideoToMatchSpeech}
       /></div>)}
     </div>}
+    </div>
   </div>;
 });

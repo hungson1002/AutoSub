@@ -26,6 +26,7 @@ import {
   Volume2,
 } from "../components/Icons";
 import { formatClock } from "../lib/subtitles";
+import { layoutTimelineCues } from "../lib/subtitleTimeline";
 import {
   announceDropdownOpen,
   listenForOtherDropdowns,
@@ -34,8 +35,9 @@ import {
 import { RangeInput } from "../components/RangeInput";
 import { VideoTrimModal } from "./VideoTrimModal";
 import { VideoCropModal } from "./VideoCropModal";
+import { SubtitleTimeline } from "./SubtitleTimeline";
 import { cropVideoStyle } from "../lib/videoCrop";
-import { buildActiveCueIndex, findActiveCue } from "../lib/activeCue";
+import { buildActiveCueIndex, findActiveCue, findActiveCues } from "../lib/activeCue";
 import { dubAudioNeedsResync } from "../lib/mediaSync";
 
 type Roi = { x: number; y: number; w: number; h: number };
@@ -48,12 +50,19 @@ type BlurDrag = {
   origin: BlurRegion;
 };
 type SubtitleDrag = {
+  cueId: string;
   startX: number;
   startY: number;
   originX: number;
   originY: number;
 };
 type SubtitlePosition = { x: number; y: number };
+type SubtitleScaleDrag = {
+  cueId: string;
+  startX: number;
+  startY: number;
+  originFontSize: number;
+};
 type LogoDrag = {
   startX: number;
   startY: number;
@@ -179,6 +188,16 @@ type Props = {
   seekRequest?: { id: number; timeMs: number };
   onTime?: (ms: number) => void;
   onActiveCueChange?: (id?: string) => void;
+  selectedCueId?: string;
+  onCueSelect?: (id: string) => void;
+  onCueFocus?: (id: string) => void;
+  onCueChange?: (
+    id: string,
+    patch: Partial<SubtitleCue>,
+  ) => void;
+  onAddTextCue?: (timeMs: number) => void;
+  onDeleteCue?: (id: string) => void;
+  onDeleteCues?: (ids: string[]) => void;
   roi?: Roi;
   onRoiChange?: (roi: Roi) => void;
   onBlurRegionsChange?: (regions: BlurRegion[]) => void;
@@ -202,6 +221,13 @@ export function VideoPlayer({
   seekRequest,
   onTime,
   onActiveCueChange,
+  selectedCueId,
+  onCueSelect,
+  onCueFocus,
+  onCueChange,
+  onAddTextCue,
+  onDeleteCue,
+  onDeleteCues,
   roi,
   onRoiChange,
   onBlurRegionsChange,
@@ -229,6 +255,8 @@ export function VideoPlayer({
   const [subtitleDrag, setSubtitleDrag] = useState<SubtitleDrag>();
   const [draftSubtitlePosition, setDraftSubtitlePosition] =
     useState<SubtitlePosition>();
+  const [subtitleScaleDrag, setSubtitleScaleDrag] = useState<SubtitleScaleDrag>();
+  const [draftSubtitleFontSize, setDraftSubtitleFontSize] = useState<{ cueId: string; fontSize: number }>();
   const [logoDrag, setLogoDrag] = useState<LogoDrag>();
   const logoDragRef = useRef<LogoDrag | undefined>(undefined);
   const subtitleFrameRef = useRef<number | undefined>(undefined);
@@ -259,10 +287,15 @@ export function VideoPlayer({
   const effectiveVideoEdit = videoEdit || internalVideoEdit;
   const cueIndex = useMemo(() => buildActiveCueIndex(slowVideoToMatchSpeech ? cues.map((cue) => cue.dubbing && Number.isFinite(cue.dubbing.timelineStartMs) && Number.isFinite(cue.dubbing.timelineEndMs) ? { ...cue, startMs: cue.dubbing.timelineStartMs as number, endMs: cue.dubbing.timelineEndMs as number } : cue) : cues), [cues, slowVideoToMatchSpeech]);
   const [activeCueId, setActiveCueId] = useState<string>();
-  const activeCue = useMemo(
-    () =>
-      activeCueId ? cues.find((cue) => cue.id === activeCueId) : undefined,
-    [activeCueId, cues],
+  const activeCues = useMemo(() => findActiveCues(cueIndex, time), [cueIndex, time]);
+  const cueLayerLayout = useMemo(() => layoutTimelineCues(cues), [cues]);
+  const cueLayers = useMemo(() => new Map(cueLayerLayout.items.map(({ cue, lane }) => [cue.id, lane])), [cueLayerLayout.items]);
+  const displayDuration = Math.max(
+    1,
+    duration,
+    asset?.durationMs || 0,
+    effectiveVideoEdit.trimEndMs || 0,
+    cues.reduce((maximum, cue) => Math.max(maximum, cue.endMs), 0),
   );
   const playingDub = audioMode === "dubbed" && Boolean(dubAudioUrl);
   const retimeCues = useMemo(() => slowVideoToMatchSpeech ? cues.flatMap((cue) => {
@@ -364,8 +397,11 @@ export function VideoPlayer({
     setPlaying(false);
     setTime(0);
     setDuration((asset?.durationMs || 0) + retimedDurationExtensionMs);
-    syncActiveCue(0);
-  }, [asset?.url, asset?.durationMs, syncActiveCue, retimedDurationExtensionMs]);
+    setActiveCueId(findActiveCue(cueIndex, 0)?.id);
+    // Cue edits rebuild the active-cue index. They must not reset a paused
+    // preview to 00:00; only a changed media source/duration starts from zero.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asset?.url, asset?.durationMs, retimedDurationExtensionMs]);
   useEffect(() => {
     // A new canvas ratio gets a predictable fitted starting view. The user can
     // then zoom and pan it again without carrying offsets from the old frame.
@@ -565,28 +601,28 @@ export function VideoPlayer({
       origin: region,
     });
   };
-  const beginSubtitleDrag = (event: PointerEvent<HTMLElement>) => {
-    if (!onStyleChange) return;
+  const beginSubtitleDrag = (event: PointerEvent<HTMLElement>, cue: SubtitleCue, position: SubtitlePosition) => {
+    if (!onCueChange) return;
     event.preventDefault();
     event.stopPropagation();
-    const originX = style.position === "custom" ? (style.customX ?? 50) : 50;
-    const originY =
-      style.position === "top"
-        ? 12
-        : style.position === "middle"
-          ? 50
-          : style.position === "bottom"
-            ? 82
-            : (style.customY ?? 82);
-    if (style.position !== "custom")
-      onStyleChange({ position: "custom", customX: originX, customY: originY });
+    (onCueFocus ?? onCueSelect)?.(cue.id);
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setSubtitleDrag({
+      cueId: cue.id,
       startX: event.clientX,
       startY: event.clientY,
-      originX,
-      originY,
+      originX: position.x,
+      originY: position.y,
     });
+  };
+  const beginSubtitleScale = (event: PointerEvent<HTMLButtonElement>, cue: SubtitleCue, fontSize: number) => {
+    if (!onCueChange) return;
+    event.preventDefault();
+    event.stopPropagation();
+    (onCueFocus ?? onCueSelect)?.(cue.id);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setSubtitleScaleDrag({ cueId: cue.id, startX: event.clientX, startY: event.clientY, originFontSize: fontSize });
+    setDraftSubtitleFontSize({ cueId: cue.id, fontSize });
   };
   const clearBlurSelection = (event: PointerEvent<HTMLDivElement>) => {
     if (!blurEditMode) return;
@@ -682,7 +718,7 @@ export function VideoPlayer({
     const rect = event.currentTarget.getBoundingClientRect();
     setContextMenu({
       x: clamp(event.clientX - rect.left, 8, rect.width - 224),
-      y: clamp(event.clientY - rect.top, 8, rect.height - 260),
+      y: clamp(event.clientY - rect.top, 8, rect.height - 390),
     });
   };
   const patchVideoEdit = (patch: Partial<VideoEditState>) => {
@@ -858,8 +894,8 @@ export function VideoPlayer({
         ((event.clientY - subtitleDrag.startY) / (rect.height * videoZoom)) *
         100;
       const rawPosition = {
-        x: clamp(subtitleDrag.originX + dx, 5, 95),
-        y: clamp(subtitleDrag.originY + dy, 5, 95),
+        x: clamp(subtitleDrag.originX + dx, 0, 100),
+        y: clamp(subtitleDrag.originY + dy, 0, 100),
       };
       const xTargets: AlignmentGuide[] = [
         { value: 50, label: "Giữa khung" },
@@ -898,6 +934,15 @@ export function VideoPlayer({
             setDraftSubtitlePosition(pendingSubtitlePositionRef.current);
         });
       }
+    }
+    if (subtitleScaleDrag) {
+      const delta = (event.clientX - subtitleScaleDrag.startX) - (event.clientY - subtitleScaleDrag.startY);
+      const fontSize = clamp(
+        Math.round(subtitleScaleDrag.originFontSize + (delta / Math.max(previewScale, 0.2)) * 0.35),
+        8,
+        200,
+      );
+      setDraftSubtitleFontSize({ cueId: subtitleScaleDrag.cueId, fontSize });
     }
     const activeLogoDrag = logoDragRef.current;
     if (onLogoChange && activeLogoDrag) {
@@ -952,13 +997,37 @@ export function VideoPlayer({
     }
     const finalSubtitlePosition =
       pendingSubtitlePositionRef.current || draftSubtitlePosition;
-    if (onStyleChange && subtitleDrag && finalSubtitlePosition)
-      onStyleChange({
-        customX: finalSubtitlePosition.x,
-        customY: finalSubtitlePosition.y,
-      });
+    if (subtitleDrag && finalSubtitlePosition) {
+      const cue = cues.find((item) => item.id === subtitleDrag.cueId);
+      if (cue?.sourceKind === "onscreen-text") {
+        onCueChange?.(cue.id, {
+          screenPosition: {
+            xPercent: finalSubtitlePosition.x,
+            yPercent: finalSubtitlePosition.y,
+          },
+        });
+      } else {
+        onStyleChange?.({
+          position: "custom",
+          customX: finalSubtitlePosition.x,
+          customY: finalSubtitlePosition.y,
+        });
+      }
+    }
     pendingSubtitlePositionRef.current = undefined;
     setDraftSubtitlePosition(undefined);
+    if (subtitleScaleDrag && draftSubtitleFontSize?.cueId === subtitleScaleDrag.cueId) {
+      const cue = cues.find((item) => item.id === subtitleScaleDrag.cueId);
+      if (cue?.sourceKind === "onscreen-text") {
+        onCueChange?.(cue.id, {
+          styleOverrides: { ...cue.styleOverrides, fontSize: draftSubtitleFontSize.fontSize },
+        });
+      } else if (cue) {
+        onStyleChange?.({ fontSize: draftSubtitleFontSize.fontSize });
+      }
+    }
+    setSubtitleScaleDrag(undefined);
+    setDraftSubtitleFontSize(undefined);
     setAlignmentGuides({});
     const drag = logoDragRef.current;
     if (drag) {
@@ -979,27 +1048,25 @@ export function VideoPlayer({
     setVideoPanDrag(undefined);
   };
   const previewScale = stageWidth / 1920;
-  const previewStyle =
-    draftSubtitlePosition && style.position === "custom"
-      ? {
-          ...style,
-          customX: draftSubtitlePosition.x,
-          customY: draftSubtitlePosition.y,
-        }
-      : style;
-  const outlineWidth =
-    previewStyle.background === "outline"
-      ? Math.max(0, (previewStyle.outlineWidth ?? 2) * previewScale)
-      : 0;
-  const boxColor = previewStyle.backgroundColor ?? previewStyle.outlineColor;
-  const boxOpacity = previewStyle.backgroundOpacity ?? 0.72;
-  const subtitleStyle: CSSProperties = {
-    fontFamily: previewStyle.fontFamily,
-    fontSize: `${Math.max(previewStyle.fontSize * previewScale, 10)}px`,
-    color: previewStyle.textColor,
-    fontWeight: previewStyle.bold === true ? 700 : 400,
-    fontStyle: previewStyle.italic === true ? "italic" : "normal",
-    WebkitTextFillColor: previewStyle.textColor,
+  const cueStyle = (cue: SubtitleCue): SubtitleStyle => ({
+    ...style,
+    ...(cue.styleOverrides || {}),
+    ...(draftSubtitleFontSize?.cueId === cue.id ? { fontSize: draftSubtitleFontSize.fontSize } : {}),
+  });
+  const subtitleStyle = (previewStyle: SubtitleStyle): CSSProperties => {
+    const outlineWidth = previewStyle.background === "outline" ? Math.max(0, (previewStyle.outlineWidth ?? 2) * previewScale) : 0;
+    const boxColor = previewStyle.backgroundColor ?? previewStyle.outlineColor;
+    const boxOpacity = previewStyle.backgroundOpacity ?? 0.72;
+    const boxPaddingX = Math.max(0, previewStyle.boxPaddingX ?? 10) * previewScale;
+    const boxPaddingY = Math.max(0, previewStyle.boxPaddingY ?? 4) * previewScale;
+    const boxBorderWidth = Math.max(0, previewStyle.boxBorderWidth ?? 0) * previewScale;
+    return {
+      fontFamily: previewStyle.fontFamily,
+      fontSize: `${Math.max(previewStyle.fontSize * previewScale, 10)}px`,
+      color: previewStyle.textColor,
+      fontWeight: previewStyle.bold === true ? 700 : 400,
+      fontStyle: previewStyle.italic === true ? "italic" : "normal",
+      WebkitTextFillColor: previewStyle.textColor,
     WebkitTextStroke:
       outlineWidth > 0
         ? `${outlineWidth}px ${previewStyle.outlineColor}`
@@ -1011,22 +1078,20 @@ export function VideoPlayer({
             .toString(16)
             .padStart(2, "0")}`
         : "transparent",
-    ...(previewStyle.position === "custom"
-      ? {
-          left: `${previewStyle.customX ?? 50}%`,
-          top: `${previewStyle.customY ?? 82}%`,
-          right: "auto",
-          bottom: "auto",
-          width: "84%",
-          maxWidth: "84%",
-          boxSizing: "border-box",
-          transform: "translate(-50%, -50%)",
-          pointerEvents: "auto",
-          cursor: subtitleDrag ? "grabbing" : "grab",
-          userSelect: "none",
-          touchAction: "none",
-        }
-      : {}),
+    padding: previewStyle.background === "box"
+      ? `${boxPaddingY}px ${boxPaddingX}px`
+      : "0",
+    border: previewStyle.background === "box" && boxBorderWidth > 0
+      ? `${boxBorderWidth}px solid ${previewStyle.boxBorderColor ?? "#ffffff"}`
+      : "0 solid transparent",
+    };
+  };
+
+  const cuePosition = (cue: SubtitleCue, previewStyle: SubtitleStyle): SubtitlePosition => {
+    if (subtitleDrag?.cueId === cue.id && draftSubtitlePosition) return draftSubtitlePosition;
+    if (cue.screenPosition) return { x: cue.screenPosition.xPercent, y: cue.screenPosition.yPercent };
+    const defaultSubtitleY = previewStyle.position === "top" ? 12 : previewStyle.position === "middle" ? 50 : previewStyle.position === "custom" ? (previewStyle.customY ?? 82) : 82;
+    return { x: previewStyle.position === "custom" ? (previewStyle.customX ?? 50) : 50, y: defaultSubtitleY };
   };
 
   const aspectRatio =
@@ -1075,7 +1140,12 @@ export function VideoPlayer({
               }}
             >
               {asset ? (
-                <div className="video-media-layer">
+                <div
+                  className="video-media-layer"
+                  style={{
+                    transform: `scaleX(${effectiveVideoEdit.flipHorizontal ? -1 : 1}) scaleY(${effectiveVideoEdit.flipVertical ? -1 : 1})`,
+                  }}
+                >
                   <div className="video-crop-viewport">
                     <video
                       key={asset.url}
@@ -1188,25 +1258,41 @@ export function VideoPlayer({
                   )}
                 </>
               )}
-              {asset && activeCue && style.visible && (
-                <div
-                  className={`subtitle-overlay ${style.position}`}
-                  onPointerDown={beginSubtitleDrag}
-                  style={subtitleStyle}
-                >
-                  {style.content === "original" ? (
-                    activeCue.originalText
-                  ) : style.content === "both" ? (
-                    <>
-                      <span>{activeCue.originalText}</span>
-                      <br />
-                      <span>{activeCue.translatedText}</span>
-                    </>
-                  ) : (
-                    activeCue.translatedText || activeCue.originalText
-                  )}
-                </div>
-              )}
+              {asset && activeCues.map((cue) => {
+                const previewStyle = cueStyle(cue);
+                if (!previewStyle.visible) return null;
+                const position = cuePosition(cue, previewStyle);
+                const lane = cueLayers.get(cue.id) ?? 0;
+                return (
+                  <div
+                    key={cue.id}
+                    className={`subtitle-overlay custom subtitle-overlay-object ${selectedCueId === cue.id ? "selected" : ""}`}
+                    onPointerDown={(event) => beginSubtitleDrag(event, cue, position)}
+                    style={{
+                      ...subtitleStyle(previewStyle),
+                      zIndex: 20 + cueLayerLayout.laneCount - lane,
+                      left: `${position.x}%`,
+                      top: `${position.y}%`,
+                      right: "auto",
+                      bottom: "auto",
+                      transform: `translate(${position.x <= 1 ? "0%" : position.x >= 99 ? "-100%" : "-50%"}, ${position.y <= 1 ? "0%" : position.y >= 99 ? "-100%" : "-50%"})`,
+                    }}
+                  >
+                    {previewStyle.content === "original" ? cue.originalText : previewStyle.content === "both" ? (
+                      <><span>{cue.originalText}</span>{cue.translatedText && <><br /><span>{cue.translatedText}</span></>}</>
+                    ) : cue.translatedText || cue.originalText}
+                    {selectedCueId === cue.id && (
+                      <button
+                        type="button"
+                        className="subtitle-scale-handle"
+                        aria-label="Kéo để thay đổi cỡ chữ"
+                        title="Kéo để phóng to / thu nhỏ chữ"
+                        onPointerDown={(event) => beginSubtitleScale(event, cue, previewStyle.fontSize)}
+                      />
+                    )}
+                  </div>
+                );
+              })}
               {blurRegions.map((region, index) => {
                 const previewRegion =
                   draftBlurRegion?.id === region.id ? draftBlurRegion : region;
@@ -1352,17 +1438,35 @@ export function VideoPlayer({
                     effectiveVideoEdit.trimEndMs !== undefined) && (
                     <small>
                       {formatClock(effectiveVideoEdit.trimStartMs)} –{" "}
-                      {formatClock(effectiveVideoEdit.trimEndMs ?? duration)}
+                      {formatClock(effectiveVideoEdit.trimEndMs ?? displayDuration)}
                     </small>
                   )}
                 </button>
+                <span>LẬT VIDEO</span>
+                <div className="video-context-flips">
+                  <button
+                    type="button"
+                    className={effectiveVideoEdit.flipHorizontal ? "active" : ""}
+                    onClick={() => patchVideoEdit({ flipHorizontal: !effectiveVideoEdit.flipHorizontal })}
+                  >
+                    ↔ Lật trái / phải
+                  </button>
+                  <button
+                    type="button"
+                    className={effectiveVideoEdit.flipVertical ? "active" : ""}
+                    onClick={() => patchVideoEdit({ flipVertical: !effectiveVideoEdit.flipVertical })}
+                  >
+                    ↕ Lật trên / dưới
+                  </button>
+                </div>
                 <button
                   onClick={() => {
                     resetVideoView();
+                    patchVideoEdit({ flipHorizontal: false, flipVertical: false });
                     setContextMenu(undefined);
                   }}
                 >
-                  Đặt lại zoom / vị trí
+                  Đặt lại zoom / vị trí / lật
                 </button>
               </div>
             )}
@@ -1380,16 +1484,16 @@ export function VideoPlayer({
           <RangeInput
             className="seekbar"
             min={effectiveVideoEdit.trimStartMs}
-            max={effectiveVideoEdit.trimEndMs || duration || 1}
+            max={effectiveVideoEdit.trimEndMs || displayDuration}
             value={clamp(
               time,
               effectiveVideoEdit.trimStartMs,
-              effectiveVideoEdit.trimEndMs || duration || 1,
+              effectiveVideoEdit.trimEndMs || displayDuration,
             )}
             onChange={(event) => seek(Number(event.target.value))}
           />
           <span className="timecode muted">
-            {formatClock(effectiveVideoEdit.trimEndMs || duration)}
+            {formatClock(effectiveVideoEdit.trimEndMs || displayDuration)}
           </span>
           <div className="volume-control" ref={volumeControlRef}>
             <button
@@ -1427,11 +1531,31 @@ export function VideoPlayer({
             <Maximize size={15} />
           </button>
         </div>
+        {onCueSelect && onCueChange && (
+          <SubtitleTimeline
+            cues={cues}
+            baseStyle={style}
+            timeMs={time}
+            durationMs={displayDuration}
+            activeCueId={activeCueId}
+            selectedCueId={selectedCueId}
+            onSelect={(cueId) => {
+              const cue = cues.find((item) => item.id === cueId);
+              if (cue?.sourceKind === "onscreen-text" && onCueFocus) onCueFocus(cueId);
+              else onCueSelect(cueId);
+            }}
+            onChange={onCueChange}
+            onSeek={seek}
+            onAddText={onAddTextCue}
+            onDelete={onDeleteCue}
+            onDeleteMany={onDeleteCues}
+          />
+        )}
       </div>
       <VideoTrimModal
         open={trimOpen}
         asset={asset}
-        durationMs={duration}
+        durationMs={displayDuration}
         value={effectiveVideoEdit}
         onClose={() => setTrimOpen(false)}
         onApply={(trim) => {

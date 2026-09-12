@@ -118,7 +118,7 @@ test('dialogue clusters spend false subtitle gaps and spread mild tempo without 
   })));
 
   assert.ok((tempoById.get('lead') || 0) > 1 && (tempoById.get('lead') || 0) < 1.1);
-  assert.ok((tempoById.get('pressure') || 0) > 1.1 && (tempoById.get('pressure') || 0) <= 1.18);
+  assert.ok((tempoById.get('pressure') || 0) > 1.1 && (tempoById.get('pressure') || 0) <= 1.12);
   assert.ok((tempoById.get('release') || 0) > 1 && (tempoById.get('release') || 0) < 1.1);
   assert.equal(tempoById.get('new-scene'), 1);
   assert.ok(timeline.every((cue) => cue.timelineStartMs >= cue.startMs));
@@ -152,11 +152,11 @@ test('CapCut jobs are serialized and narration is sped up without padding or tri
   assert.equal(tempoFilter(1), 'anull');
   assert.equal(fallbackTempoFilter(1.25), 'atempo=1.250');
   assert.equal(fallbackTempoFilter(1), 'anull');
-  assert.equal(ADAPTIVE_FIT_VERSION, 12);
+  assert.equal(ADAPTIVE_FIT_VERSION, 13);
   assert.equal(fittingTempo(0.65), 1);
   assert.equal(fittingTempo(0.90), 1);
   assert.equal(fittingTempo(1.08), 1.08);
-  assert.equal(fittingTempo(3), 1.18);
+  assert.equal(fittingTempo(3), 1.12);
   assert.match(speechTrimFilter, /^silenceremove=.*areverse.*silenceremove=.*areverse$/);
   assert.equal(canFitSpeechWithoutCut(2_626, 2_500), true);
   assert.equal(canFitSpeechWithoutCut(6_089, 1_880), false);
@@ -229,7 +229,7 @@ test('adaptive fitting keeps a hard dialogue pause instead of spending it on pri
     audioDurationMs: item.audioDurationMs / (tempoById.get(item.cueId) || 1),
   })));
 
-  assert.ok((tempoById.get('before-pause') || 0) <= 1.18);
+  assert.ok((tempoById.get('before-pause') || 0) <= 1.12);
   assert.ok(timeline[1].timelineStartMs - timeline[0].timelineEndMs >= 1_200);
 });
 
@@ -258,8 +258,8 @@ test('block fitting shares pressure with neighbors while containing an impossibl
   })));
 
   assert.ok((tempoById.get('a') || 0) > 1 && (tempoById.get('a') || 0) < 1.1);
-  assert.equal(tempoById.get('b'), 1.18);
-  assert.ok((tempoById.get('c') || 0) > 1 && (tempoById.get('c') || 0) <= 1.18);
+  assert.equal(tempoById.get('b'), 1.12);
+  assert.ok((tempoById.get('c') || 0) > 1 && (tempoById.get('c') || 0) <= 1.12);
   assert.ok(timeline.every((cue, index) => index === 0 || cue.timelineStartMs >= timeline[index - 1].timelineEndMs));
   assert.ok(timeline.every((cue) => cue.timelineStartMs >= cue.startMs));
   assert.ok(timeline[timeline.length - 1].timelineEndMs > 4_500);
@@ -275,13 +275,13 @@ test('adaptive fitting shares mild tempo with natural cues around long cues', ()
     { cueId: '18', startMs: 45_080, endMs: 48_080, targetDurationMs: 3_000, audioDurationMs: 2_749 },
   ]);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
-  assert.ok((byId.get('13') || 0) > 1.16);
-  assert.equal(byId.get('14'), 1.18);
+  assert.equal(byId.get('13'), 1.12);
+  assert.equal(byId.get('14'), 1.12);
   assert.ok((byId.get('15') || 0) > 1 && (byId.get('15') || 0) < 1.1);
-  assert.ok((byId.get('16') || 0) > 1.1 && (byId.get('16') || 0) < 1.15);
+  assert.ok((byId.get('16') || 0) > 1.08 && (byId.get('16') || 0) < 1.1);
   assert.ok((byId.get('17') || 0) > 1 && (byId.get('17') || 0) < 1.1);
   assert.equal(byId.get('18'), 1);
-  assert.ok(plan.every((item) => item.tempo <= 1.18));
+  assert.ok(plan.every((item) => item.tempo <= 1.12));
 });
 
 test('adaptive fitting spreads tempo inside a cluster but not across a real pause', () => {
@@ -292,7 +292,7 @@ test('adaptive fitting spreads tempo inside a cluster but not across a real paus
   ]);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
   assert.ok((byId.get('before') || 0) > 1 && (byId.get('before') || 0) < 1.1);
-  assert.ok((byId.get('long') || 0) > 1.1 && (byId.get('long') || 0) <= 1.18);
+  assert.ok((byId.get('long') || 0) > 1.1 && (byId.get('long') || 0) <= 1.12);
   assert.equal(byId.get('after-gap'), 1);
 });
 
@@ -307,13 +307,13 @@ test('adaptive fitting gives a neighboring cue group enough tempo before timelin
   const plan = planAdaptiveCueTempos(items);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
 
-  assert.ok((byId.get('11') || 0) > 1.14);
-  assert.ok((byId.get('12') || 0) > 1.12 && (byId.get('12') || 0) <= 1.18);
+  assert.equal(byId.get('11'), 1.12);
+  assert.ok((byId.get('12') || 0) > 1.1 && (byId.get('12') || 0) <= 1.12);
   assert.ok((byId.get('13') || 0) > 1.06);
   assert.ok((byId.get('10') || 0) > 1);
-  assert.ok((byId.get('10') || 0) <= 1.18);
+  assert.ok((byId.get('10') || 0) <= 1.12);
   assert.ok((byId.get('14') || 0) >= 1 && (byId.get('14') || 0) < 1.1);
-  assert.ok((byId.get('10') || 0) <= 1.18);
+  assert.ok((byId.get('10') || 0) <= 1.12);
 
   const timeline = planDubbingTimeline(items.map((item) => ({
     cueId: item.cueId,
@@ -321,7 +321,7 @@ test('adaptive fitting gives a neighboring cue group enough tempo before timelin
     endMs: item.endMs,
     audioDurationMs: item.audioDurationMs / (byId.get(item.cueId) || 1),
   })));
-  assert.ok(Math.max(...timeline.map((item) => item.timelineShiftMs)) <= 200);
+  assert.ok(Math.max(...timeline.map((item) => item.timelineShiftMs)) <= 220);
 });
 
 test('adaptive fitting gives easy neighbors only a mild share around a difficult cue', () => {
@@ -333,7 +333,7 @@ test('adaptive fitting gives easy neighbors only a mild share around a difficult
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
 
   assert.ok((byId.get('before') || 0) > 1 && (byId.get('before') || 0) < 1.1);
-  assert.ok((byId.get('long') || 0) > 1.1 && (byId.get('long') || 0) <= 1.18);
+  assert.ok((byId.get('long') || 0) > 1.1 && (byId.get('long') || 0) <= 1.12);
   assert.ok((byId.get('after') || 0) > 1 && (byId.get('after') || 0) < 1.1);
 });
 
@@ -390,10 +390,10 @@ test('auto cadence keeps short lines natural inside a dense block', () => {
   const plan = planAdaptiveCueTempos(items);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
 
-  assert.equal(byId.get('dense-1'), 1.18);
+  assert.equal(byId.get('dense-1'), 1.12);
   assert.ok((byId.get('dense-4') || 0) > 1 && (byId.get('dense-4') || 0) < 1.1);
   assert.ok((byId.get('dense-8') || 0) > 1 && (byId.get('dense-8') || 0) < 1.1);
-  assert.ok(plan.every((item) => item.tempo >= 1 && item.tempo <= 1.18));
+  assert.ok(plan.every((item) => item.tempo >= 1 && item.tempo <= 1.12));
 
   const timeline = planDubbingTimeline(items.map((item) => ({
     cueId: item.cueId,
@@ -401,7 +401,9 @@ test('auto cadence keeps short lines natural inside a dense block', () => {
     endMs: item.endMs,
     audioDurationMs: item.audioDurationMs / (byId.get(item.cueId) || 1),
   })));
-  assert.ok(Math.max(...timeline.map((item) => item.timelineShiftMs)) <= 160);
+  // Prefer a few hundred milliseconds of carried timing drift over making
+  // every dense cue audibly race.
+  assert.ok(Math.max(...timeline.map((item) => item.timelineShiftMs)) <= 450);
 });
 
 test('auto cadence catches up gradually after an extreme cue without exceeding the cap', () => {
@@ -414,10 +416,10 @@ test('auto cadence catches up gradually after an extreme cue without exceeding t
   })));
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
 
-  assert.equal(byId.get('extreme-4'), 1.18);
+  assert.equal(byId.get('extreme-4'), 1.12);
   assert.equal(byId.get('extreme-1'), 1.1);
-  assert.ok((byId.get('extreme-8') || 0) > 1.1 && (byId.get('extreme-8') || 0) <= 1.18);
-  assert.ok(plan.every((item) => item.tempo >= 1 && item.tempo <= 1.18));
+  assert.ok((byId.get('extreme-8') || 0) > 1.1 && (byId.get('extreme-8') || 0) <= 1.12);
+  assert.ok(plan.every((item) => item.tempo >= 1 && item.tempo <= 1.12));
 });
 
 test('auto cadence fits only the isolated line that overruns its SRT window', () => {
@@ -430,7 +432,7 @@ test('auto cadence fits only the isolated line that overruns its SRT window', ()
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
 
   assert.equal(byId.get('short-1'), 1);
-  assert.equal(byId.get('short-2'), 1.18);
+  assert.equal(byId.get('short-2'), 1.12);
   assert.equal(byId.get('short-3'), 1);
   assert.equal(byId.get('short-4'), 1);
 });
@@ -467,8 +469,8 @@ test('caps long local cues while sharing only mild tempo with fitting neighbors'
   ];
   const plan = planAdaptiveCueTempos(items);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
-  assert.equal(byId.get('13'), 1.18);
-  assert.equal(byId.get('14'), 1.18);
+  assert.equal(byId.get('13'), 1.12);
+  assert.equal(byId.get('14'), 1.12);
   assert.ok((byId.get('15') || 0) > 1 && (byId.get('15') || 0) < 1.1);
   assert.ok((byId.get('16') || 0) > 1.1 && (byId.get('16') || 0) < 1.15);
   assert.ok((byId.get('17') || 0) > 1 && (byId.get('17') || 0) < 1.1);
@@ -480,8 +482,8 @@ test('caps long local cues while sharing only mild tempo with fitting neighbors'
     endMs: item.endMs,
     audioDurationMs: item.audioDurationMs / (byId.get(item.cueId) || 1),
   })));
-  assert.ok(timeline.every((cue) => Math.abs(cue.timelineShiftMs) <= 600));
-  assert.ok(timeline[timeline.length - 1].timelineEndMs <= items[items.length - 1].endMs + 20);
+  assert.ok(timeline.every((cue) => Math.abs(cue.timelineShiftMs) <= 1_000));
+  assert.ok(timeline[timeline.length - 1].timelineEndMs <= items[items.length - 1].endMs + 500);
 });
 
 test('final fit contains an isolated line after a real pause', () => {
@@ -491,7 +493,7 @@ test('final fit contains an isolated line after a real pause', () => {
   ]);
   const byId = new Map(plan.map((item) => [item.cueId, item.tempo]));
   assert.equal(byId.get('short-a'), 1);
-  assert.equal(byId.get('short-b'), 1.18);
+  assert.equal(byId.get('short-b'), 1.12);
 });
 
 test('finds the latest persisted dubbing job for an existing uploaded video', async () => {

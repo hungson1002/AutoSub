@@ -28,6 +28,15 @@ test('OCR prompt preserves the detected source script instead of translating it'
   assert.match(prompt, /never translate/i);
 });
 
+test('full-frame OCR requests every visible text block', () => {
+  const prompt = buildOcrPrompt('zh', true);
+  assert.match(prompt, /every distinct text block/i);
+  assert.match(prompt, /titles, captions, labels and scene text/i);
+  assert.match(prompt, /"kind":"subtitle"/i);
+  assert.match(prompt, /"kind":"onscreen-text"/i);
+  assert.doesNotMatch(prompt, /ignore .*scene text/i);
+});
+
 test('missing extraction progress is reported as failed instead of running forever', async () => {
   const app = Fastify({ logger: false });
   try {

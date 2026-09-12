@@ -19,6 +19,7 @@ type ExtractionBody = {
   roi?: { x: number; y: number; w: number; h: number };
   samplingFps?: number;
   filterWatermark?: boolean;
+  textScope?: 'subtitles' | 'all';
 };
 
 type ExtractionProgress = {
@@ -68,11 +69,14 @@ const forgetExtractionProgress = (progressId: string | undefined) => {
 const segmentDebug = (segments: Array<{ text?: string; start?: number; end?: number }>) => segments.slice(0, 5).map((segment) => ({ text: segment.text, start: segment.start, end: segment.end, startMs: typeof segment.start === 'number' ? Math.round(segment.start * 1000) : undefined, endMs: typeof segment.end === 'number' ? Math.round(segment.end * 1000) : undefined }));
 const cueDebug = (cues: Array<{ startMs: number; endMs: number; originalText?: string }>) => cues.slice(0, 5).map((cue) => ({ text: cue.originalText, startMs: cue.startMs, endMs: cue.endMs }));
 
-export function buildOcrPrompt(language = 'Auto Detect') {
+export function buildOcrPrompt(language = 'Auto Detect', includeAllVisibleText = false) {
   const languageHint = /^(?:auto(?:matic)?(?:[\s_-]*detect)?)$/i.test(language.trim())
     ? 'Detect the source language only to identify its original script.'
     : `The expected source language is ${language}.`;
-  return `Transcribe verbatim only the subtitle text visible in this video frame. ${languageHint} Preserve the exact original language and script. Never translate, romanize, summarize, correct, or explain the text. Ignore logos, watermarks, scene text and UI text. Return plain subtitle text only; if there is no subtitle, return an empty string.`;
+  if (includeAllVisibleText) {
+    return `Transcribe verbatim every distinct text block visible anywhere in this video frame, including subtitles, titles, captions, labels and scene text. ${languageHint} Preserve the exact original language and script. Never translate, romanize, summarize, correct, merge, or explain the text. Return only a JSON array in visual reading order. Use {"text":"exact text","kind":"subtitle","xPercent":50,"yPercent":85} only for dialogue/subtitle captions in the conventional lower-centre caption band. Use {"text":"exact text","kind":"onscreen-text","xPercent":50,"yPercent":20} for titles, labels, logos, narration cards and any text away from that lower-centre band, even when it is a complete sentence. Do not alternate kind for the same text block between frames. xPercent and yPercent are the visual center of that text block from 0 to 100 across the full frame. If there is no visible text, return [].`;
+  }
+  return `Transcribe verbatim only the subtitle text visible in this video frame. ${languageHint} Preserve the exact original language and script. Never translate, romanize, summarize, correct, or explain the text. Ignore logos, watermarks, scene text and UI text. Return only a JSON array where each item is {"text":"exact subtitle","kind":"subtitle","xPercent":50,"yPercent":85}. xPercent and yPercent are the visual center of the subtitle block from 0 to 100 across the full frame. If there is no subtitle, return [].`;
 }
 
 async function transcribeGroqAudio(provider: AIProvider, model: string, audio: string, language: string, signal?: AbortSignal, onProgress?: (percent: number) => void) {
@@ -197,6 +201,7 @@ export async function extractionRoutes(app: FastifyInstance) {
       debugMedia('upload', { uploadId: upload.uploadId, storedPath: upload.storedPath, fileSize: upload.size });
       reportExtractionProgress(progressId, { percent: 8, stage: `Đã tìm thấy video · ${(upload.size / 1024 / 1024).toFixed(1)} MB` });
       const roi = body.roi || { x: 0, y: 75, w: 100, h: 25 };
+      const includeAllVisibleText = body.textScope === 'all';
       const fps = Math.max(1, Math.min(4, Number(body.samplingFps || 2)));
       prefix = `ocr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       reportExtractionProgress(progressId, { percent: 12, stage: `FFmpeg đang tách frame · ${fps} FPS` });
@@ -215,18 +220,24 @@ export async function extractionRoutes(app: FastifyInstance) {
         changedFrames.push({ framePath, frameIndex: index });
       }
       let recognized = 0;
-      const results = (await mapWithConcurrency(
+      const recognizedResults = (await mapWithConcurrency(
         changedFrames,
         boundedConcurrency(process.env.AUTOSUB_OCR_CONCURRENCY, 6),
         async ({ framePath, frameIndex }) => {
-          const text = await recognizeImage(body.provider!, body.model!, framePath, buildOcrPrompt(body.language));
+          const text = await recognizeImage(body.provider!, body.model!, framePath, buildOcrPrompt(body.language, includeAllVisibleText));
           recognized += 1;
           reportExtractionProgress(progressId, { percent: changedFrames.length ? 45 + ((recognized / changedFrames.length) * 48) : 93, stage: `Vision provider · ${recognized}/${changedFrames.length} frame thay đổi`, processed: recognized, total: changedFrames.length });
-          return { text: text || '', timestampMs: Math.round(frameIndex * 1000 / fps) };
+          return { text: text || '', frameIndex };
         },
       ));
+      const recognizedByFrame = new Map(recognizedResults.map((item) => [item.frameIndex, item.text]));
+      let lastRecognizedText = '';
+      const results = frames.map((_, frameIndex) => {
+        if (recognizedByFrame.has(frameIndex)) lastRecognizedText = recognizedByFrame.get(frameIndex) || '';
+        return { text: lastRecognizedText, timestampMs: Math.round(frameIndex * 1000 / fps) };
+      });
       reportExtractionProgress(progressId, { percent: 96, stage: `Đang nhóm ${results.length} kết quả thành SubtitleCue[]`, processed: frames.length, total: frames.length });
-      const cues = groupOcrResults(results, Boolean(body.filterWatermark), Math.round(1000 / fps));
+      const cues = groupOcrResults(results, Boolean(body.filterWatermark), Math.round(1000 / fps), roi);
       reportExtractionProgress(progressId, { percent: 100, stage: `OCR hoàn tất · ${cues.length} cue`, status: 'completed', processed: frames.length, total: frames.length });
       return { cues, uploadId: upload.uploadId };
     } catch (error) {

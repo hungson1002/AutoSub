@@ -62,6 +62,11 @@ export interface SubtitleCue {
   translatedText: string;
   voiceGroup: VoiceGroup;
   enabled: boolean;
+  sourceKind?: "subtitle" | "onscreen-text";
+  textOrigin?: "ocr" | "manual";
+  screenPosition?: { xPercent: number; yPercent: number };
+  styleOverrides?: Partial<SubtitleStyle>;
+  timelineLane?: number;
   words?: Array<{
     word?: string;
     text?: string;
@@ -209,6 +214,10 @@ export interface SubtitleStyle {
   background: "outline" | "box" | "none";
   backgroundColor?: string;
   backgroundOpacity: number;
+  boxPaddingX?: number;
+  boxPaddingY?: number;
+  boxBorderColor?: string;
+  boxBorderWidth?: number;
   bold: boolean;
   italic: boolean;
   position: "top" | "middle" | "bottom" | "custom";
@@ -280,6 +289,8 @@ export interface VideoEditState {
   trimStartMs: number;
   trimEndMs?: number;
   crop?: VideoCropRegion;
+  flipHorizontal?: boolean;
+  flipVertical?: boolean;
 }
 export type LogoPosition =
   | "top-left"
@@ -514,6 +525,10 @@ export const defaultStyle: SubtitleStyle = {
   background: "outline",
   backgroundColor: "#10141b",
   backgroundOpacity: 0.72,
+  boxPaddingX: 10,
+  boxPaddingY: 4,
+  boxBorderColor: "#ffffff",
+  boxBorderWidth: 0,
   bold: false,
   italic: false,
   position: "bottom",

@@ -57,6 +57,7 @@ import {
   cuesForDubbingTimeline,
   cuesToSrt,
   downloadText,
+  isDubbableSubtitleCue,
   parseSubtitle,
   validateCues,
 } from "../lib/subtitles";
@@ -154,7 +155,7 @@ export function EditorPage({
   const [pronunciation, setPronunciation] = useState<PronunciationEntry[]>(
     storage.pronunciation,
   );
-  const [fontFile, setFontFile] = useState<File>();
+  const [fontUpload, setFontUpload] = useState<{ file: File; family: string }>();
   const [dubTrack, setDubTrack] = useState<Blob>();
   const [dubAudioUrl, setDubAudioUrl] = useState<string>();
   const [dubAudioMix, setDubAudioMix] = useState<{
@@ -551,6 +552,10 @@ export function EditorPage({
 
   const regenerateCueVoice = useCallback(
     async (cue: SubtitleCue) => {
+      if (cue.sourceKind === "onscreen-text") {
+        onNotice("Cue này là chữ trên màn hình, không phải phụ đề nên sẽ không được lồng tiếng.", "error");
+        return;
+      }
       if (!dubbingJob || dubbingJob.status !== "completed") {
         onNotice(
           "Hãy tạo một dub track hoàn chỉnh trước khi tạo lại voice riêng cho cue.",
@@ -632,10 +637,16 @@ export function EditorPage({
       if (cue) {
         currentTimeRef.current = cue.startMs;
         setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: cue.startMs });
+        if (cue.sourceKind === "onscreen-text") setPanel("style");
       }
     },
     [cues],
   );
+  const focusCue = useCallback((id: string) => {
+    setSelectedId(id);
+    const cue = cues.find((item) => item.id === id);
+    if (cue?.sourceKind === "onscreen-text") setPanel("style");
+  }, [cues]);
   const deleteCue = useCallback(
     (id: string) => {
       const next = cues
@@ -646,6 +657,14 @@ export function EditorPage({
     },
     [cues, onCuesChange, selectedId],
   );
+  const deleteCues = useCallback((ids: string[]) => {
+    const removed = new Set(ids);
+    const next = cues
+      .filter((cue) => !removed.has(cue.id))
+      .map((cue, index) => ({ ...cue, index: index + 1 }));
+    onCuesChange(next);
+    if (selectedId && removed.has(selectedId)) setSelectedId(next[0]?.id);
+  }, [cues, onCuesChange, selectedId]);
   const addCue = useCallback(() => {
     const last = cues.at(-1);
     const next: SubtitleCue = {
@@ -660,6 +679,28 @@ export function EditorPage({
     };
     onCuesChange([...cues, next]);
     setSelectedId(next.id);
+  }, [cues, onCuesChange]);
+  const addTextCue = useCallback((timeMs = currentTimeRef.current) => {
+    const startMs = Math.max(0, Math.round(timeMs));
+    const next: SubtitleCue = {
+      id: crypto.randomUUID(),
+      index: cues.length + 1,
+      startMs,
+      endMs: startMs + 2500,
+      originalText: "Văn bản mới",
+      translatedText: "",
+      sourceKind: "onscreen-text",
+      textOrigin: "manual",
+      screenPosition: { xPercent: 50, yPercent: 50 },
+      voiceGroup: "G1",
+      enabled: true,
+    };
+    const sorted = [...cues, next]
+      .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs)
+      .map((cue, index) => ({ ...cue, index: index + 1 }));
+    onCuesChange(sorted);
+    setSelectedId(next.id);
+    setPanel("style");
   }, [cues, onCuesChange]);
   const uploadVideoAsset = (nextAsset: VideoAsset, recovering = false) => {
     const assetSize = nextAsset.file?.size ?? nextAsset.size ?? 0;
@@ -976,9 +1017,11 @@ export function EditorPage({
   };
 
   const runDubbing = async (configs: Record<VoiceGroup, VoiceConfig>) => {
-    const dubbingCues = cues.filter(
-      (cue) => cue.enabled && (cue.translatedText || cue.originalText),
-    );
+    const dubbingCues = cues.filter(isDubbableSubtitleCue);
+    if (!dubbingCues.length) {
+      onNotice("Không có cue phụ đề nào để lồng tiếng.", "error");
+      return;
+    }
     const entries = dubbingCues.map((cue, index) => {
       const config = configs[cue.voiceGroup];
       return {
@@ -1073,9 +1116,11 @@ export function EditorPage({
     configs: Record<VoiceGroup, VoiceConfig>,
     options: DubbingRunOptions,
   ) => {
-    const dubbingCues = cues.filter(
-      (cue) => cue.enabled && (cue.translatedText || cue.originalText),
-    );
+    const dubbingCues = cues.filter(isDubbableSubtitleCue);
+    if (!dubbingCues.length) {
+      onNotice("Không có cue phụ đề nào để lồng tiếng.", "error");
+      return;
+    }
     const entries = dubbingCues.map((cue, index) => {
       const config = configs[cue.voiceGroup] || configs.G1;
       const text = applyPronunciation(
@@ -1185,11 +1230,40 @@ export function EditorPage({
     }
   };
 
-  const styleChange = (patch: Partial<SubtitleStyle>) =>
+  const editingTextCue = selected?.sourceKind === "onscreen-text";
+  const styleEditorValue: SubtitleStyle = editingTextCue && selected
+    ? { ...settings.subtitleStyle, ...selected.styleOverrides }
+    : settings.subtitleStyle;
+  const textCuePosition = editingTextCue && selected
+    ? selected.screenPosition ?? {
+        xPercent: styleEditorValue.customX ?? 50,
+        yPercent: styleEditorValue.customY ?? 50,
+      }
+    : undefined;
+  const changeTextPosition = (patch: Partial<{ xPercent: number; yPercent: number }>) => {
+    if (!editingTextCue || !selected || !textCuePosition) return;
+    changeCue(selected.id, {
+      screenPosition: {
+        xPercent: Math.max(0, Math.min(100, patch.xPercent ?? textCuePosition.xPercent)),
+        yPercent: Math.max(0, Math.min(100, patch.yPercent ?? textCuePosition.yPercent)),
+      },
+    });
+  };
+  const styleChange = (patch: Partial<SubtitleStyle>) => {
+    if (editingTextCue && selected) {
+      changeCue(selected.id, { styleOverrides: { ...selected.styleOverrides, ...patch } });
+      return;
+    }
     onSettingsChange({
       ...settings,
       subtitleStyle: { ...settings.subtitleStyle, ...patch },
     });
+    if (cues.some((cue) => cue.sourceKind !== "onscreen-text" && (cue.styleOverrides || cue.screenPosition))) {
+      onCuesChange(cues.map((cue) => cue.sourceKind === "onscreen-text"
+        ? cue
+        : { ...cue, styleOverrides: undefined, screenPosition: undefined }));
+    }
+  };
   const downloadSubtitle = (format: "translated" | "original" | "ass") => {
     const validation = validateCues(cues);
     if (!validation.valid) {
@@ -1382,7 +1456,7 @@ export function EditorPage({
             setPanel(panel === "style" ? "none" : "style");
           }}
         >
-          <Captions size={15} /> Phụ đề
+          <Captions size={15} /> {editingTextCue ? "Văn bản" : "Phụ đề"}
         </button>
         <button onClick={() => setDubbingOpen(true)}>
           <AudioLines size={15} /> Lồng tiếng
@@ -1481,6 +1555,13 @@ export function EditorPage({
             seekRequest={seekRequest}
             onTime={reportEditorTime}
             onActiveCueChange={setActiveCueId}
+            selectedCueId={selectedId}
+            onCueSelect={selectCue}
+            onCueFocus={focusCue}
+            onCueChange={changeCue}
+            onAddTextCue={addTextCue}
+            onDeleteCue={deleteCue}
+            onDeleteCues={deleteCues}
             onStyleChange={styleChange}
             onLogoChange={previewLogoChange}
             onBlurRegionsChange={setBlurRegions}
@@ -1524,7 +1605,7 @@ export function EditorPage({
           </div>
           <div className="list-heading">
             <div>
-              <span>SUBTITLE LIST</span>
+              <span>NỘI DUNG</span>
               <b>{cues.length}</b>
             </div>
             <button
@@ -1552,16 +1633,48 @@ export function EditorPage({
           <aside className="floating-panel style-floating-panel">
             <div className="floating-head">
               <span>
-                <Settings2 size={15} /> SUBTITLE STYLE
+                <Settings2 size={15} /> {editingTextCue ? "TEXT STYLE" : "SUBTITLE STYLE"}
               </span>
               <button className="icon-button" onClick={() => setPanel("none")}>
                 <span aria-hidden="true">×</span>
               </button>
             </div>
+            {editingTextCue && selected && textCuePosition && (
+              <section className="text-inspector" aria-label="Chỉnh văn bản đã chọn">
+                <div className="text-inspector-status">
+                  <span>TEXT #{String(selected.index).padStart(2, "0")}</span>
+                  <small>Chỉ áp dụng cho cue đang chọn</small>
+                </div>
+                <label className="field text-content-field">
+                  <span>Nội dung gốc / hiển thị</span>
+                  <textarea value={selected.originalText} rows={3} onChange={(event) => changeCue(selected.id, { originalText: event.target.value })} />
+                </label>
+                <label className="field text-content-field">
+                  <span>Bản dịch <small>để trống nếu không cần</small></span>
+                  <textarea value={selected.translatedText} rows={2} placeholder="Chưa có bản dịch" onChange={(event) => changeCue(selected.id, { translatedText: event.target.value })} />
+                </label>
+                <div className="text-position-editor">
+                  <div className="text-position-heading"><span>Vị trí trên khung hình</span><b>X {Math.round(textCuePosition.xPercent)}% · Y {Math.round(textCuePosition.yPercent)}%</b></div>
+                  <div className="text-position-body">
+                    <div className="position-pad" aria-label="Vị trí nhanh">
+                      {[10, 50, 90].flatMap((y) => [10, 50, 90].map((x) => (
+                        <button type="button" key={`${x}-${y}`} className={Math.abs(textCuePosition.xPercent - x) < 2 && Math.abs(textCuePosition.yPercent - y) < 2 ? "active" : ""} aria-label={`Đặt văn bản tại X ${x}%, Y ${y}%`} onClick={() => changeTextPosition({ xPercent: x, yPercent: y })} />
+                      )))}
+                    </div>
+                    <div className="position-sliders">
+                      <label><span>X</span><RangeInput min={0} max={100} value={textCuePosition.xPercent} onChange={(event) => changeTextPosition({ xPercent: Number(event.target.value) })} /></label>
+                      <label><span>Y</span><RangeInput min={0} max={100} value={textCuePosition.yPercent} onChange={(event) => changeTextPosition({ yPercent: Number(event.target.value) })} /></label>
+                    </div>
+                  </div>
+                  <small>Kéo trực tiếp chữ trên video để đặt chính xác hơn.</small>
+                </div>
+              </section>
+            )}
             <SubtitleStylePanel
-              style={settings.subtitleStyle}
+              style={styleEditorValue}
               onChange={styleChange}
-              onFontUpload={setFontFile}
+              onFontUpload={(file, family) => setFontUpload({ file, family })}
+              mode={editingTextCue ? "text" : "subtitle"}
             />
             <div className="style-preview">
               <span>PREVIEW</span>
@@ -1569,28 +1682,32 @@ export function EditorPage({
                 <span
                   className="style-preview-text"
                   style={{
-                    color: settings.subtitleStyle.textColor,
-                    fontFamily: settings.subtitleStyle.fontFamily,
-                    fontSize: `${Math.max(settings.subtitleStyle.fontSize * 0.45, 12)}px`,
-                    fontWeight: settings.subtitleStyle.bold ? 700 : 400,
-                    fontStyle: settings.subtitleStyle.italic
+                    color: styleEditorValue.textColor,
+                    fontFamily: styleEditorValue.fontFamily,
+                    fontSize: `${Math.max(styleEditorValue.fontSize * 0.45, 12)}px`,
+                    fontWeight: styleEditorValue.bold ? 700 : 400,
+                    fontStyle: styleEditorValue.italic
                       ? "italic"
                       : "normal",
-                    WebkitTextFillColor: settings.subtitleStyle.textColor,
+                    WebkitTextFillColor: styleEditorValue.textColor,
                     WebkitTextStroke:
-                      settings.subtitleStyle.background === "outline"
-                        ? `${(settings.subtitleStyle.outlineWidth ?? 2) * (Math.max(settings.subtitleStyle.fontSize * 0.45, 12) / Math.max(settings.subtitleStyle.fontSize, 1))}px ${settings.subtitleStyle.outlineColor}`
+                      styleEditorValue.background === "outline"
+                        ? `${(styleEditorValue.outlineWidth ?? 2) * (Math.max(styleEditorValue.fontSize * 0.45, 12) / Math.max(styleEditorValue.fontSize, 1))}px ${styleEditorValue.outlineColor}`
                         : "0 transparent",
                     paintOrder: "stroke fill",
                     background:
-                      settings.subtitleStyle.background === "box"
-                        ? `${settings.subtitleStyle.backgroundColor ?? settings.subtitleStyle.outlineColor}${Math.round(
-                            (settings.subtitleStyle.backgroundOpacity ?? 0.72) *
+                      styleEditorValue.background === "box"
+                        ? `${styleEditorValue.backgroundColor ?? styleEditorValue.outlineColor}${Math.round(
+                            (styleEditorValue.backgroundOpacity ?? 0.72) *
                               255,
                           )
                             .toString(16)
                             .padStart(2, "0")}`
                         : "transparent",
+                    padding:
+                      styleEditorValue.background === "box"
+                        ? `${Math.max(0, (styleEditorValue.boxPaddingY ?? 4) * 0.45)}px ${Math.max(0, (styleEditorValue.boxPaddingX ?? 10) * 0.45)}px`
+                        : "0",
                   }}
                 >
                   {selected?.translatedText ||
@@ -1738,7 +1855,7 @@ export function EditorPage({
         asset={asset}
         videoEdit={videoEdit}
         logo={logo}
-        fontFile={fontFile}
+        fontUpload={fontUpload}
         blurRegions={blurRegions}
         dubTrack={dubTrack}
         dubbingJobId={

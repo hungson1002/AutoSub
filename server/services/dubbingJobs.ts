@@ -141,8 +141,14 @@ const DEFAULTS = {
   // entire speech block sound rushed. Rewriting is optional and falls back to
   // bounded time-stretch when no Translation provider is configured.
   rewriteTriggerSpeed: 1.15,
-  hardSpeedMax: 1.18,
+  // Automatic fitting must stay subtle. If a line still does not fit at
+  // 1.12x, keep it intact and let the following cue move later instead of
+  // creating an obviously rushed voice.
+  hardSpeedMax: 1.12,
   pressuredSpeedMax: 1.12,
+  // This is the speed explicitly selected by the user in the voice panel;
+  // unlike automatic fitting it may intentionally be faster.
+  maxProviderSpeed: 1.2,
   // Subtitle/STT cuts often leave a false 0.3-1.0 s hole inside continuous
   // narration. Let the preceding line use that room, but keep a real breath
   // and treat larger gaps as hard scene/dialogue anchors.
@@ -167,7 +173,7 @@ const DEFAULTS = {
 // provider response even though their file format is valid.
 const TTS_CACHE_VERSION = 'tts-v11-clear-expressive-speech';
 const SPEECH_PREP_VERSION = 'speech-v3-pop-free-edges';
-export const ADAPTIVE_FIT_VERSION = 12;
+export const ADAPTIVE_FIT_VERSION = 13;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
@@ -634,7 +640,7 @@ async function loadProvider(jobId: string, ref: string) {
 }
 
 function ttsCacheFiles(jobId: string, provider: AIProvider, input: StoredCue['input'], text: string) {
-  const speed = clamp(Number(input.speed) || 1, DEFAULTS.minSpeed, DEFAULTS.hardSpeedMax);
+  const speed = clamp(Number(input.speed) || 1, DEFAULTS.minSpeed, DEFAULTS.maxProviderSpeed);
   const cacheKey = createHash('sha256').update(JSON.stringify([TTS_CACHE_VERSION, provider.id, provider.baseUrl, input.model, input.voice, text, speed, 'wav'])).digest('hex');
   const speechKey = createHash('sha256').update(JSON.stringify([cacheKey, SPEECH_PREP_VERSION])).digest('hex');
   return {

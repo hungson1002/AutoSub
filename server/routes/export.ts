@@ -53,6 +53,8 @@ type VideoEdit = {
   trimStartMs?: number;
   trimEndMs?: number;
   crop?: CropRegion;
+  flipHorizontal?: boolean;
+  flipVertical?: boolean;
 };
 type ExportProgress = {
   percent: number;
@@ -224,9 +226,20 @@ async function embeddedFontFamily(file: string): Promise<string | undefined> {
   }
 }
 
-const replaceAssFontFamily = (ass: string, fontFamily?: string) => {
-  if (!fontFamily) return ass;
-  return ass.replace(/^(Style:\s*[^,]+,)[^,]*/m, `$1${assField(fontFamily)}`);
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export const replaceAssFontFamily = (
+  ass: string,
+  fontFamily: string | undefined,
+  requestedFamily = fontFamilyFromAss(ass),
+) => {
+  const resolved = fontFamily ? assField(fontFamily) : "";
+  const requested = requestedFamily ? assField(requestedFamily) : "";
+  if (!resolved || !requested) return ass;
+  const escaped = escapeRegExp(requested);
+  return ass
+    .replace(new RegExp(`^(Style:\\s*[^,]+,)${escaped}(?=,)`, "gm"), `$1${resolved}`)
+    .replace(new RegExp(`(\\\\fn)${escaped}(?=[\\\\}])`, "g"), `$1${resolved}`);
 };
 
 // `fontsdir` is most reliable when it contains only the requested font.  A
@@ -611,13 +624,13 @@ export async function exportRoutes(app: FastifyInstance) {
     let responseStream: ReturnType<typeof createReadStream> | undefined;
 
     try {
-      const requestedFamily = fontFamilyFromAss(ass || "");
+      const requestedFamily = fields.fontFamilyAlias || fontFamilyFromAss(ass || "");
       const resolvedFontFile =
         fontFile || (await windowsFontFile(requestedFamily));
       const fontFamily = resolvedFontFile
         ? await embeddedFontFamily(resolvedFontFile)
         : undefined;
-      const renderedAss = replaceAssFontFamily(ass || "", fontFamily);
+      const renderedAss = replaceAssFontFamily(ass || "", fontFamily, requestedFamily);
       // Keep the selected font isolated for this one render.  This avoids
       // libass substituting a bold/incorrect face from the full system font
       // collection, which made the exported subtitle visibly heavier than the
@@ -694,6 +707,15 @@ export async function exportRoutes(app: FastifyInstance) {
           );
           current = "aspectOut";
         }
+      }
+
+      const flipFilters = [
+        options.videoEdit?.flipHorizontal ? "hflip" : "",
+        options.videoEdit?.flipVertical ? "vflip" : "",
+      ].filter(Boolean);
+      if (flipFilters.length) {
+        filters.push(`[${current}]${flipFilters.join(",")}[flipOut]`);
+        current = "flipOut";
       }
 
       regions.forEach((region, index) => {
