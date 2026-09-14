@@ -115,8 +115,9 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
           context.fillStyle = layer.fill || '#ffffff';
           context.font = `700 ${layer.fontSize || 54}px Inter, sans-serif`;
           context.textBaseline = 'middle';
-          context.shadowColor = 'rgba(0, 0, 0, 0.55)';
-          context.shadowBlur = 18;
+          const whiteboardSubtitle = layer.fill?.toLowerCase() === '#263238';
+          context.shadowColor = whiteboardSubtitle ? 'transparent' : 'rgba(0, 0, 0, 0.55)';
+          context.shadowBlur = whiteboardSubtitle ? 0 : 18;
           if (layer.captionTimings?.length) {
             const active = layer.captionTimings.find((timing) => timeMs >= timing.startMs && timeMs < timing.endMs);
             const text = active?.text || '';

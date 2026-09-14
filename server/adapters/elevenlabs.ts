@@ -4,6 +4,7 @@ import { buildAuthHeaders, endpoint, providerBase, withAuthQuery } from '../prov
 import { assertExpectedTranscript, assertPlayableAudio, capabilityTestSpeech } from './capabilityTestMedia';
 import { providerResponseError, ProviderError } from './errors';
 import { normalizeSttLanguage } from './openaiCompatible';
+import { diarizedWordsToSegments } from '../services/subtitles';
 
 const headers = buildAuthHeaders;
 
@@ -57,14 +58,18 @@ export async function transcribe(provider: AIProvider, model: string, audio: Buf
   form.append('model_id', model);
   const languageCode = normalizeSttLanguage(language);
   if (languageCode) form.append('language_code', languageCode);
+  form.append('diarize', 'true');
+  form.append('timestamps_granularity', 'word');
   const response = await fetch(withAuthQuery(endpoint(provider, 'stt', '/speech-to-text'), provider), { method: 'POST', headers: headers(provider), body: form, signal });
   const data = await responseJson(response, provider, 'ElevenLabs STT không phản hồi.');
   const text = typeof data.text === 'string' ? data.text : '';
   const rawSegments = (Array.isArray(data.segments) ? data.segments : []) as SubtitleSegment[];
   const rawWords = (Array.isArray(data.words) ? data.words : []) as SubtitleWord[];
-  const segments = rawSegments.length || !rawWords.length || !text
-    ? rawSegments
-    : [{ start: rawWords[0]?.start, end: rawWords.at(-1)?.end, text, words: rawWords }];
+  const segments = rawSegments.length ? rawSegments : rawWords.some((word) => word.speaker_id || word.speakerId)
+    ? diarizedWordsToSegments(rawWords)
+    : rawWords.length && text
+      ? [{ start: rawWords[0]?.start, end: rawWords.at(-1)?.end, text, words: rawWords }]
+      : [];
   return { text, segments };
 }
 

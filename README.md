@@ -38,7 +38,7 @@ uv tool install --force .
 flow
 ```
 
-Sau đó mở `opera://extensions`, bật Developer mode, chọn **Load unpacked** và trỏ tới thư mục `flow-extension` của Flow Agent (trên máy hiện tại: `C:\Users\super\AppData\Local\AutoSub\flow-agent-runtime\flow-extension`). Giữ một tab Google Flow đã đăng nhập. Nút **Mở Google Flow** sẽ dùng phiên Opera GX hiện tại và AI Video Studio sẽ tự hiển thị trạng thái kết nối.
+Sau đó mở `opera://extensions`, bật Developer mode, chọn **Load unpacked** và trỏ tới thư mục `flow-extension` ngay trong repo AutoSub. Không load bản trong `AppData` vì bản đó chỉ là runtime local. Giữ một tab Google Flow đã đăng nhập. Nút **Mở Google Flow** sẽ dùng phiên Opera GX hiện tại và AI Video Studio sẽ tự hiển thị trạng thái kết nối.
 
 Có thể đổi địa chỉ backend bằng `FLOW_AGENT_URL` trong `.env`; nếu Flow Agent bật `SERVER_API_KEY`, đặt cùng khóa vào `FLOW_AGENT_API_KEY`.
 

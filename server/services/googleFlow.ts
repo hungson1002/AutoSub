@@ -55,6 +55,11 @@ async function parseResponse<T>(response: Response): Promise<T> {
     if (/invalid authentication credentials|expected OAuth 2 access token/i.test(detail)) {
       throw new FlowSessionError('Google Flow từ chối token đăng nhập hiện tại. Mở đúng tài khoản Google Flow và đăng nhập lại nếu được yêu cầu.', 'NO_FLOW_KEY');
     }
+    // The extension reports a browser-side network rejection as HTTP 400.
+    // Health/credits may still be green because those use a different request.
+    if (response.status === 400 && /^failed to fetch\.?$/i.test(detail.trim())) {
+      throw new FlowSessionError('Tab Google Flow đã kết nối nhưng lượt gọi tới Google bị gián đoạn (Failed to fetch). Phiên trên tab hiện tại cần được làm mới trước khi thử lại.', 'FLOW_FETCH_FAILED');
+    }
     if (response.status === 401 || response.status === 403) throw new Error(`Flow Agent từ chối xác thực (HTTP ${response.status}): ${detail}`);
     if (response.status === 429) throw new Error(`Google Flow đang giới hạn request hoặc tài khoản không đủ credit: ${detail}`);
     throw new Error(`Flow Agent HTTP ${response.status}: ${detail}`);
@@ -134,13 +139,14 @@ export async function refreshGoogleFlowSession(signal?: AbortSignal) {
   return flowAgentStatus(signal);
 }
 
-async function requestWithSessionRecovery<T>(request: () => Promise<Response>, signal?: AbortSignal) {
+async function requestWithSessionRecovery<T>(request: (attempt: number) => Promise<Response>, signal?: AbortSignal, recoverFetchFailure = false) {
   try {
-    return await parseResponse<T>(await request());
+    return await parseResponse<T>(await request(0));
   } catch (error) {
     // Missing page scripts are not missing tokens: force_refresh invalidates
     // the current token but cannot repair a blocked/unloaded reCAPTCHA script.
-    let shouldRefresh = error instanceof FlowSessionError && error.code === 'NO_FLOW_KEY';
+    let shouldRefresh = error instanceof FlowSessionError
+      && (error.code === 'NO_FLOW_KEY' || (recoverFetchFailure && error.code === 'FLOW_FETCH_FAILED'));
     if (error instanceof FlowCreditError) {
       // Older Flow Agent builds converted an unauthenticated credit probe into
       // HTTP 402 with a fake zero balance. Only trust 402 when at least one
@@ -153,7 +159,9 @@ async function requestWithSessionRecovery<T>(request: () => Promise<Response>, s
     }
     if (!shouldRefresh) throw error;
     await refreshFlowSessionOnce(signal);
-    return parseResponse<T>(await request());
+    // Flow Agent persists failed idempotent requests. Retrying with the old key
+    // would only replay the stored failure and never reach Google again.
+    return parseResponse<T>(await request(1));
   }
 }
 
@@ -175,10 +183,11 @@ export async function generateGoogleFlowImage(prompt: string, outputFile: string
   // generation so clicking "Tạo lại" still creates a new take.
   const idempotencyKey = options.idempotencyKey?.trim()
     || `autosub-image-${createHash('sha256').update(`${outputFile}\n${prompt}\n${randomUUID()}`).digest('hex').slice(0, 32)}`;
-  const result = await requestWithSessionRecovery<{ data?: Array<{ b64_json?: string }> }>(() => fetch(`${baseUrl()}/v1/images/generations`, {
+  const retryIdempotencyKey = `${idempotencyKey}-retry-${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+  const result = await requestWithSessionRecovery<{ data?: Array<{ b64_json?: string }> }>((attempt) => fetch(`${baseUrl()}/v1/images/generations`, {
     method: 'POST', signal: options.signal,
-    headers: { ...headers(true), 'Idempotency-Key': idempotencyKey }, body,
-  }), options.signal);
+    headers: { ...headers(true), 'Idempotency-Key': attempt ? retryIdempotencyKey : idempotencyKey }, body,
+  }), options.signal, true);
   const encoded = result.data?.[0]?.b64_json;
   if (!encoded) throw new Error('Flow Agent hoàn tất nhưng không trả về dữ liệu ảnh.');
   const bytes = Buffer.from(encoded, 'base64');
@@ -216,8 +225,9 @@ export async function generateGoogleFlowVideo(prompt: string, outputFile: string
   // here would permanently replay a stored failure when the user resumes.
   const body = JSON.stringify({ prompt, aspect: aspectRatio === '16:9' ? 'landscape' : 'portrait', duration, n: 1, ...(startMediaId ? { start_media_id: startMediaId } : {}), ...(referenceMediaIds.length ? { ref_media_ids: referenceMediaIds } : {}) });
   const idempotencyKey = `autosub-${createHash('sha256').update(`${outputFile}\n${prompt}\n${randomUUID()}`).digest('hex').slice(0, 32)}`;
-  let result = await requestWithSessionRecovery<FlowAgentVideoResult>(() => fetch(`${baseUrl()}/v1/videos/generations`, {
-    method: 'POST', signal, headers: { ...headers(true), 'Idempotency-Key': idempotencyKey }, body,
+  const retryIdempotencyKey = `${idempotencyKey}-retry-${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+  let result = await requestWithSessionRecovery<FlowAgentVideoResult>((attempt) => fetch(`${baseUrl()}/v1/videos/generations`, {
+    method: 'POST', signal, headers: { ...headers(true), 'Idempotency-Key': attempt ? retryIdempotencyKey : idempotencyKey }, body,
   }), signal);
   for (let attempt = 0; result.status === 'processing' && attempt < 180; attempt += 1) {
     await wait(3_000, signal);

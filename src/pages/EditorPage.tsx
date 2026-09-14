@@ -6,6 +6,7 @@ import type {
   DubbingJobStatus,
   DubbingMetadata,
   LogoOverlay,
+  OriginalAudioMode,
   PronunciationEntry,
   ProviderAssignment,
   SubtitleCue,
@@ -66,6 +67,7 @@ import {
   updateCapabilityAssignments,
 } from "../lib/settings";
 import { LogoModal } from "../editor/LogoModal";
+import { subtitleTextCss } from "../editor/subtitleCss";
 import { LatestUploadGuard } from "../lib/latestUpload";
 import {
   announceDropdownOpen,
@@ -73,6 +75,11 @@ import {
   type DropdownId,
 } from "../lib/dropdowns";
 import { videoAssetUploadFile } from "../lib/videoAsset";
+import {
+  addSubtitleFont,
+  loadSubtitleFonts,
+  type UploadedSubtitleFont,
+} from "../lib/fontLibrary";
 import { isCapabilityModelPassed } from "../lib/modelTests";
 
 function applyPronunciation(text: string, entries: PronunciationEntry[]) {
@@ -93,8 +100,32 @@ function saveBlob(name: string, blob: Blob) {
   URL.revokeObjectURL(url);
 }
 
+function fileToDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      typeof reader.result === "string"
+        ? resolve(reader.result)
+        : reject(new Error("Logo image could not be read."));
+    reader.onerror = () => reject(reader.error || new Error("Logo image could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function cps(text: string, durationMs: number) {
   return text.replace(/\s/g, "").length / Math.max(durationMs / 1000, 0.001);
+}
+
+function splitTextAtRatio(text: string, ratio: number): [string, string] {
+  const value = text.trim();
+  if (!value) return ["", ""];
+  const words = value.split(/\s+/);
+  if (words.length > 1) {
+    const cut = Math.max(1, Math.min(words.length - 1, Math.round(words.length * ratio)));
+    return [words.slice(0, cut).join(" "), words.slice(cut).join(" ")];
+  }
+  const cut = Math.max(1, Math.min(value.length - 1, Math.round(value.length * ratio)));
+  return [value.slice(0, cut), value.slice(cut)];
 }
 
 function applyDubbingMetadata(
@@ -148,14 +179,23 @@ export function EditorPage({
   const [blurEditMode, setBlurEditMode] = useState(false);
   const [logoOpen, setLogoOpen] = useState(false);
   const [dubbingOpen, setDubbingOpen] = useState(false);
+  const [dubbingInitialAudioMode, setDubbingInitialAudioMode] =
+    useState<OriginalAudioMode>("mute");
   const [exportOpen, setExportOpen] = useState(false);
-  const [blurRegions, setBlurRegions] = useState<BlurRegion[]>([]);
-  const [logo, setLogo] = useState<LogoOverlay>();
+  const [blurRegions, setBlurRegions] = useState<BlurRegion[]>(() =>
+    storage.blurRegions(asset?.uploadId),
+  );
+  const [logo, setLogo] = useState<LogoOverlay | undefined>(() =>
+    storage.logo(asset?.uploadId),
+  );
   const [logoPreview, setLogoPreview] = useState<LogoOverlay>();
+  const [decorationsUploadId, setDecorationsUploadId] = useState(
+    asset?.uploadId,
+  );
   const [pronunciation, setPronunciation] = useState<PronunciationEntry[]>(
     storage.pronunciation,
   );
-  const [fontUpload, setFontUpload] = useState<{ file: File; family: string }>();
+  const [fontUploads, setFontUploads] = useState<UploadedSubtitleFont[]>([]);
   const [dubTrack, setDubTrack] = useState<Blob>();
   const [dubAudioUrl, setDubAudioUrl] = useState<string>();
   const [dubAudioMix, setDubAudioMix] = useState<{
@@ -171,6 +211,8 @@ export function EditorPage({
   );
   const dubbingTerminalNoticeRef = useRef("");
   const [working, setWorking] = useState(false);
+  const [workingTitle, setWorkingTitle] = useState("Đang xử lý audio");
+  const [workingMessage, setWorkingMessage] = useState("Provider → FFprobe → atempo → dub-track.wav");
   const [translationOpen, setTranslationOpen] = useState(false);
   const [translationWorking, setTranslationWorking] = useState(false);
   const [translationProgress, setTranslationProgress] = useState(0);
@@ -206,6 +248,30 @@ export function EditorPage({
   const subtitleImportRequestRef = useRef(0);
   const uploadGuardRef = useRef(new LatestUploadGuard());
   const assetRef = useRef(asset);
+  useEffect(() => {
+    let disposed = false;
+    void loadSubtitleFonts().then((fonts) => {
+      if (disposed) {
+        fonts.forEach((font) => URL.revokeObjectURL(font.url));
+        return;
+      }
+      setFontUploads((current) => {
+        const known = new Set(current.map((font) => font.family));
+        const fresh = fonts.filter((font) => !known.has(font.family));
+        fonts.filter((font) => known.has(font.family)).forEach((font) => URL.revokeObjectURL(font.url));
+        return fresh.length ? [...current, ...fresh] : current;
+      });
+    }).catch(() => undefined);
+    return () => { disposed = true; };
+  }, []);
+  const uploadSubtitleFont = async (file: File, family: string) => {
+    const font = await addSubtitleFont(file, family);
+    setFontUploads((current) => {
+      const previous = current.find((item) => item.family === family);
+      if (previous) URL.revokeObjectURL(previous.url);
+      return [...current.filter((item) => item.family !== family), font];
+    });
+  };
   const selected = cues.find((cue) => cue.id === selectedId);
   const effectiveDubAudioMix = {
     keepOriginal: Boolean(dubAudioMix?.keepOriginal && !dubAudioMix.separateVocals),
@@ -291,10 +357,24 @@ export function EditorPage({
   }, [asset]);
   useEffect(() => {
     setVideoEdit(storage.videoEdit(asset?.uploadId));
+    const savedLogo = storage.logo(asset?.uploadId);
+    setBlurRegions(storage.blurRegions(asset?.uploadId));
+    setLogo(savedLogo);
+    setLogoPreview(savedLogo);
+    setBlurEditMode(false);
+    setDecorationsUploadId(asset?.uploadId);
   }, [asset?.uploadId]);
   useEffect(() => {
     if (asset?.uploadId) storage.saveVideoEdit(asset.uploadId, videoEdit);
   }, [asset?.uploadId, videoEdit]);
+  useEffect(() => {
+    if (asset?.uploadId && decorationsUploadId === asset.uploadId)
+      storage.saveBlurRegions(asset.uploadId, blurRegions);
+  }, [asset?.uploadId, blurRegions, decorationsUploadId]);
+  useEffect(() => {
+    if (asset?.uploadId && decorationsUploadId === asset.uploadId)
+      storage.saveLogo(asset.uploadId, logo);
+  }, [asset?.uploadId, logo, decorationsUploadId]);
   useEffect(() => {
     const uploadId = asset?.uploadId;
     setDubTrack(undefined);
@@ -635,9 +715,15 @@ export function EditorPage({
       setSelectedId(id);
       const cue = cues.find((item) => item.id === id);
       if (cue) {
-        currentTimeRef.current = cue.startMs;
-        setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: cue.startMs });
-        if (cue.sourceKind === "onscreen-text") setPanel("style");
+        if (cue.sourceKind === "onscreen-text") {
+          // Text objects are edited at the current playhead. Seeking back to
+          // their start on every selection made canvas/timeline drag and even
+          // inspector edits appear to jump backwards.
+          setPanel("style");
+        } else {
+          currentTimeRef.current = cue.startMs;
+          setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: cue.startMs });
+        }
       }
     },
     [cues],
@@ -665,6 +751,88 @@ export function EditorPage({
     onCuesChange(next);
     if (selectedId && removed.has(selectedId)) setSelectedId(next[0]?.id);
   }, [cues, onCuesChange, selectedId]);
+  const splitCueAtTime = useCallback((timeMs: number) => {
+    const point = Math.round(timeMs);
+    const selectedCue = selectedId ? cues.find((cue) => cue.id === selectedId) : undefined;
+    const target = selectedCue && point > selectedCue.startMs + 80 && point < selectedCue.endMs - 80
+      ? selectedCue
+      : cues.find((cue) => point > cue.startMs + 80 && point < cue.endMs - 80);
+    if (!target) {
+      onNotice("Không có cue nào đủ dài tại playhead để tách.", "error");
+      return;
+    }
+    const ratio = (point - target.startMs) / Math.max(1, target.endMs - target.startMs);
+    const [leftOriginal, rightOriginal] = target.sourceKind === "onscreen-text"
+      ? [target.originalText, target.originalText]
+      : splitTextAtRatio(target.originalText, ratio);
+    const [leftTranslated, rightTranslated] = target.sourceKind === "onscreen-text"
+      ? [target.translatedText, target.translatedText]
+      : splitTextAtRatio(target.translatedText, ratio);
+    const first: SubtitleCue = {
+      ...target,
+      endMs: point,
+      originalText: leftOriginal,
+      translatedText: leftTranslated,
+      dubbing: undefined,
+    };
+    const second: SubtitleCue = {
+      ...target,
+      id: crypto.randomUUID(),
+      startMs: point,
+      originalText: rightOriginal,
+      translatedText: rightTranslated,
+      dubbing: undefined,
+    };
+    const next = cues
+      .flatMap((cue) => cue.id === target.id ? [first, second] : [cue])
+      .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs)
+      .map((cue, index) => ({ ...cue, index: index + 1 }));
+    onCuesChange(next);
+    setSelectedId(second.id);
+    currentTimeRef.current = point;
+    setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: point });
+    onNotice(`Đã tách cue #${target.index} tại ${Math.round(point / 1000)}s. Voice cache của cue này đã được bỏ để tránh đọc sai.`, "success");
+  }, [cues, onCuesChange, onNotice, selectedId]);
+  const openDubbingWithAudioMode = useCallback((mode: OriginalAudioMode) => {
+    setDubbingInitialAudioMode(mode);
+    setDubbingOpen(true);
+    if (mode === "background")
+      onNotice("Đã mở Lồng tiếng ở chế độ Bỏ lời: Demucs giữ nhạc + hiệu ứng khi tạo dub.", "success");
+  }, [onNotice]);
+  const exportStemAudio = useCallback(async (stem: "vocals" | "background") => {
+    if (!asset?.uploadId) {
+      onNotice("Cần video đã upload lên app trước khi tách giọng/nhạc.", "error");
+      return;
+    }
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setWorkingTitle(stem === "vocals" ? "Đang giữ lời" : "Đang bỏ lời");
+    setWorkingMessage(stem === "vocals"
+      ? "Demucs đang tách track chỉ còn giọng nói từ video."
+      : "Demucs đang tách nhạc nền + hiệu ứng và loại lời nói.");
+    setWorking(true);
+    try {
+      const blob = await api.exportStemAudio({
+        uploadId: asset.uploadId,
+        stem,
+        trimStartMs: videoEdit.trimStartMs,
+        trimEndMs: videoEdit.trimEndMs,
+      }, controller.signal);
+      saveBlob(stem === "vocals" ? "autosub-vocals.wav" : "autosub-background.wav", blob);
+      onNotice(stem === "vocals"
+        ? "Đã tách và tải track chỉ còn giọng nói."
+        : "Đã tách và tải track nhạc nền/hiệu ứng không lời.",
+      "success");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError")
+        onNotice("Đã hủy tách audio.", "success");
+      else
+        onNotice(friendlyErrorMessage(error, "Tách audio thất bại."), "error");
+    } finally {
+      controllerRef.current = undefined;
+      setWorking(false);
+    }
+  }, [asset?.uploadId, onNotice, videoEdit.trimEndMs, videoEdit.trimStartMs]);
   const addCue = useCallback(() => {
     const last = cues.at(-1);
     const next: SubtitleCue = {
@@ -1063,6 +1231,8 @@ export function EditorPage({
     const controller = new AbortController();
     controllerRef.current = controller;
     setDubbingOpen(false);
+    setWorkingTitle("Đang xử lý audio");
+    setWorkingMessage("Provider → FFprobe → atempo → dub-track.wav");
     setWorking(true);
     try {
       const result = await api.generateDubTrack(
@@ -1352,8 +1522,14 @@ export function EditorPage({
       );
     }
   };
-  const previewLogoChange = (patch: Partial<LogoOverlay>) =>
-    setLogoPreview((current) => (current ? { ...current, ...patch } : current));
+  const previewLogoChange = (patch: Partial<LogoOverlay>) => {
+    if (logoOpen)
+      setLogoPreview((current) =>
+        current ? { ...current, ...patch } : current,
+      );
+    else
+      setLogo((current) => (current ? { ...current, ...patch } : current));
+  };
   const closeLogoEditor = () => {
     if (
       logoPreview?.url &&
@@ -1458,7 +1634,10 @@ export function EditorPage({
         >
           <Captions size={15} /> {editingTextCue ? "Văn bản" : "Phụ đề"}
         </button>
-        <button onClick={() => setDubbingOpen(true)}>
+        <button onClick={() => {
+          setDubbingInitialAudioMode("mute");
+          setDubbingOpen(true);
+        }}>
           <AudioLines size={15} /> Lồng tiếng
         </button>
         <button
@@ -1473,7 +1652,16 @@ export function EditorPage({
         >
           <Volume2 size={15} /> Âm thanh
         </button>
-        <button className="toolbar-export" onClick={() => setExportOpen(true)}>
+        <button className="toolbar-export" onClick={() => {
+          // The logo editor previews every change immediately. Export the
+          // exact state currently visible even when the user has not pressed
+          // the modal's Save button yet.
+          if (logoOpen && logoPreview) {
+            setLogo(logoPreview);
+            setLogoOpen(false);
+          }
+          setExportOpen(true);
+        }}>
           <Download size={15} /> Xuất file
         </button>
       </div>
@@ -1536,8 +1724,9 @@ export function EditorPage({
       </div>
       {blurEditMode && (
         <div className="editor-mode-banner">
-          <Scissors size={14} /> Kéo trực tiếp các vùng blur trên video. Bấm Làm
-          mờ lần nữa để mở bảng điều khiển.
+          <Scissors size={14} />
+          <span>Kéo trực tiếp vùng làm mờ trên video. Bấm Làm mờ để mở lại bảng điều khiển.</span>
+          <button type="button" className="button small ghost" onClick={() => setBlurEditMode(false)}>Xong</button>
         </div>
       )}
       <section className="editor-main">
@@ -1562,6 +1751,10 @@ export function EditorPage({
             onAddTextCue={addTextCue}
             onDeleteCue={deleteCue}
             onDeleteCues={deleteCues}
+            onSplitCueAtTime={splitCueAtTime}
+            onExportStem={exportStemAudio}
+            onOpenAudioMix={() => setPanel(dubAudioUrl ? "audio" : "none")}
+            onOpenDubbingAudioMode={openDubbingWithAudioMode}
             onStyleChange={styleChange}
             onLogoChange={previewLogoChange}
             onBlurRegionsChange={setBlurRegions}
@@ -1673,7 +1866,8 @@ export function EditorPage({
             <SubtitleStylePanel
               style={styleEditorValue}
               onChange={styleChange}
-              onFontUpload={(file, family) => setFontUpload({ file, family })}
+              uploadedFonts={fontUploads}
+              onFontUpload={uploadSubtitleFont}
               mode={editingTextCue ? "text" : "subtitle"}
             />
             <div className="style-preview">
@@ -1681,34 +1875,7 @@ export function EditorPage({
               <div className="style-preview-surface">
                 <span
                   className="style-preview-text"
-                  style={{
-                    color: styleEditorValue.textColor,
-                    fontFamily: styleEditorValue.fontFamily,
-                    fontSize: `${Math.max(styleEditorValue.fontSize * 0.45, 12)}px`,
-                    fontWeight: styleEditorValue.bold ? 700 : 400,
-                    fontStyle: styleEditorValue.italic
-                      ? "italic"
-                      : "normal",
-                    WebkitTextFillColor: styleEditorValue.textColor,
-                    WebkitTextStroke:
-                      styleEditorValue.background === "outline"
-                        ? `${(styleEditorValue.outlineWidth ?? 2) * (Math.max(styleEditorValue.fontSize * 0.45, 12) / Math.max(styleEditorValue.fontSize, 1))}px ${styleEditorValue.outlineColor}`
-                        : "0 transparent",
-                    paintOrder: "stroke fill",
-                    background:
-                      styleEditorValue.background === "box"
-                        ? `${styleEditorValue.backgroundColor ?? styleEditorValue.outlineColor}${Math.round(
-                            (styleEditorValue.backgroundOpacity ?? 0.72) *
-                              255,
-                          )
-                            .toString(16)
-                            .padStart(2, "0")}`
-                        : "transparent",
-                    padding:
-                      styleEditorValue.background === "box"
-                        ? `${Math.max(0, (styleEditorValue.boxPaddingY ?? 4) * 0.45)}px ${Math.max(0, (styleEditorValue.boxPaddingX ?? 10) * 0.45)}px`
-                        : "0",
-                  }}
+                  style={subtitleTextCss(styleEditorValue, 0.45, 12)}
                 >
                   {selected?.translatedText ||
                     selected?.originalText ||
@@ -1816,20 +1983,35 @@ export function EditorPage({
       />
       <LogoModal
         open={logoOpen}
-        logo={logo}
+        logo={logoOpen ? logoPreview : logo}
         externalPosition={logoPreview}
+        uploadedFonts={fontUploads}
+        onFontUpload={uploadSubtitleFont}
         onClose={() => setLogoOpen(false)}
         onPreviewChange={setLogoPreview}
         onChange={(next) => {
+          void (async () => {
+            let saved = next;
+            if (next.kind === "image" && next.file) {
+              try {
+                saved = { ...next, url: await fileToDataUrl(next.file) };
+              } catch {
+                onNotice(
+                  "Đã cập nhật logo, nhưng không thể lưu ảnh logo qua reload.",
+                  "error",
+                );
+              }
+            }
           if (
             logo?.url &&
-            logo.url !== next.url &&
+            logo.url !== saved.url &&
             logo.url.startsWith("blob:")
           )
             URL.revokeObjectURL(logo.url);
-          setLogo(next);
-          setLogoPreview(next);
+          setLogo(saved);
+          setLogoPreview(saved);
           onNotice("Đã cập nhật logo/watermark.", "success");
+          })();
         }}
       />
       <DubbingModal
@@ -1844,6 +2026,7 @@ export function EditorPage({
         job={dubbingJob}
         onJobAction={(action) => void dubbingJobAction(action)}
         onClose={() => setDubbingOpen(false)}
+        initialSourceAudioMode={dubbingInitialAudioMode}
         onPronunciationChange={setPronunciation}
         onNotice={onNotice}
         onRun={(configs, options) => void runDubbingJob(configs, options)}
@@ -1855,7 +2038,8 @@ export function EditorPage({
         asset={asset}
         videoEdit={videoEdit}
         logo={logo}
-        fontUpload={fontUpload}
+        fontUpload={fontUploads.find((font) => font.family === settings.subtitleStyle.fontFamily)}
+        logoFontUpload={fontUploads.find((font) => font.family === (logoOpen ? logoPreview : logo)?.fontFamily)}
         blurRegions={blurRegions}
         dubTrack={dubTrack}
         dubbingJobId={
@@ -1870,8 +2054,8 @@ export function EditorPage({
       />
       <ProgressModal
         open={working}
-        title="Đang xử lý audio"
-        message="Provider → FFprobe → atempo → dub-track.wav"
+        title={workingTitle}
+        message={workingMessage}
         onCancel={() => {
           controllerRef.current?.abort();
           setWorking(false);

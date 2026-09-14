@@ -9,6 +9,7 @@ import { buildAuthHeaders, providerBase, withAuthQuery } from '../providers/base
 import { synthesize } from '../adapters';
 import type { AnimationProject } from '../../shared/animationStudio';
 import { generateGoogleFlowImage } from './googleFlow';
+import { resolveUpload } from './uploads';
 import { allocateNarrationTimings, createSentenceTimeMapper, splitNarrationUnits } from './animationTiming';
 
 const file = path.join(workdir, 'animation-assets', 'library.json');
@@ -84,11 +85,11 @@ export async function getAnimationAssetFile(id: string) {
   throw new Error('Không tìm thấy file asset.');
 }
 
-type AnimationAssetGenerationInput = { prompt: string; name?: string; type?: AnimationAsset['type']; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number };
+type AnimationAssetGenerationInput = { prompt: string; name?: string; type?: AnimationAsset['type']; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number; referenceUploadId?: string; referenceAssetId?: string };
 
 export function animationAssetCacheKey(input: AnimationAssetGenerationInput) {
   const prompt = String(input.prompt || '').trim().slice(0, 4000);
-  return createHash('sha256').update(JSON.stringify({ geometryVersion: 2, prompt, name: String(input.name || '').trim().slice(0, 160), type: input.type || 'image', style: String(input.style || '').trim().slice(0, 80), generator: input.generator || 'provider', provider: input.provider?.id || '', model: input.model || '', width: Number(input.width) || 1024, height: Number(input.height) || 1024 })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ geometryVersion: 3, prompt, name: String(input.name || '').trim().slice(0, 160), type: input.type || 'image', style: String(input.style || '').trim().slice(0, 80), generator: input.generator || 'provider', provider: input.provider?.id || '', model: input.model || '', width: Number(input.width) || 1024, height: Number(input.height) || 1024, referenceUploadId: input.referenceUploadId || '', referenceAssetId: input.referenceAssetId || '' })).digest('hex');
 }
 
 export async function findCachedAnimationAsset(cacheKey: string) {
@@ -104,8 +105,12 @@ async function generateAnimationAssetUncached(input: AnimationAssetGenerationInp
   const prompt = String(input.prompt || '').trim().slice(0, 4000); if (prompt.length < 8) throw new Error('Mô tả asset cần ít nhất 8 ký tự.');
   const id = randomUUID(); await mkdir(path.dirname(generatedFile(id)), { recursive: true });
   if (input.generator === 'flow-agent') {
-    await generateGoogleFlowImage(prompt, generatedFile(id), { model: input.model || 'narwhal', size: `${input.width || 1024}x${input.height || 1024}` });
+    const referenceImagePath = input.referenceUploadId
+      ? (await resolveUpload(input.referenceUploadId)).absolutePath
+      : input.referenceAssetId ? (await getAnimationAssetFile(input.referenceAssetId)).path : undefined;
+    await generateGoogleFlowImage(prompt, generatedFile(id), { model: input.model || 'narwhal', size: `${input.width || 1024}x${input.height || 1024}`, referenceImagePath });
   } else {
+    if (input.referenceUploadId || input.referenceAssetId) throw new Error('Provider tạo ảnh này chưa hỗ trợ ảnh tham chiếu. Hãy chọn Nano Banana 2 để giữ nhân vật nhất quán.');
     if (!input.provider || !input.model) throw new Error('Thiếu provider/model tạo ảnh.');
     const url = withAuthQuery(`${providerBase(input.provider)}/images/generations`, input.provider); const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...buildAuthHeaders(input.provider) }, body: JSON.stringify({ model: input.model, prompt, n: 1, size: '1024x1024', response_format: 'b64_json' }) });
     if (!response.ok) throw new Error(`Image provider trả lỗi ${response.status}: ${(await response.text()).slice(0, 500)}`);
@@ -204,7 +209,8 @@ export async function generateAnimationNarration(input: { project: AnimationProj
       const endMs = retime(command.startMs + command.durationMs);
       return { ...command, startMs, durationMs: Math.max(0, endMs - startMs) };
     };
-    const subtitle: SceneLayer = { id: `subtitle-${scene.id}`, name: 'Voiceover · Subtitle', type: 'text', text: scene.narration, captionTimings: captions, visible: true, locked: false, zIndex: 1000, width: Math.round(project.width * .78), height: Math.round(Math.min(project.width, project.height) * .16), fill: '#ffffff', fontSize: Math.max(24, Math.round(Math.min(project.width, project.height) * .032)), transform: { ...defaultTransform(), position: { x: project.width / 2, y: project.height * .84 } } };
+    const subtitleFill = project.styleProfile?.name === 'Whiteboard explainer' ? '#263238' : '#ffffff';
+    const subtitle: SceneLayer = { id: `subtitle-${scene.id}`, name: 'Voiceover · Subtitle', type: 'text', text: scene.narration, captionTimings: captions, visible: true, locked: false, zIndex: 1000, width: Math.round(project.width * .78), height: Math.round(Math.min(project.width, project.height) * .16), fill: subtitleFill, fontSize: Math.max(24, Math.round(Math.min(project.width, project.height) * .032)), transform: { ...defaultTransform(), position: { x: project.width / 2, y: project.height * .84 } } };
     const replacement: typeof scene = { ...scene, durationMs, layers: [...scene.layers.filter((layer) => !((layer.type === 'audio' || layer.type === 'text') && layer.name.startsWith('Voiceover ·'))).map((layer) => layer.type !== 'audio' ? layer : { ...layer, startMs: retime(layer.startMs || 0), durationMs: layer.durationMs === undefined ? undefined : Math.min(layer.durationMs, durationMs - retime(layer.startMs || 0)) }), ...audioLayers, subtitle], commands: scene.commands.filter((command) => !command.parameters?.autoVoiceover).map(retimeCommand), camera: { ...scene.camera, commands: scene.camera.commands.map(retimeCommand) } };
     const productionPlan = project.productionPlan ? {
       ...project.productionPlan,

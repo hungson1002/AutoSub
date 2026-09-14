@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cuesForDubbingTimeline, cuesToAss, cuesToSrt, cuesWithDubbingTimelineMetadata, isDubbableSubtitleCue } from './subtitles';
+import { ASS_CSS_PIXEL_SCALE, cuesForDubbingTimeline, cuesToAss, cuesToSrt, cuesWithDubbingTimelineMetadata, isDubbableSubtitleCue, repairRunawayOcrCueEnds } from './subtitles';
 import { defaultStyle, type SubtitleCue } from '../types';
 
 const cue: SubtitleCue = {
@@ -18,13 +18,19 @@ test('ASS export only applies the text outline in outline mode', () => {
   const boxed = cuesToAss([cue], { ...defaultStyle, background: 'box', outlineWidth: 8 });
   const outlined = cuesToAss([cue], { ...defaultStyle, background: 'outline', outlineWidth: 8 });
 
-  assert.match(boxed, /Style: Box,.*?,3,0,0,2,154,154,108,1/);
-  assert.match(outlined, /Style: Outline,.*?,1,4,0,2,154,154,108,1/);
+  assert.match(boxed, /Style: Box,.*?,1,0,0,2,154,154,108,1/);
+  assert.match(boxed, /\\p1\\bord0\\shad0/);
+  assert.match(outlined, /Style: Outline,.*?,1,10\.7,0,2,154,154,108,1/);
+});
+
+test('per-cue outline width matches the value shown in preview', () => {
+  const ass = cuesToAss([{ ...cue, sourceKind: 'onscreen-text', styleOverrides: { outlineWidth: 6 } }], { ...defaultStyle, background: 'outline', outlineWidth: 2 });
+  assert.match(ass, /\\bord8}/);
 });
 
 test('ASS boxed subtitles preserve configurable horizontal and vertical padding', () => {
   const ass = cuesToAss([cue], { ...defaultStyle, background: 'box', boxPaddingX: 14, boxPaddingY: 6 });
-  assert.match(ass, /\\xbord14\\ybord6/);
+  assert.match(ass, /m 0 0 l 168 0 l 168 50 l 0 50/);
 });
 
 test('ASS boxed subtitles export their background color, opacity, and border', () => {
@@ -38,20 +44,50 @@ test('ASS boxed subtitles export their background color, opacity, and border', (
     boxBorderColor: '#ffffff',
     boxBorderWidth: 3,
   });
-  assert.match(ass, /\\3c&H1900A880/);
-  assert.match(ass, /\\1a&HFF&\\3c&H00FFFFFF\\xbord15\\ybord8/);
-  assert.equal((ass.match(/^Dialogue:/gm) || []).length, 2);
+  assert.match(ass, /\\1c&H0000A880\\1a&H19&/);
+  assert.match(ass, /\\1c&H00FFFFFF\\1a&H00&/);
+  assert.equal((ass.match(/^Dialogue:/gm) || []).length, 3);
 });
 
 test('ASS export honors a per-cue background mode instead of the global mode', () => {
-  const ass = cuesToAss([{ ...cue, styleOverrides: { background: 'box', backgroundColor: '#123456' } }], defaultStyle);
+  const ass = cuesToAss([{ ...cue, sourceKind: 'onscreen-text', styleOverrides: { background: 'box', backgroundColor: '#123456' } }], defaultStyle);
   assert.match(ass, /^Dialogue: .*?,Box,/m);
-  assert.match(ass, /\\3c&H[0-9A-F]{2}563412/);
+  assert.match(ass, /\\1c&H00563412\\1a&H47&/);
 });
 
 test('ASS export preserves an individual cue canvas position', () => {
-  const ass = cuesToAss([{ ...cue, screenPosition: { xPercent: 25, yPercent: 40 } }], defaultStyle);
+  const ass = cuesToAss([{ ...cue, sourceKind: 'onscreen-text', screenPosition: { xPercent: 25, yPercent: 40 } }], defaultStyle);
   assert.match(ass, /\\an5\\pos\(480,432\)/);
+});
+
+test('subtitle cues always use the shared font and position', () => {
+  const ass = cuesToAss([{ ...cue, sourceKind: 'subtitle', screenPosition: { xPercent: 25, yPercent: 40 }, styleOverrides: { fontFamily: 'Courier New', fontSize: 70 } }], { ...defaultStyle, fontFamily: 'Arial', fontSize: 34, position: 'bottom' });
+  assert.match(ass, /\\fnArial\\fs45\.3/);
+  assert.match(ass, /\\an5\\pos\(960,886\)/);
+  assert.doesNotMatch(ass, /Courier New|pos\(480,432\)/);
+});
+
+test('ASS export converts CSS font pixels and uses the same default canvas position as preview', () => {
+  const ass = cuesToAss([cue], { ...defaultStyle, fontSize: 48, position: 'bottom' });
+  assert.equal(ASS_CSS_PIXEL_SCALE, 4 / 3);
+  assert.match(ass, /\\fs64/);
+  assert.match(ass, /\\an5\\pos\(960,886\)/);
+});
+
+test('repairs persisted OCR cues that incorrectly share one video-long end time', () => {
+  const source = [
+    { ...cue, id: 'ocr-1-old', startMs: 1_000, endMs: 20_000 },
+    { ...cue, id: 'ocr-2-old', startMs: 2_000, endMs: 20_000 },
+    { ...cue, id: 'ocr-3-old', startMs: 3_000, endMs: 20_000 },
+    { ...cue, id: 'ocr-4-old', startMs: 4_000, endMs: 5_000 },
+  ];
+  const repaired = repairRunawayOcrCueEnds(source);
+  assert.deepEqual(repaired.map(({ startMs, endMs }) => ({ startMs, endMs })), [
+    { startMs: 1_000, endMs: 2_000 },
+    { startMs: 2_000, endMs: 3_000 },
+    { startMs: 3_000, endMs: 4_000 },
+    { startMs: 4_000, endMs: 5_000 },
+  ]);
 });
 
 test('ASS export gives the upper editor track the higher render layer', () => {
@@ -59,8 +95,13 @@ test('ASS export gives the upper editor track the higher render layer', () => {
     { ...cue, id: 'upper', originalText: 'Upper', translatedText: '', timelineLane: 0 },
     { ...cue, id: 'lower', originalText: 'Lower', translatedText: '', timelineLane: 1 },
   ], defaultStyle);
-  assert.match(ass, /Dialogue: 5,.*Upper/);
-  assert.match(ass, /Dialogue: 3,.*Lower/);
+  assert.match(ass, /Dialogue: 11,.*Upper/);
+  assert.match(ass, /Dialogue: 7,.*Lower/);
+});
+
+test('ASS boxed subtitles render rounded corners as vector curves', () => {
+  const ass = cuesToAss([cue], { ...defaultStyle, background: 'box', boxBorderRadius: 12 });
+  assert.match(ass, /\\p1.*m 12 0.*b .*\\p0/);
 });
 
 test('dubbing accepts subtitles but rejects OCR screen text', () => {
@@ -75,7 +116,7 @@ test('ASS export does not enable bold or italic for persisted string flags', () 
     italic: 'false' as unknown as boolean,
   });
 
-  assert.match(ass, /,0,0,0,0,100,100,0,0,1,1,0,2,154/);
+  assert.match(ass, /,0,0,0,0,100,100,0,0,1,2\.7,0,2,154/);
 });
 
 test('ASS both-content mode does not duplicate identical source and translation', () => {

@@ -22,6 +22,15 @@ function uniqueAssignments(values: ProviderAssignment[]) {
   });
 }
 
+/** Hide a provider's unfinished row once that provider has a real model choice. */
+export function configuredAssignmentChoices(values: ProviderAssignment[]) {
+  const unique = uniqueAssignments(values);
+  const providersWithModel = new Set(
+    unique.filter((item) => item.providerId.trim() && item.model.trim()).map((item) => item.providerId),
+  );
+  return unique.filter((item) => item.model.trim() || !providersWithModel.has(item.providerId));
+}
+
 /** Return the configured choices for a capability, with legacy fallback. */
 export function capabilityAssignments(settings: AppSettings, capability: Capability): ProviderAssignment[] {
   const configured = settings.providersByCapability?.[capability];
@@ -60,6 +69,7 @@ export function normalizeSettings(value: Partial<AppSettings> | undefined): AppS
     boxPaddingY: Math.max(0, Math.min(32, Number(rawStyle.boxPaddingY ?? defaultSettings.subtitleStyle.boxPaddingY) || 0)),
     boxBorderColor: typeof rawStyle.boxBorderColor === "string" ? rawStyle.boxBorderColor : defaultSettings.subtitleStyle.boxBorderColor,
     boxBorderWidth: Math.max(0, Math.min(12, Number(rawStyle.boxBorderWidth ?? defaultSettings.subtitleStyle.boxBorderWidth) || 0)),
+    boxBorderRadius: Math.max(0, Math.min(80, Number(rawStyle.boxBorderRadius ?? defaultSettings.subtitleStyle.boxBorderRadius) || 0)),
   };
 
   return {

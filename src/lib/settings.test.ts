@@ -1,7 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defaultSettings, type AppSettings } from '../types';
-import { capabilityAssignments, normalizeSettings, updateCapabilityAssignments } from './settings';
+import { capabilityAssignments, configuredAssignmentChoices, normalizeSettings, updateCapabilityAssignments } from './settings';
+
+test('configured choices hide an empty duplicate when the provider already has a model', () => {
+  assert.deepEqual(configuredAssignmentChoices([
+    assignment('vieneu', 'vieneu-v3-turbo'),
+    assignment('vieneu', ''),
+    assignment('edge', 'edge-tts'),
+    assignment('edge', ''),
+    assignment('unfinished', ''),
+  ]), [
+    assignment('vieneu', 'vieneu-v3-turbo'),
+    assignment('edge', 'edge-tts'),
+    assignment('unfinished', ''),
+  ]);
+});
 
 const assignment = (providerId: string, model: string) => ({ providerId, model });
 

@@ -61,6 +61,8 @@ export interface SubtitleCue {
   originalText: string;
   translatedText: string;
   voiceGroup: VoiceGroup;
+  /** Anonymous diarization label returned by STT, for example speaker_0. */
+  speakerId?: string;
   enabled: boolean;
   sourceKind?: "subtitle" | "onscreen-text";
   textOrigin?: "ocr" | "manual";
@@ -76,6 +78,9 @@ export interface SubtitleCue {
     endMs?: number;
     probability?: number;
     confidence?: number;
+    speaker_id?: string;
+    speakerId?: string;
+    type?: string;
   }>;
   dubbing?: DubbingMetadata;
 }
@@ -218,6 +223,7 @@ export interface SubtitleStyle {
   boxPaddingY?: number;
   boxBorderColor?: string;
   boxBorderWidth?: number;
+  boxBorderRadius?: number;
   bold: boolean;
   italic: boolean;
   position: "top" | "middle" | "bottom" | "custom";
@@ -246,7 +252,7 @@ export interface BlurRegion {
   startMs: number;
   endMs: number;
   wholeVideo: boolean;
-  mode: "blur" | "neighbor";
+  mode: "blur" | "neighbor" | "inpaint";
   blurStrength: number;
   borderRadius?: number;
   expandTop: number;
@@ -529,6 +535,7 @@ export const defaultStyle: SubtitleStyle = {
   boxPaddingY: 4,
   boxBorderColor: "#ffffff",
   boxBorderWidth: 0,
+  boxBorderRadius: 0,
   bold: false,
   italic: false,
   position: "bottom",

@@ -8,7 +8,7 @@ import {
   listAnimationProjectVersions,
   restoreAnimationProjectVersion,
 } from '../services/animationProjects';
-import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene } from '../services/animationDirector';
+import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene, generateAnimationCharacterOptions } from '../services/animationDirector';
 import { enqueueAnimationProjectRender, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
 import { generateAnimationAsset, generateAnimationNarration, getAnimationAssetFile, listAnimationAssets, registerAnimationAsset, resolveAnimationAssets, updateAnimationAsset } from '../services/animationAssets';
 import { autoFixAnimationQuality, checkAnimationQuality } from '../services/animationQuality';
@@ -23,6 +23,10 @@ export async function animationStudioRoutes(app: FastifyInstance) {
   app.post('/api/animation-studio/director-jobs', async (request, reply) => {
     try { const body = request.body as { input: Parameters<typeof directAnimationProject>[0]; resumeId?: string }; return reply.code(202).send(await animationDirectorJobs.start(body.input, body.resumeId)); }
     catch (error) { return reply.code(400).send({ error: message(error, 'Không thể bắt đầu job Animation.') }); }
+  });
+  app.post('/api/animation-studio/character-options', async (request, reply) => {
+    try { return await generateAnimationCharacterOptions(request.body as Parameters<typeof generateAnimationCharacterOptions>[0]); }
+    catch (error) { return reply.code(400).send({ error: message(error, 'Không thể tạo các lựa chọn nhân vật.') }); }
   });
   app.get('/api/animation-studio/director-jobs', async (request) => animationDirectorJobs.list((request.query as { projectId?: string }).projectId));
   app.get('/api/animation-studio/director-jobs/:id', async (request, reply) => {

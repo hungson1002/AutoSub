@@ -12,7 +12,7 @@ export async function ensureWorkdir() {
   ]);
 }
 const mediaExecutableCache = new Map<string, string>();
-export type H264Encoder = 'libx264' | 'h264_amf';
+export type H264Encoder = 'libx264' | 'h264_amf' | 'h264_nvenc' | 'h264_qsv';
 let h264EncoderPromise: Promise<H264Encoder> | undefined;
 
 async function resolveMediaCommand(command: string) {
@@ -39,7 +39,17 @@ async function resolveMediaCommand(command: string) {
 export async function run(command: string, args: string[], signal?: AbortSignal, onStderr?: (chunk: string) => void) {
   const executable = await resolveMediaCommand(command);
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true });
+    // Python inherits the legacy Windows console code page when launched by
+    // Node. Demucs prints Unicode progress symbols and can otherwise crash
+    // after finishing separation with UnicodeEncodeError (cp1258/cp1252).
+    const child = spawn(executable, args, {
+      windowsHide: true,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+      },
+    });
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -80,10 +90,13 @@ export async function available(command: string) { try { await run(command, ['-v
 
 export async function preferredH264Encoder(): Promise<H264Encoder> {
   const configured = process.env.AUTOSUB_VIDEO_ENCODER?.trim().toLowerCase();
-  if (configured === 'libx264') return 'libx264';
+  const configuredEncoder = ['libx264', 'h264_amf', 'h264_nvenc', 'h264_qsv'].includes(configured || '')
+    ? configured as H264Encoder
+    : undefined;
+  if (configuredEncoder === 'libx264') return 'libx264';
   if (h264EncoderPromise) return h264EncoderPromise;
   h264EncoderPromise = (async () => {
-    if (process.platform !== 'win32' && configured !== 'h264_amf') return 'libx264';
+    if (process.platform !== 'win32' && !configuredEncoder) return 'libx264';
     const benchmark = async (encoderArgs: string[]) => {
       const startedAt = performance.now();
       const controller = new AbortController();
@@ -96,12 +109,30 @@ export async function preferredH264Encoder(): Promise<H264Encoder> {
       } finally { clearTimeout(timeout); }
       return performance.now() - startedAt;
     };
+    const candidates: Array<{ encoder: H264Encoder; args: string[] }> = [
+      { encoder: 'h264_nvenc', args: ['-c:v', 'h264_nvenc', '-preset', 'fast', '-cq', '20', '-b:v', '0'] },
+      { encoder: 'h264_qsv', args: ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '20'] },
+      { encoder: 'h264_amf', args: ['-c:v', 'h264_amf', '-usage', 'transcoding', '-quality', 'quality', '-rc', 'qvbr', '-qvbr_quality_level', '20', '-vbaq', 'true', '-preanalysis', 'true'] },
+    ];
     try {
-      const hardwareArgs = ['-c:v', 'h264_amf', '-usage', 'transcoding', '-quality', 'quality', '-rc', 'qvbr', '-qvbr_quality_level', '20', '-vbaq', 'true', '-preanalysis', 'true'];
-      const hardwareMs = await benchmark(hardwareArgs);
-      if (configured === 'h264_amf') return 'h264_amf';
-      const softwareMs = await benchmark(['-c:v', 'libx264', '-crf', '20', '-preset', 'veryfast']);
-      return hardwareMs < softwareMs * 0.9 ? 'h264_amf' : 'libx264';
+      if (configuredEncoder) {
+        const selected = candidates.find((candidate) => candidate.encoder === configuredEncoder);
+        if (selected) {
+          await benchmark(selected.args);
+          return selected.encoder;
+        }
+      }
+      const softwareMs = await benchmark(['-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast']);
+      const availableHardware: Array<{ encoder: H264Encoder; ms: number }> = [];
+      for (const candidate of candidates) {
+        try {
+          availableHardware.push({ encoder: candidate.encoder, ms: await benchmark(candidate.args) });
+        } catch { /* Hardware encoder is not available on this machine. */ }
+      }
+      const fastestHardware = availableHardware.sort((left, right) => left.ms - right.ms)[0];
+      return fastestHardware && fastestHardware.ms < softwareMs * 0.95
+        ? fastestHardware.encoder
+        : 'libx264';
     } catch {
       return 'libx264';
     }

@@ -7,14 +7,20 @@ export type ExportAudioFilterOptions = {
   dubVolume?: number;
   jobDubIncludesBackground?: boolean;
   originalInputLabel?: string;
+  targetDurationMs?: number;
 };
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
-const safeLimiter = "alimiter=limit=0.891:level=false,aresample=48000";
+const safeLimiter = "alimiter=limit=0.891:level=false";
+const audioClock = "aresample=48000:async=1:first_pts=0,asetpts=N/SR/TB";
 // Dubbing jobs are mastered once when their timeline is built. Re-running
 // loudnorm here changes the voice a second time and can create pumping/noise.
 const normalizeDub = "anull";
+const finishAudio = (source: string, padded = false, targetDurationMs?: number) => {
+  const hasTarget = Number.isFinite(targetDurationMs) && Number(targetDurationMs) > 0;
+  return `${source}${safeLimiter}${padded || hasTarget ? ",apad" : ""}${hasTarget ? `,atrim=end=${(Number(targetDurationMs) / 1000).toFixed(6)}` : ""},${audioClock}[audioout]`;
+};
 
 /**
  * Builds the final export audio graph.
@@ -31,6 +37,7 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
     keepAudio,
     jobDubIncludesBackground = false,
     originalInputLabel = "0:a",
+    targetDurationMs,
   } = options;
   const dubVolume = clamp(Number(options.dubVolume ?? 1), 0, 1).toFixed(3);
   const dubFilter = `volume=${dubVolume},${normalizeDub}`;
@@ -39,7 +46,7 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
     if (dubInputIndex === undefined)
       throw new Error("Thiếu audio input của dub track.");
     if (jobDubIncludesBackground) {
-      return `[${dubInputIndex}:a]${dubFilter},${safeLimiter},apad[audioout]`;
+      return finishAudio(`[${dubInputIndex}:a]${dubFilter},`, true, targetDurationMs);
     }
     if (backgroundInputIndex !== undefined) {
       const volume = clamp(
@@ -47,7 +54,8 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
         0,
         1,
       ).toFixed(3);
-      return `[${backgroundInputIndex}:a]volume=${volume}[background];[${dubInputIndex}:a]${dubFilter}[dub];[background][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,${safeLimiter},apad[audioout]`;
+      return `[${backgroundInputIndex}:a]volume=${volume}[background];[${dubInputIndex}:a]${dubFilter}[dub];` +
+        finishAudio("[background][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,", true, targetDurationMs);
     }
     if (keepAudio) {
       const volume = clamp(
@@ -55,14 +63,15 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
         0,
         1,
       ).toFixed(3);
-      return `[${originalInputLabel}]volume=${volume}[original];[${dubInputIndex}:a]${dubFilter}[dub];[original][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,${safeLimiter},apad[audioout]`;
+      return `[${originalInputLabel}]volume=${volume}[original];[${dubInputIndex}:a]${dubFilter}[dub];` +
+        finishAudio("[original][dub]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,", true, targetDurationMs);
     }
-    return `[${dubInputIndex}:a]${dubFilter},${safeLimiter},apad[audioout]`;
+    return finishAudio(`[${dubInputIndex}:a]${dubFilter},`, true, targetDurationMs);
   }
 
   if (backgroundInputIndex !== undefined)
-    return `[${backgroundInputIndex}:a]anull[audioout]`;
-  return keepAudio ? `[${originalInputLabel}]anull[audioout]` : "";
+    return finishAudio(`[${backgroundInputIndex}:a]`, false, targetDurationMs);
+  return keepAudio ? finishAudio(`[${originalInputLabel}]`, false, targetDurationMs) : "";
 }
 
 export type RetimeCue = { originalDurationMs: number; ttsDurationMs: number; finalAudioDurationMs?: number; timelineStartMs?: number; timelineShiftMs?: number };
@@ -100,6 +109,14 @@ export const retimedDurationMs = (sourceDurationMs: number, metadata: RetimeCue[
     0,
   );
 
+export const retimedTimeMs = (sourceTimeMs: number, metadata: RetimeCue[]) => {
+  const timeMs = Math.max(0, Number(sourceTimeMs) || 0);
+  return timeMs + retimedWindows(metadata, timeMs).reduce(
+    (total, cue) => total + (cue.endMs - cue.startMs) * (cue.scale - 1),
+    0,
+  );
+};
+
 const atempoChain = (rate: number) => {
   const filters: string[] = [];
   let remaining = Math.max(0.0625, Math.min(1, rate));
@@ -111,8 +128,8 @@ const atempoChain = (rate: number) => {
 export function buildRetimedSourceAudioFilter(metadata: RetimeCue[], input = "0:a", output = "retimedOriginal", targetDurationMs?: number) {
   const slowed = retimedWindows(metadata).map((cue) => ({ ...cue, rate: 1 / cue.scale }));
   const finish = (source: string) => Number.isFinite(targetDurationMs) && Number(targetDurationMs) > 0
-    ? `${source}apad,atrim=end=${(Number(targetDurationMs) / 1000).toFixed(6)}[${output}]`
-    : `${source}anull[${output}]`;
+    ? `${source}apad,atrim=end=${(Number(targetDurationMs) / 1000).toFixed(6)},${audioClock}[${output}]`
+    : `${source}${audioClock}[${output}]`;
   if (!slowed.length) return finish(`[${input}]`);
 
   const segments: Array<{ startMs: number; endMs?: number; rate: number }> = [];
@@ -132,7 +149,7 @@ export function buildRetimedSourceAudioFilter(metadata: RetimeCue[], input = "0:
   // branch, making a 2,000-cue audio export slower than rendering the video.
   const filters = [`[${input}]asegment=timestamps=${timestamps}${inputs}`];
   segments.forEach((segment, index) => {
-    filters.push(`[retimeSrc${index}]asetpts=PTS-STARTPTS,${atempoChain(segment.rate)}[retimePart${index}]`);
+    filters.push(`[retimeSrc${index}]asetpts=PTS-STARTPTS,${atempoChain(segment.rate)},${audioClock}[retimePart${index}]`);
   });
   const joined = targetDurationMs ? "retimedOriginalJoined" : output;
   filters.push(`${parts}concat=n=${segments.length}:v=0:a=1[${joined}]`);

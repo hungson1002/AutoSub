@@ -27,11 +27,18 @@ import type { AnimationAsset, AnimationProject } from "../../shared/animationStu
 // Large media bypasses Vite's development proxy. JSON requests remain relative.
 const MEDIA_BACKEND_ORIGIN = "http://127.0.0.1:8787";
 export const MAX_BROWSER_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
+
+async function dataUrlToBlob(url: string) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error("Logo image could not be read.");
+  return response.blob();
+}
+
 export interface TranslationMemoryItem {
   source: string;
   translation: string;
 }
-type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent' };
+type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent'; referenceUploadId?: string; referenceAssetId?: string };
 export interface AnimationDirectorJobStatus { id: string; projectId: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'; stage: string; error?: string; hasResult?: boolean }
 export interface AnimationDirectorInput { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }
 export function buildTranslationMemory(cues: SubtitleCue[], cueId: string, limit = 24): TranslationMemoryItem[] {
@@ -274,6 +281,7 @@ export const api = {
   directAnimationProject: (input: { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }) =>
     request<AnimationProject>("/api/animation-studio/direct", { method: "POST", body: JSON.stringify(input) }),
   startAnimationDirectorJob: (input: AnimationDirectorInput, resumeId?: string): Promise<AnimationDirectorJobStatus> => request<AnimationDirectorJobStatus>('/api/animation-studio/director-jobs', { method: 'POST', body: JSON.stringify({ input, resumeId }) }),
+  generateAnimationCharacterOptions: (input: { brief: string; provider: AIProvider; model: string; assetGeneration: AnimationAssetGeneration; width?: number; height?: number }) => request<AnimationAsset[]>('/api/animation-studio/character-options', { method: 'POST', body: JSON.stringify(input) }),
   animationDirectorJob: (id: string) => request<AnimationDirectorJobStatus>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}`),
   animationDirectorResult: (id: string) => request<AnimationProject>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/result`),
   animationDirectorInput: (id: string) => request<AnimationDirectorInput>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/input`),
@@ -773,6 +781,7 @@ export const api = {
       dubbingJobId?: string;
       fontFile?: File;
       fontFamilyAlias?: string;
+      logoFontFile?: File;
       videoEdit?: import("../types").VideoEditState;
     },
     signal?: AbortSignal,
@@ -798,6 +807,13 @@ export const api = {
         videoEdit: options.videoEdit,
         logo: options.logo
           ? {
+              enabled: options.logo.enabled,
+              kind: options.logo.kind,
+              text: options.logo.text,
+              fontFamily: options.logo.fontFamily,
+              fontSize: options.logo.fontSize,
+              textColor: options.logo.textColor,
+              outlineColor: options.logo.outlineColor,
               xPercent: options.logo.xPercent,
               yPercent: options.logo.yPercent,
               widthPercent: options.logo.widthPercent,
@@ -812,8 +828,20 @@ export const api = {
       form.append("fontFile", options.fontFile, options.fontFile.name);
     if (options.fontFile && options.fontFamilyAlias)
       form.append("fontFamilyAlias", options.fontFamilyAlias);
-    if (options.logo?.file)
+    if (options.logo?.enabled !== false && options.logo?.kind === "image" && options.logo.file)
       form.append("logoFile", options.logo.file, options.logo.file.name);
+    else if (
+      options.logo?.enabled !== false &&
+      options.logo?.kind === "image" &&
+      options.logo.url?.startsWith("data:")
+    )
+      form.append(
+        "logoFile",
+        await dataUrlToBlob(options.logo.url),
+        options.logo.name || "logo.png",
+      );
+    if (options.logo?.enabled !== false && options.logo?.kind === "text" && options.logoFontFile)
+      form.append("logoFontFile", options.logoFontFile, options.logoFontFile.name);
     const response = await fetch(`${MEDIA_BACKEND_ORIGIN}/api/export/video`, {
       method: "POST",
       body: form,
@@ -839,6 +867,24 @@ export const api = {
       signal,
     });
     if (!response.ok) await readError(response, "Không thể xuất audio.", "export");
+    return response.blob();
+  },
+  exportStemAudio: async (
+    options: {
+      uploadId: string;
+      stem: "vocals" | "background";
+      trimStartMs?: number;
+      trimEndMs?: number;
+    },
+    signal?: AbortSignal,
+  ) => {
+    const response = await fetch(`${MEDIA_BACKEND_ORIGIN}/api/export/stem`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options),
+      signal,
+    });
+    if (!response.ok) await readError(response, "KhĂ´ng thá»ƒ tĂ¡ch audio.", "export");
     return response.blob();
   },
   getExportProgress: (id: string, signal?: AbortSignal) =>

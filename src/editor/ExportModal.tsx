@@ -41,6 +41,7 @@ export function ExportModal({
   videoEdit = { aspectRatio: "original", trimStartMs: 0 },
   logo,
   fontUpload,
+  logoFontUpload,
   blurRegions = [],
   dubTrack,
   dubbingJobId,
@@ -56,6 +57,7 @@ export function ExportModal({
   videoEdit?: VideoEditState;
   logo?: LogoOverlay;
   fontUpload?: { file: File; family: string };
+  logoFontUpload?: { file: File; family: string };
   blurRegions?: BlurRegion[];
   dubTrack?: Blob;
   dubbingJobId?: string;
@@ -76,6 +78,7 @@ export function ExportModal({
   const [renderProgress, setRenderProgress] = useState<number | undefined>(0);
   const [renderStage, setRenderStage] = useState("Đang chuẩn bị render");
   const [renderedVideo, setRenderedVideo] = useState<Blob>();
+  const [videoResolution, setVideoResolution] = useState<"original" | "1080" | "720">("original");
   const hasDub = Boolean(dubTrack || dubbingJobId);
   const controllerRef = useRef<AbortController | undefined>(undefined);
 
@@ -163,7 +166,7 @@ export function ExportModal({
         {
           exportId,
           uploadId: asset?.uploadId,
-          resolution: "original",
+          resolution: videoResolution,
           crf: 20,
           keepAudio: hasDub ? Boolean(dubbingAudioMix?.keepOriginal && !dubbingAudioMix.separateVocals) : true,
           originalVolume: dubbingAudioMix?.originalVolume ?? 0.25,
@@ -177,6 +180,7 @@ export function ExportModal({
           dubbingJobId: hasDub ? dubbingJobId : undefined,
           fontFile: fontUpload?.file,
           fontFamilyAlias: fontUpload?.family,
+          logoFontFile: logoFontUpload?.file,
         },
         controller.signal,
       );
@@ -342,6 +346,33 @@ export function ExportModal({
             </button>
           )}
         </div>
+        {format === "video" && (
+          <div className="export-video-options">
+            <div>
+              <strong>Độ phân giải xuất</strong>
+              <small>720p nhanh hơn nhiều cho video dài; Gốc giữ đúng độ phân giải nguồn.</small>
+            </div>
+            <div className="export-resolution-buttons">
+              {[
+                ["original", "Gốc"],
+                ["1080", "1080p"],
+                ["720", "720p nhanh"],
+              ].map(([value, label]) => (
+                <button
+                  type="button"
+                  key={value}
+                  className={videoResolution === value ? "selected" : ""}
+                  onClick={() => {
+                    setVideoResolution(value as typeof videoResolution);
+                    setRenderedVideo(undefined);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="modal-actions">
           <button className="button ghost" onClick={onClose}>
             Hủy

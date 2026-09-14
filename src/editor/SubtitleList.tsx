@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { SubtitleCue } from '../types';
 import { formatClock, subtitleStats } from '../lib/subtitles';
 import { Captions, RefreshCw, Trash2, Type } from '../components/Icons';
@@ -36,6 +36,7 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
       <span title={hasRetimedCue ? 'Thời gian trên video đã làm chậm' : undefined}>{formatClock(displayStartMs)} → {formatClock(displayEndMs)}</span>
       <small>{Math.max(0, displayEndMs - displayStartMs)} ms</small>
       {cue.dubbing && <span className="cue-voice-badge">VOICE {cue.dubbing.speedApplied.toFixed(2)}×</span>}
+      {cue.speakerId && <span className="cue-speaker-badge" title="Người nói được STT tự nhận diện">{cue.speakerId} → {cue.voiceGroup}</span>}
     </div>
     <div className="cue-row">
       <span>{isTextObject ? 'VĂN BẢN' : 'BẢN GỐC'}</span>
@@ -105,7 +106,7 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
     };
   }, [updateViewport]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const targetId = activeCueId ?? selectedId;
     if (!targetId) return;
     const container = listRef.current;
@@ -118,8 +119,11 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
     const safeBottom = container.scrollTop + container.clientHeight - safePadding;
     if (itemTop < safeTop || itemBottom > safeBottom) {
       const targetTop = Math.max(0, itemTop - (container.clientHeight - CUE_SLOT_HEIGHT) / 2);
-      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-      container.scrollTo({ top: targetTop, behavior: reduceMotion ? 'auto' : 'smooth' });
+      // A smooth jump across hundreds of virtualized cues visibly replays the
+      // list from the top. Move before paint and update the virtual viewport
+      // in the same layout pass so only the target cue is rendered.
+      container.scrollTop = targetTop;
+      setViewport({ scrollTop: targetTop, height: container.clientHeight || 600 });
     }
   }, [activeCueId, cuePositions, selectedId]);
 

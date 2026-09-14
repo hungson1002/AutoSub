@@ -1,7 +1,9 @@
 import type {
   AIProvider,
   AppSettings,
+  BlurRegion,
   GlossaryEntry,
+  LogoOverlay,
   ModelPreferences,
   PronunciationEntry,
   SubtitleCue,
@@ -22,7 +24,7 @@ export type ExtractionRunStatus =
   | "cancelled";
 export interface ExtractionRunState {
   status: ExtractionRunStatus;
-  mode?: "ocr" | "stt";
+  mode?: "ocr" | "stt" | "smart";
   fileName?: string;
   cueCount?: number;
   updatedAt?: number;
@@ -52,6 +54,8 @@ const keys = {
   cues: "autosub.cues",
   asset: "autosub.asset",
   videoEdits: "autosub.video-edits",
+  videoBlurRegions: "autosub.video-blur-regions",
+  videoLogos: "autosub.video-logos",
   dubbingJobs: "autosub.dubbing-jobs",
   glossary: "autosub.glossary",
   pronunciation: "autosub.pronunciation",
@@ -83,6 +87,7 @@ type StoredVideoAsset = Pick<
   | "size"
   | "sourceMode"
 >;
+type StoredLogoOverlay = Omit<LogoOverlay, "file">;
 
 export const storage = {
   providers: () =>
@@ -152,6 +157,50 @@ export const storage = {
       ...read<Record<string, VideoEditState>>(keys.videoEdits, {}),
       [uploadId]: value,
     }),
+  blurRegions: (uploadId?: string): BlurRegion[] =>
+    uploadId
+      ? read<Record<string, BlurRegion[]>>(keys.videoBlurRegions, {})[
+          uploadId
+        ] || []
+      : [],
+  saveBlurRegions: (uploadId: string, value: BlurRegion[]) =>
+    write(keys.videoBlurRegions, {
+      ...read<Record<string, BlurRegion[]>>(keys.videoBlurRegions, {}),
+      [uploadId]: value,
+    }),
+  logo: (uploadId?: string): LogoOverlay | undefined =>
+    uploadId
+      ? read<Record<string, StoredLogoOverlay | undefined>>(
+          keys.videoLogos,
+          {},
+        )[uploadId]
+      : undefined,
+  saveLogo: (uploadId: string, value?: LogoOverlay) => {
+    const logos = read<Record<string, StoredLogoOverlay | undefined>>(
+      keys.videoLogos,
+      {},
+    );
+    if (!value) delete logos[uploadId];
+    else {
+      logos[uploadId] = {
+        name: value.name,
+        url: value.url,
+        enabled: value.enabled,
+        kind: value.kind,
+        text: value.text,
+        fontFamily: value.fontFamily,
+        fontSize: value.fontSize,
+        textColor: value.textColor,
+        outlineColor: value.outlineColor,
+        position: value.position,
+        xPercent: value.xPercent,
+        yPercent: value.yPercent,
+        widthPercent: value.widthPercent,
+        opacity: value.opacity,
+      };
+    }
+    write(keys.videoLogos, logos);
+  },
   dubbingJob: (uploadId: string) =>
     read<Record<string, string>>(keys.dubbingJobs, {})[uploadId],
   saveDubbingJob: (uploadId: string, jobId: string) =>

@@ -1,33 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SubtitleStyle } from '../types';
-import { Upload } from '../components/Icons';
 import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
-import { subtitleFonts } from './subtitleFonts';
 import { subtitlePresets } from './subtitlePresets';
+import type { UploadedSubtitleFont } from '../lib/fontLibrary';
+import { FontLibraryPicker } from './FontLibraryPicker';
 
-type UploadedFont = { family: string; name: string; url: string };
 type ColorKey = 'textColor' | 'outlineColor' | 'backgroundColor' | 'boxBorderColor';
-
-const safeFontName = (name: string) => name
-  .replace(/\.[^.]+$/, '')
-  .replace(/[^a-zA-Z0-9]+/g, ' ')
-  .trim() || 'Uploaded Font';
-
 type SubtitleStylePanelProps = {
   style: SubtitleStyle;
   onChange: (patch: Partial<SubtitleStyle>) => void;
-  onFontUpload?: (file: File, family: string) => void;
+  uploadedFonts?: UploadedSubtitleFont[];
+  onFontUpload?: (file: File, family: string) => Promise<void> | void;
   mode?: "subtitle" | "text";
 };
 
-export function SubtitleStylePanel({ style, onChange, onFontUpload, mode = "subtitle" }: SubtitleStylePanelProps) {
+export function SubtitleStylePanel({ style, onChange, uploadedFonts = [], onFontUpload, mode = "subtitle" }: SubtitleStylePanelProps) {
   const textMode = mode === "text";
-  const fileRef = useRef<HTMLInputElement>(null);
   const colorTimerRef = useRef<number | undefined>(undefined);
   const pendingColorPatchRef = useRef<Partial<SubtitleStyle>>({});
   const onChangeRef = useRef(onChange);
-  const [uploadedFonts, setUploadedFonts] = useState<UploadedFont[]>([]);
   const [colorDraft, setColorDraft] = useState<Record<ColorKey, string>>({ textColor: style.textColor, outlineColor: style.outlineColor, backgroundColor: style.backgroundColor ?? '#10141b', boxBorderColor: style.boxBorderColor ?? '#ffffff' });
   const outlineWidth = style.outlineWidth ?? 2;
   const backgroundColor = style.backgroundColor ?? '#10141b';
@@ -35,6 +27,7 @@ export function SubtitleStylePanel({ style, onChange, onFontUpload, mode = "subt
   const boxPaddingX = style.boxPaddingX ?? 10;
   const boxPaddingY = style.boxPaddingY ?? 4;
   const boxBorderWidth = style.boxBorderWidth ?? 0;
+  const boxBorderRadius = style.boxBorderRadius ?? 0;
 
   useEffect(() => {
     setColorDraft({ textColor: style.textColor, outlineColor: style.outlineColor, backgroundColor: style.backgroundColor ?? '#10141b', boxBorderColor: style.boxBorderColor ?? '#ffffff' });
@@ -63,38 +56,6 @@ export function SubtitleStylePanel({ style, onChange, onFontUpload, mode = "subt
     pendingColorPatchRef.current = {};
   }, []);
 
-  const uploadFont = async (file?: File) => {
-    if (!file) return;
-    const family = `AutoSub ${safeFontName(file.name)}`;
-    const url = URL.createObjectURL(file);
-    try {
-      const face = new FontFace(family, `url(${url})`);
-      await face.load();
-      document.fonts.add(face);
-      setUploadedFonts((fonts) => fonts.some((font) => font.family === family)
-        ? fonts
-        : [...fonts, { family, name: file.name, url }]);
-      onChange({ fontFamily: family });
-      onFontUpload?.(file, family);
-    } catch {
-      URL.revokeObjectURL(url);
-    }
-  };
-
-  const fontOptions = [
-    ...subtitleFonts.map((font) => ({ value: font, label: font })),
-    ...uploadedFonts.map((font) => ({
-      value: font.family,
-      label: font.name,
-      description: 'Font đã tải',
-    })),
-    ...style.fontFamily
-      && !subtitleFonts.includes(style.fontFamily as typeof subtitleFonts[number])
-      && !uploadedFonts.some((font) => font.family === style.fontFamily)
-      ? [{ value: style.fontFamily, label: style.fontFamily }]
-      : [],
-  ];
-
   return <div className="style-panel">
     <div className="subtitle-presets" aria-label="Preset subtitle style">
       <div className="subtitle-presets-heading"><span>{textMode ? "PRESET KIỂU VĂN BẢN" : "PRESET KIỂU PHỤ ĐỀ"}</span><small>{textMode ? "Chỉ áp dụng cho văn bản đang chọn" : "Áp dụng đồng nhất cho toàn bộ phụ đề"}</small></div>
@@ -107,7 +68,7 @@ export function SubtitleStylePanel({ style, onChange, onFontUpload, mode = "subt
     <div className="style-panel-intro"><span>LIVE TYPE CONTROL</span><p>Thay đổi sẽ cập nhật ngay trên frame video.</p></div>
     <label className="toggle-row"><span>{textMode ? "Hiện văn bản trên video" : "Hiện phụ đề trên video"}</span><input type="checkbox" checked={style.visible} onChange={(event) => onChange({ visible: event.target.checked })} /><i /></label>
     {!textMode && <div className="field"><span>Nội dung</span><SelectField ariaLabel="Nội dung phụ đề" value={style.content} onChange={(value) => onChange({ content: value as SubtitleStyle['content'] })} options={[{ value: 'original', label: 'Bản gốc' }, { value: 'translated', label: 'Bản dịch' }, { value: 'both', label: 'Cả hai', description: 'Bản gốc và bản dịch' }]} /></div>}
-    <div className="field"><span>Font chữ</span><div className="font-picker-row"><SelectField ariaLabel="Font chữ phụ đề" value={style.fontFamily} onChange={(value) => onChange({ fontFamily: value })} options={fontOptions} /><label className="font-upload-button" title="Tải font TTF, OTF, WOFF hoặc WOFF2"><Upload size={14} /><input ref={fileRef} type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2" onChange={(event) => { void uploadFont(event.target.files?.[0]); event.currentTarget.value = ''; }} />Tải font</label></div></div>
+    <FontLibraryPicker value={style.fontFamily} onChange={(fontFamily) => onChange({ fontFamily })} uploadedFonts={uploadedFonts} onFontUpload={onFontUpload} />
     <div className="field"><span>Cỡ chữ <b className="value-badge">{style.fontSize}px</b></span><RangeInput min={18} max={96} value={style.fontSize} onChange={(event) => onChange({ fontSize: Number(event.target.value) })} /></div>
     <div className="field"><span>Kích thước viền <b className="value-badge">{outlineWidth}px</b></span><RangeInput min={0} max={8} step={1} value={outlineWidth} onChange={(event) => onChange({ outlineWidth: Number(event.target.value) })} /></div>
     <div className="two-fields"><label className="field"><span>Màu chữ</span><input type="color" value={colorDraft.textColor} onInput={(event) => changeColor('textColor', event.currentTarget.value)} onChange={(event) => changeColor('textColor', event.currentTarget.value)} /></label><label className="field"><span>Màu viền</span><input type="color" value={colorDraft.outlineColor} onInput={(event) => changeColor('outlineColor', event.currentTarget.value)} onChange={(event) => changeColor('outlineColor', event.currentTarget.value)} /></label></div>
@@ -127,6 +88,14 @@ export function SubtitleStylePanel({ style, onChange, onFontUpload, mode = "subt
       <div className="two-fields subtitle-box-border-row">
         <label className="field"><span>Màu border</span><input type="color" value={colorDraft.boxBorderColor} onInput={(event) => changeColor('boxBorderColor', event.currentTarget.value)} onChange={(event) => changeColor('boxBorderColor', event.currentTarget.value)} /></label>
         <div className="field"><span>Độ dày border</span><div className="range-number-control"><RangeInput min={0} max={12} step={1} value={boxBorderWidth} onChange={(event) => onChange({ boxBorderWidth: Number(event.target.value) })} /><input aria-label="Độ dày border hộp chữ" type="number" min={0} max={12} value={boxBorderWidth} onChange={(event) => onChange({ boxBorderWidth: Math.max(0, Math.min(12, Number(event.target.value) || 0)) })} /><b>px</b></div></div>
+      </div>
+      <div className="field">
+        <span>Bo gĂ³c khung <b className="value-badge">{boxBorderRadius}px</b></span>
+        <div className="range-number-control">
+          <RangeInput min={0} max={80} step={1} value={boxBorderRadius} onChange={(event) => onChange({ boxBorderRadius: Number(event.target.value) })} />
+          <input aria-label="Bo gĂ³c khung chá»¯" type="number" min={0} max={80} value={boxBorderRadius} onChange={(event) => onChange({ boxBorderRadius: Math.max(0, Math.min(80, Number(event.target.value) || 0)) })} />
+          <b>px</b>
+        </div>
       </div>
     </div>}
     <div className="two-fields"><label className="toggle-row compact"><span><b>B</b> Đậm</span><input type="checkbox" checked={style.bold} onChange={(event) => onChange({ bold: event.target.checked })} /><i /></label><label className="toggle-row compact"><span><b><i>I</i></b> Nghiêng</span><input type="checkbox" checked={style.italic} onChange={(event) => onChange({ italic: event.target.checked })} /><i /></label></div>

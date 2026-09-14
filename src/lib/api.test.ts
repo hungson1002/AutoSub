@@ -348,6 +348,44 @@ test("audio export sends only the current media references and trim as small JSO
   assert.equal((calls[0]?.init?.body as unknown) instanceof FormData, false);
 });
 
+test("stem export sends the selected stem and trim as small JSON", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return new Response(new Blob(["stem"], { type: "audio/wav" }), {
+      status: 200,
+      headers: { "content-type": "audio/wav" },
+    });
+  }) as typeof fetch;
+
+  try {
+    await api.exportStemAudio({
+      uploadId: "upload-1",
+      stem: "background",
+      trimStartMs: 500,
+      trimEndMs: 4500,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, "http://127.0.0.1:8787/api/export/stem");
+  assert.equal(calls[0]?.init?.method, "POST");
+  assert.equal(
+    new Headers(calls[0]?.init?.headers).get("content-type"),
+    "application/json",
+  );
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
+    uploadId: "upload-1",
+    stem: "background",
+    trimStartMs: 500,
+    trimEndMs: 4500,
+  });
+  assert.equal((calls[0]?.init?.body as unknown) instanceof FormData, false);
+});
+
 test("latest video upload wins when an earlier upload resolves later", () => {
   const guard = new LatestUploadGuard();
   const fileA = new File(["A"], "a.mp4", { type: "video/mp4" });

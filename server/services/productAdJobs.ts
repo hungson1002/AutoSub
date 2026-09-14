@@ -8,6 +8,7 @@ import { run, workdir } from './ffmpeg';
 import { resolveUpload } from './uploads';
 import { generateGoogleFlowImage, generateGoogleFlowPreview, generateGoogleFlowVideo, validateGoogleFlowSession } from './googleFlow';
 import { productAdCraftRules } from './directorKnowledge';
+import { splitProductAdCaption } from '../../shared/productAdSubtitles';
 
 export interface CreateProductAdJobInput {
   imageUploadIds: string[];

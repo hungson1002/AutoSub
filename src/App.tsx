@@ -21,6 +21,7 @@ import {
   capabilityAssignments,
   updateCapabilityAssignments,
 } from "./lib/settings";
+import { repairRunawayOcrCueEnds } from "./lib/subtitles";
 
 export default function App() {
   const [page, setPage] = useState<Page>("translate");
@@ -37,6 +38,10 @@ export default function App() {
   }>();
   useEffect(() => {
     storage.saveCues(cues);
+  }, [cues]);
+  useEffect(() => {
+    const repaired = repairRunawayOcrCueEnds(cues);
+    if (repaired !== cues) setCues(repaired);
   }, [cues]);
   useEffect(() => {
     storage.saveSettings(settings);

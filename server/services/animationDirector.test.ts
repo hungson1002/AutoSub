@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, directorRepairRule, jsonFromDirectorReply, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets } from './animationDirector';
-import { wavDurationMs } from './animationAssets';
+import { animationAssetCacheKey, wavDurationMs } from './animationAssets';
 import { animationCraftRules } from './directorKnowledge';
 import { animationPerformancePlanIssues } from './animationDirector';
 import { evaluateScene } from '../../src/animationStudio/evaluator';
@@ -153,4 +153,28 @@ test('visual beats create short transitions and independent camera movement', ()
   assert.ok(timeline.commands.some((command) => command.type === 'MOVE'));
   assert.ok(timeline.commands.some((command) => command.type === 'SCALE'));
   assert.ok(timeline.commands.every((command) => command.startMs + command.durationMs <= 10_000));
+});
+
+test('locked storyboard images fill the frame without camera movement', () => {
+  const now = new Date().toISOString();
+  const visual = { id: 'whiteboard-shot', type: 'background' as const, name: 'Whiteboard shot', uri: '/whiteboard.png', tags: [], createdAt: now };
+  const timeline = buildVisualBeatTimeline({
+    sceneIndex: 0,
+    durationMs: 8_000,
+    width: 1280,
+    height: 720,
+    visuals: [visual],
+    beats: [{ purpose: 'Explain', visual: 'presenter and cooking fire', motion: 'locked', transition: 'crossfade' }],
+  });
+  assert.equal(timeline.layers.length, 1);
+  assert.equal(timeline.layers[0].width, 1280);
+  assert.equal(timeline.layers[0].height, 720);
+  assert.deepEqual(timeline.layers[0].transform.scale, { x: 1, y: 1 });
+  assert.equal(timeline.commands.some((command) => command.type === 'MOVE' || command.type === 'SCALE'), false);
+});
+
+test('character references create distinct image cache entries', () => {
+  const base = { prompt: 'A cat explores a distant planet', generator: 'flow-agent' as const, model: 'narwhal' };
+  assert.notEqual(animationAssetCacheKey({ ...base, referenceUploadId: 'reference-a' }), animationAssetCacheKey({ ...base, referenceUploadId: 'reference-b' }));
+  assert.notEqual(animationAssetCacheKey({ ...base, referenceAssetId: 'candidate-a' }), animationAssetCacheKey(base));
 });

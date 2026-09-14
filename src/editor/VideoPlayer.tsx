@@ -10,6 +10,7 @@ import type { CSSProperties, MouseEvent, PointerEvent } from "react";
 import type {
   BlurRegion,
   LogoOverlay,
+  OriginalAudioMode,
   SubtitleCue,
   SubtitleStyle,
   VideoAspectRatio,
@@ -33,6 +34,7 @@ import {
   type DropdownId,
 } from "../lib/dropdowns";
 import { RangeInput } from "../components/RangeInput";
+import { subtitleTextCss } from "./subtitleCss";
 import { VideoTrimModal } from "./VideoTrimModal";
 import { VideoCropModal } from "./VideoCropModal";
 import { SubtitleTimeline } from "./SubtitleTimeline";
@@ -41,7 +43,8 @@ import { buildActiveCueIndex, findActiveCue, findActiveCues } from "../lib/activ
 import { dubAudioNeedsResync } from "../lib/mediaSync";
 
 type Roi = { x: number; y: number; w: number; h: number };
-type DragKind = "move" | "nw" | "ne" | "sw" | "se";
+type ResizeKind = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+type DragKind = "move" | ResizeKind;
 type RoiDrag = { kind: DragKind; startX: number; startY: number; origin: Roi };
 type BlurDrag = {
   kind: DragKind;
@@ -59,20 +62,23 @@ type SubtitleDrag = {
 type SubtitlePosition = { x: number; y: number };
 type SubtitleScaleDrag = {
   cueId: string;
+  kind: ResizeKind;
   startX: number;
   startY: number;
   originFontSize: number;
 };
 type LogoDrag = {
+  kind: DragKind;
   startX: number;
   startY: number;
   originX: number;
   originY: number;
-  widthPercent: number;
+  originWidthPercent: number;
   stageWidth: number;
   stageHeight: number;
   pendingX?: number;
   pendingY?: number;
+  pendingWidth?: number;
   frame?: number;
 };
 type VideoPanDrag = {
@@ -83,6 +89,10 @@ type VideoPanDrag = {
 };
 type AlignmentGuide = { value: number; label: string };
 const VIDEO_CENTER_SNAP_PX = 14;
+const RECT_RESIZE_HANDLES: ResizeKind[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+const TEXT_RESIZE_HANDLES: ResizeKind[] = ["nw", "ne", "se", "sw", "e", "w"];
+const activeCueSignature = (index: ReturnType<typeof buildActiveCueIndex>, timeMs: number) =>
+  findActiveCues(index, timeMs).map((cue) => cue.id).join("\u0000");
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 const audioRefTime = (audio: HTMLAudioElement) =>
@@ -122,13 +132,9 @@ function blurRegionPreviewStyle(
     // A nearly transparent tint makes backdrop-filter reliably composite in
     // Chromium, while keeping the live preview close to the exported local
     // scene blur rather than showing a flat grey box.
-    background: "rgba(12, 18, 24, 0.045)",
-    backdropFilter: `blur(${Math.max(12, strength * 1.35)}px) saturate(0.92) brightness(0.975)`,
-    WebkitBackdropFilter: `blur(${Math.max(12, strength * 1.35)}px) saturate(0.92) brightness(0.975)`,
-    maskImage:
-      "linear-gradient(to bottom, transparent 0%, black 6%, black 94%, transparent 100%)",
-    WebkitMaskImage:
-      "linear-gradient(to bottom, transparent 0%, black 6%, black 94%, transparent 100%)",
+    background: region.mode === "inpaint" ? "rgba(12, 18, 24, 0.12)" : "rgba(12, 18, 24, 0.045)",
+    backdropFilter: region.mode === "inpaint" ? `blur(${Math.max(18, strength * 1.7)}px) saturate(.72)` : `blur(${Math.max(12, strength * 1.35)}px) saturate(0.92) brightness(0.975)`,
+    WebkitBackdropFilter: region.mode === "inpaint" ? `blur(${Math.max(18, strength * 1.7)}px) saturate(.72)` : `blur(${Math.max(12, strength * 1.35)}px) saturate(0.92) brightness(0.975)`,
   };
 }
 
@@ -139,6 +145,18 @@ function patchRect(origin: Roi, kind: DragKind, dx: number, dy: number): Roi {
       x: clamp(origin.x + dx, 0, 100 - origin.w),
       y: clamp(origin.y + dy, 0, 100 - origin.h),
     };
+  if (kind === "n") {
+    const y = clamp(origin.y + dy, 0, origin.y + origin.h - 5);
+    return { ...origin, y, h: origin.y + origin.h - y };
+  }
+  if (kind === "e")
+    return { ...origin, w: clamp(origin.w + dx, 5, 100 - origin.x) };
+  if (kind === "s")
+    return { ...origin, h: clamp(origin.h + dy, 5, 100 - origin.y) };
+  if (kind === "w") {
+    const x = clamp(origin.x + dx, 0, origin.x + origin.w - 5);
+    return { ...origin, x, w: origin.x + origin.w - x };
+  }
   if (kind === "nw") {
     const x = clamp(origin.x + dx, 0, origin.x + origin.w - 5);
     const y = clamp(origin.y + dy, 0, origin.y + origin.h - 5);
@@ -198,6 +216,11 @@ type Props = {
   onAddTextCue?: (timeMs: number) => void;
   onDeleteCue?: (id: string) => void;
   onDeleteCues?: (ids: string[]) => void;
+  onSplitCueAtTime?: (timeMs: number) => void;
+  onExportStem?: (stem: "vocals" | "background") => void;
+  onOpenAudioMix?: () => void;
+  onOpenDubbingAudioMode?: (mode: OriginalAudioMode) => void;
+  showMediaTimeline?: boolean;
   roi?: Roi;
   onRoiChange?: (roi: Roi) => void;
   onBlurRegionsChange?: (regions: BlurRegion[]) => void;
@@ -242,7 +265,10 @@ export function VideoPlayer({
   const stageRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
+  const playIntentRef = useRef(false);
   const [time, setTime] = useState(0);
+  const [subtitleClockTime, setSubtitleClockTime] = useState(0);
+  const subtitleClockSignatureRef = useRef("");
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [volumeOpen, setVolumeOpen] = useState(false);
@@ -258,11 +284,15 @@ export function VideoPlayer({
   const [subtitleScaleDrag, setSubtitleScaleDrag] = useState<SubtitleScaleDrag>();
   const [draftSubtitleFontSize, setDraftSubtitleFontSize] = useState<{ cueId: string; fontSize: number }>();
   const [logoDrag, setLogoDrag] = useState<LogoDrag>();
+  const [draftLogoPatch, setDraftLogoPatch] = useState<Partial<LogoOverlay>>();
   const logoDragRef = useRef<LogoDrag | undefined>(undefined);
   const subtitleFrameRef = useRef<number | undefined>(undefined);
+  const subtitleScaleFrameRef = useRef<number | undefined>(undefined);
   const pendingSubtitlePositionRef = useRef<SubtitlePosition | undefined>(
     undefined,
   );
+  const pendingSubtitleFontSizeRef = useRef<{ cueId: string; fontSize: number } | undefined>(undefined);
+  const pendingLogoPatchRef = useRef<Partial<LogoOverlay> | undefined>(undefined);
   const [draftBlurRegion, setDraftBlurRegion] = useState<BlurRegion>();
   const blurFrameRef = useRef<number | undefined>(undefined);
   const pendingBlurRegionRef = useRef<BlurRegion | undefined>(undefined);
@@ -287,7 +317,16 @@ export function VideoPlayer({
   const effectiveVideoEdit = videoEdit || internalVideoEdit;
   const cueIndex = useMemo(() => buildActiveCueIndex(slowVideoToMatchSpeech ? cues.map((cue) => cue.dubbing && Number.isFinite(cue.dubbing.timelineStartMs) && Number.isFinite(cue.dubbing.timelineEndMs) ? { ...cue, startMs: cue.dubbing.timelineStartMs as number, endMs: cue.dubbing.timelineEndMs as number } : cue) : cues), [cues, slowVideoToMatchSpeech]);
   const [activeCueId, setActiveCueId] = useState<string>();
-  const activeCues = useMemo(() => findActiveCues(cueIndex, time), [cueIndex, time]);
+  const syncSubtitleClock = useCallback(
+    (nextTimeMs: number, force = false) => {
+      const signature = activeCueSignature(cueIndex, nextTimeMs);
+      if (!force && signature === subtitleClockSignatureRef.current) return;
+      subtitleClockSignatureRef.current = signature;
+      setSubtitleClockTime(nextTimeMs);
+    },
+    [cueIndex],
+  );
+  const activeCues = useMemo(() => findActiveCues(cueIndex, subtitleClockTime), [cueIndex, subtitleClockTime]);
   const cueLayerLayout = useMemo(() => layoutTimelineCues(cues), [cues]);
   const cueLayers = useMemo(() => new Map(cueLayerLayout.items.map(({ cue, lane }) => [cue.id, lane])), [cueLayerLayout.items]);
   const displayDuration = Math.max(
@@ -358,7 +397,7 @@ export function VideoPlayer({
     audio.pause();
     if (audioMode !== "dubbed" || !dubAudioUrl) return;
     audio.currentTime = sourceToTimelineMs(video.currentTime * 1000) / 1000;
-    if (!video.paused) void audio.play().catch(() => undefined);
+    if (playIntentRef.current && !video.paused) void audio.play().catch(() => undefined);
   }, [audioMode, dubAudioUrl, sourceToTimelineMs]);
   useEffect(() => {
     if (dubAudioRef.current) dubAudioRef.current.volume = clamp(volume * dubMixVolume, 0, 1);
@@ -392,10 +431,13 @@ export function VideoPlayer({
     setContextMenu(undefined);
   }, [asset?.url]);
   useEffect(() => {
+    playIntentRef.current = false;
     videoRef.current?.pause();
     dubAudioRef.current?.pause();
     setPlaying(false);
     setTime(0);
+    subtitleClockSignatureRef.current = "";
+    setSubtitleClockTime(0);
     setDuration((asset?.durationMs || 0) + retimedDurationExtensionMs);
     setActiveCueId(findActiveCue(cueIndex, 0)?.id);
     // Cue edits rebuild the active-cue index. They must not reset a paused
@@ -468,8 +510,12 @@ export function VideoPlayer({
     () => () => {
       if (subtitleFrameRef.current !== undefined)
         cancelAnimationFrame(subtitleFrameRef.current);
+      if (subtitleScaleFrameRef.current !== undefined)
+        cancelAnimationFrame(subtitleScaleFrameRef.current);
       if (blurFrameRef.current !== undefined)
         cancelAnimationFrame(blurFrameRef.current);
+      const drag = logoDragRef.current;
+      if (drag?.frame !== undefined) cancelAnimationFrame(drag.frame);
     },
     [],
   );
@@ -477,8 +523,10 @@ export function VideoPlayer({
     onActiveCueChange?.(activeCueId);
   }, [activeCueId, onActiveCueChange]);
   useEffect(() => {
-    syncActiveCue(sourceToTimelineMs((videoRef.current?.currentTime || 0) * 1000));
-  }, [syncActiveCue, sourceToTimelineMs]);
+    const next = sourceToTimelineMs((videoRef.current?.currentTime || 0) * 1000);
+    syncActiveCue(next);
+    syncSubtitleClock(next, true);
+  }, [syncActiveCue, syncSubtitleClock, sourceToTimelineMs]);
   useEffect(() => {
     const video = videoRef.current;
     if (!video || typeof video.requestVideoFrameCallback !== "function") return;
@@ -486,6 +534,7 @@ export function VideoPlayer({
     let cancelled = false;
     const updateActiveCue: VideoFrameRequestCallback = (_now, metadata) => {
       const timelineMs = sourceToTimelineMs(metadata.mediaTime * 1000);
+      syncSubtitleClock(timelineMs);
       syncActiveCue(timelineMs);
       const rate = playbackRateAt(metadata.mediaTime * 1000);
       if (Math.abs(video.playbackRate - rate) > 0.001) video.playbackRate = rate;
@@ -505,23 +554,25 @@ export function VideoPlayer({
       cancelled = true;
       video.cancelVideoFrameCallback(frameId);
     };
-  }, [asset?.url, playingDub, syncActiveCue, sourceToTimelineMs, playbackRateAt]);
+  }, [asset?.url, playingDub, syncActiveCue, syncSubtitleClock, sourceToTimelineMs, playbackRateAt]);
   useEffect(() => {
     if (!videoRef.current || !seekRequest) return;
     const next = timelineToSourceMs(seekRequest.timeMs) / 1000;
     setTime(seekRequest.timeMs);
+    syncSubtitleClock(seekRequest.timeMs, true);
     syncActiveCue(seekRequest.timeMs);
     if (Math.abs(videoRef.current.currentTime - next) > 0.001)
       videoRef.current.currentTime = next;
     if (audioMode === "dubbed" && dubAudioUrl && dubAudioRef.current)
       dubAudioRef.current.currentTime = seekRequest.timeMs / 1000;
-  }, [seekRequest?.id, audioMode, dubAudioUrl, syncActiveCue, timelineToSourceMs]);
+  }, [seekRequest?.id, audioMode, dubAudioUrl, syncActiveCue, syncSubtitleClock, timelineToSourceMs]);
 
   const toggle = () => {
     if (!videoRef.current) return;
     const video = videoRef.current;
     const audio = dubAudioRef.current;
     if (video.paused) {
+      playIntentRef.current = true;
       if (
         !Number.isFinite(video.currentTime) ||
         video.currentTime * 1000 < effectiveVideoEdit.trimStartMs ||
@@ -535,9 +586,20 @@ export function VideoPlayer({
       }
       void video
         .play()
-        .then(() => setPlaying(true))
-        .catch(() => setPlaying(false));
+        .then(() => {
+          if (playIntentRef.current) setPlaying(true);
+          else {
+            video.pause();
+            audio?.pause();
+            setPlaying(false);
+          }
+        })
+        .catch(() => {
+          playIntentRef.current = false;
+          setPlaying(false);
+        });
     } else {
+      playIntentRef.current = false;
       video.pause();
       audio?.pause();
       setPlaying(false);
@@ -546,6 +608,7 @@ export function VideoPlayer({
   const reportTime = (sourceTimeMs: number) => {
     const next = sourceToTimelineMs(sourceTimeMs);
     setTime(next);
+    syncSubtitleClock(next);
     syncActiveCue(next);
     if (
       audioMode === "dubbed" &&
@@ -615,13 +678,13 @@ export function VideoPlayer({
       originY: position.y,
     });
   };
-  const beginSubtitleScale = (event: PointerEvent<HTMLButtonElement>, cue: SubtitleCue, fontSize: number) => {
+  const beginSubtitleScale = (event: PointerEvent<HTMLButtonElement>, cue: SubtitleCue, fontSize: number, kind: ResizeKind) => {
     if (!onCueChange) return;
     event.preventDefault();
     event.stopPropagation();
     (onCueFocus ?? onCueSelect)?.(cue.id);
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    setSubtitleScaleDrag({ cueId: cue.id, startX: event.clientX, startY: event.clientY, originFontSize: fontSize });
+    setSubtitleScaleDrag({ cueId: cue.id, kind, startX: event.clientX, startY: event.clientY, originFontSize: fontSize });
     setDraftSubtitleFontSize({ cueId: cue.id, fontSize });
   };
   const clearBlurSelection = (event: PointerEvent<HTMLDivElement>) => {
@@ -741,6 +804,7 @@ export function VideoPlayer({
     setAlignmentGuides({});
   };
   const openTrim = () => {
+    playIntentRef.current = false;
     videoRef.current?.pause();
     dubAudioRef.current?.pause();
     setPlaying(false);
@@ -748,13 +812,14 @@ export function VideoPlayer({
     setTrimOpen(true);
   };
   const openCrop = () => {
+    playIntentRef.current = false;
     videoRef.current?.pause();
     dubAudioRef.current?.pause();
     setPlaying(false);
     setContextMenu(undefined);
     setCropOpen(true);
   };
-  const beginLogoDrag = (event: PointerEvent<HTMLElement>) => {
+  const beginLogoDrag = (event: PointerEvent<HTMLElement>, kind: DragKind = "move") => {
     if (!logo?.enabled || !onLogoChange || !stageRef.current) return;
     event.preventDefault();
     event.stopPropagation();
@@ -762,11 +827,12 @@ export function VideoPlayer({
     const rect = stageRef.current.getBoundingClientRect();
     stageRef.current.setPointerCapture?.(event.pointerId);
     const drag = {
+      kind,
       startX: event.clientX,
       startY: event.clientY,
       originX: logo.xPercent,
       originY: logo.yPercent,
-      widthPercent: logo.widthPercent,
+      originWidthPercent: logo.widthPercent,
       stageWidth: rect.width * videoZoom,
       stageHeight: rect.height * videoZoom,
     };
@@ -936,28 +1002,81 @@ export function VideoPlayer({
       }
     }
     if (subtitleScaleDrag) {
-      const delta = (event.clientX - subtitleScaleDrag.startX) - (event.clientY - subtitleScaleDrag.startY);
+      const dx = event.clientX - subtitleScaleDrag.startX;
+      const dy = event.clientY - subtitleScaleDrag.startY;
+      const horizontal =
+        subtitleScaleDrag.kind.includes("e")
+          ? dx
+          : subtitleScaleDrag.kind.includes("w")
+            ? -dx
+            : 0;
+      const vertical =
+        subtitleScaleDrag.kind.includes("s")
+          ? dy
+          : subtitleScaleDrag.kind.includes("n")
+            ? -dy
+            : 0;
+      const delta =
+        Math.abs(horizontal) >= Math.abs(vertical) ? horizontal : vertical;
       const fontSize = clamp(
         Math.round(subtitleScaleDrag.originFontSize + (delta / Math.max(previewScale, 0.2)) * 0.35),
         8,
         200,
       );
-      setDraftSubtitleFontSize({ cueId: subtitleScaleDrag.cueId, fontSize });
+      pendingSubtitleFontSizeRef.current = {
+        cueId: subtitleScaleDrag.cueId,
+        fontSize,
+      };
+      if (subtitleScaleFrameRef.current === undefined) {
+        subtitleScaleFrameRef.current = requestAnimationFrame(() => {
+          subtitleScaleFrameRef.current = undefined;
+          if (pendingSubtitleFontSizeRef.current)
+            setDraftSubtitleFontSize(pendingSubtitleFontSizeRef.current);
+        });
+      }
     }
     const activeLogoDrag = logoDragRef.current;
     if (onLogoChange && activeLogoDrag) {
-      const dx =
+      const dxPercent =
         ((event.clientX - activeLogoDrag.startX) / activeLogoDrag.stageWidth) *
         100;
-      const dy =
+      const dyPercent =
         ((event.clientY - activeLogoDrag.startY) / activeLogoDrag.stageHeight) *
         100;
-      activeLogoDrag.pendingX = clamp(
-        activeLogoDrag.originX + dx,
-        0,
-        100 - activeLogoDrag.widthPercent,
-      );
-      activeLogoDrag.pendingY = clamp(activeLogoDrag.originY + dy, 0, 95);
+      if (activeLogoDrag.kind === "move") {
+        activeLogoDrag.pendingX = clamp(
+          activeLogoDrag.originX + dxPercent,
+          0,
+          100 - activeLogoDrag.originWidthPercent,
+        );
+        activeLogoDrag.pendingY = clamp(activeLogoDrag.originY + dyPercent, 0, 95);
+        activeLogoDrag.pendingWidth = undefined;
+      } else {
+        const dxWidthPercent =
+          ((event.clientX - activeLogoDrag.startX) / activeLogoDrag.stageWidth) * 100;
+        const dyWidthPercent =
+          ((event.clientY - activeLogoDrag.startY) / activeLogoDrag.stageWidth) * 100;
+        const horizontal =
+          activeLogoDrag.kind.includes("e")
+            ? dxWidthPercent
+            : activeLogoDrag.kind.includes("w")
+              ? -dxWidthPercent
+              : 0;
+        const vertical =
+          activeLogoDrag.kind.includes("s")
+            ? dyWidthPercent
+            : activeLogoDrag.kind.includes("n")
+              ? -dyWidthPercent
+              : 0;
+        const delta =
+          Math.abs(horizontal) >= Math.abs(vertical) ? horizontal : vertical;
+        const nextWidth = clamp(activeLogoDrag.originWidthPercent + delta, 2, 80);
+        activeLogoDrag.pendingWidth = nextWidth;
+        activeLogoDrag.pendingX = activeLogoDrag.kind.includes("w")
+          ? clamp(activeLogoDrag.originX + activeLogoDrag.originWidthPercent - nextWidth, 0, 100 - nextWidth)
+          : clamp(activeLogoDrag.originX, 0, 100 - nextWidth);
+        activeLogoDrag.pendingY = clamp(activeLogoDrag.originY, 0, 95);
+      }
       if (activeLogoDrag.frame === undefined) {
         activeLogoDrag.frame = requestAnimationFrame(() => {
           const drag = logoDragRef.current;
@@ -967,9 +1086,18 @@ export function VideoPlayer({
             typeof drag.pendingX === "number" &&
             typeof drag.pendingY === "number"
           ) {
-            onLogoChange({ xPercent: drag.pendingX, yPercent: drag.pendingY });
+            const patch = {
+              xPercent: drag.pendingX,
+              yPercent: drag.pendingY,
+              ...(typeof drag.pendingWidth === "number"
+                ? { widthPercent: drag.pendingWidth }
+                : {}),
+            };
+            pendingLogoPatchRef.current = patch;
+            setDraftLogoPatch(patch);
             drag.pendingX = undefined;
             drag.pendingY = undefined;
+            drag.pendingWidth = undefined;
           }
         });
       }
@@ -1016,83 +1144,69 @@ export function VideoPlayer({
     }
     pendingSubtitlePositionRef.current = undefined;
     setDraftSubtitlePosition(undefined);
-    if (subtitleScaleDrag && draftSubtitleFontSize?.cueId === subtitleScaleDrag.cueId) {
+    if (subtitleScaleFrameRef.current !== undefined) {
+      cancelAnimationFrame(subtitleScaleFrameRef.current);
+      subtitleScaleFrameRef.current = undefined;
+    }
+    const finalSubtitleFontSize =
+      pendingSubtitleFontSizeRef.current || draftSubtitleFontSize;
+    if (subtitleScaleDrag && finalSubtitleFontSize?.cueId === subtitleScaleDrag.cueId) {
       const cue = cues.find((item) => item.id === subtitleScaleDrag.cueId);
       if (cue?.sourceKind === "onscreen-text") {
         onCueChange?.(cue.id, {
-          styleOverrides: { ...cue.styleOverrides, fontSize: draftSubtitleFontSize.fontSize },
+          styleOverrides: { ...cue.styleOverrides, fontSize: finalSubtitleFontSize.fontSize },
         });
       } else if (cue) {
-        onStyleChange?.({ fontSize: draftSubtitleFontSize.fontSize });
+        onStyleChange?.({ fontSize: finalSubtitleFontSize.fontSize });
       }
     }
+    pendingSubtitleFontSizeRef.current = undefined;
     setSubtitleScaleDrag(undefined);
     setDraftSubtitleFontSize(undefined);
     setAlignmentGuides({});
     const drag = logoDragRef.current;
     if (drag) {
       if (drag.frame !== undefined) cancelAnimationFrame(drag.frame);
-      if (
-        onLogoChange &&
-        typeof drag.pendingX === "number" &&
-        typeof drag.pendingY === "number"
-      )
-        onLogoChange({ xPercent: drag.pendingX, yPercent: drag.pendingY });
+      const finalLogoPatch =
+        pendingLogoPatchRef.current ||
+        (typeof drag.pendingX === "number" && typeof drag.pendingY === "number"
+          ? {
+              xPercent: drag.pendingX,
+              yPercent: drag.pendingY,
+              ...(typeof drag.pendingWidth === "number"
+                ? { widthPercent: drag.pendingWidth }
+                : {}),
+            }
+          : undefined);
+      if (onLogoChange && finalLogoPatch) onLogoChange(finalLogoPatch);
     }
+    pendingLogoPatchRef.current = undefined;
     logoDragRef.current = undefined;
     videoPanDragRef.current = undefined;
     setRoiDrag(undefined);
     setBlurDrag(undefined);
     setSubtitleDrag(undefined);
     setLogoDrag(undefined);
+    setDraftLogoPatch(undefined);
     setVideoPanDrag(undefined);
   };
   const previewScale = stageWidth / 1920;
   const cueStyle = (cue: SubtitleCue): SubtitleStyle => ({
     ...style,
-    ...(cue.styleOverrides || {}),
+    ...(cue.sourceKind === "onscreen-text" ? cue.styleOverrides || {} : {}),
     ...(draftSubtitleFontSize?.cueId === cue.id ? { fontSize: draftSubtitleFontSize.fontSize } : {}),
   });
   const subtitleStyle = (previewStyle: SubtitleStyle): CSSProperties => {
-    const outlineWidth = previewStyle.background === "outline" ? Math.max(0, (previewStyle.outlineWidth ?? 2) * previewScale) : 0;
-    const boxColor = previewStyle.backgroundColor ?? previewStyle.outlineColor;
-    const boxOpacity = previewStyle.backgroundOpacity ?? 0.72;
-    const boxPaddingX = Math.max(0, previewStyle.boxPaddingX ?? 10) * previewScale;
-    const boxPaddingY = Math.max(0, previewStyle.boxPaddingY ?? 4) * previewScale;
-    const boxBorderWidth = Math.max(0, previewStyle.boxBorderWidth ?? 0) * previewScale;
-    return {
-      fontFamily: previewStyle.fontFamily,
-      fontSize: `${Math.max(previewStyle.fontSize * previewScale, 10)}px`,
-      color: previewStyle.textColor,
-      fontWeight: previewStyle.bold === true ? 700 : 400,
-      fontStyle: previewStyle.italic === true ? "italic" : "normal",
-      WebkitTextFillColor: previewStyle.textColor,
-    WebkitTextStroke:
-      outlineWidth > 0
-        ? `${outlineWidth}px ${previewStyle.outlineColor}`
-        : "0 transparent",
-    paintOrder: "stroke fill",
-    background:
-      previewStyle.background === "box"
-        ? `${boxColor}${Math.round(boxOpacity * 255)
-            .toString(16)
-            .padStart(2, "0")}`
-        : "transparent",
-    padding: previewStyle.background === "box"
-      ? `${boxPaddingY}px ${boxPaddingX}px`
-      : "0",
-    border: previewStyle.background === "box" && boxBorderWidth > 0
-      ? `${boxBorderWidth}px solid ${previewStyle.boxBorderColor ?? "#ffffff"}`
-      : "0 solid transparent",
-    };
+    return subtitleTextCss(previewStyle, previewScale, 10);
   };
 
   const cuePosition = (cue: SubtitleCue, previewStyle: SubtitleStyle): SubtitlePosition => {
     if (subtitleDrag?.cueId === cue.id && draftSubtitlePosition) return draftSubtitlePosition;
-    if (cue.screenPosition) return { x: cue.screenPosition.xPercent, y: cue.screenPosition.yPercent };
+    if (cue.sourceKind === "onscreen-text" && cue.screenPosition) return { x: cue.screenPosition.xPercent, y: cue.screenPosition.yPercent };
     const defaultSubtitleY = previewStyle.position === "top" ? 12 : previewStyle.position === "middle" ? 50 : previewStyle.position === "custom" ? (previewStyle.customY ?? 82) : 82;
     return { x: previewStyle.position === "custom" ? (previewStyle.customX ?? 50) : 50, y: defaultSubtitleY };
   };
+  const previewLogo = logo && draftLogoPatch ? { ...logo, ...draftLogoPatch } : logo;
 
   const aspectRatio =
     effectiveVideoEdit.aspectRatio === "original"
@@ -1169,6 +1283,7 @@ export function VideoPlayer({
                           effectiveVideoEdit.trimEndMs &&
                           next >= effectiveVideoEdit.trimEndMs
                         ) {
+                          playIntentRef.current = false;
                           event.currentTarget.pause();
                           dubAudioRef.current?.pause();
                           setPlaying(false);
@@ -1178,6 +1293,12 @@ export function VideoPlayer({
                         reportTime(next);
                       }}
                       onPlaying={(event) => {
+                        if (!playIntentRef.current) {
+                          event.currentTarget.pause();
+                          dubAudioRef.current?.pause();
+                          setPlaying(false);
+                          return;
+                        }
                         setPlaying(true);
                         event.currentTarget.playbackRate = playbackRateAt(event.currentTarget.currentTime * 1000);
                         const audio = dubAudioRef.current;
@@ -1192,17 +1313,19 @@ export function VideoPlayer({
                       onSeeking={() => dubAudioRef.current?.pause()}
                       onSeeked={(event) => {
                         const audio = dubAudioRef.current;
-                        if (!playingDub || !audio) return;
+                        if (!playIntentRef.current || !playingDub || !audio) return;
                         audio.currentTime = sourceToTimelineMs(event.currentTarget.currentTime * 1000) / 1000;
                         if (!event.currentTarget.paused)
                           void audio.play().catch(() => undefined);
                       }}
                       onRateChange={() => { if (dubAudioRef.current) dubAudioRef.current.playbackRate = 1; }}
                       onPause={() => {
+                        playIntentRef.current = false;
                         dubAudioRef.current?.pause();
                         setPlaying(false);
                       }}
                       onEnded={() => {
+                        playIntentRef.current = false;
                         dubAudioRef.current?.pause();
                         setPlaying(false);
                       }}
@@ -1216,47 +1339,54 @@ export function VideoPlayer({
                   <small>Thêm video ở Trích xuất hoặc Editor</small>
                 </div>
               )}
-              {asset && logo?.enabled && (
-                <>
-                  {logo.kind === "image" && logo.url ? (
+              {asset && previewLogo?.enabled && (
+                <div
+                  className={`logo-overlay logo-preview-control ${logoDrag ? "resizing" : ""}`}
+                  onPointerDown={(event) => beginLogoDrag(event)}
+                  style={{
+                    left: `${previewLogo.xPercent}%`,
+                    top: `${previewLogo.yPercent}%`,
+                    width: previewLogo.kind === "image" ? `${previewLogo.widthPercent}%` : "max-content",
+                    opacity: previewLogo.opacity,
+                    pointerEvents: "auto",
+                    cursor: logoDrag ? "grabbing" : "grab",
+                  }}
+                >
+                  {previewLogo.kind === "image" && previewLogo.url ? (
                     <img
-                      className="logo-overlay"
-                      src={logo.url}
-                      alt={logo.name}
+                      className="logo-overlay-media"
+                      src={previewLogo.url}
+                      alt={previewLogo.name}
                       draggable={false}
-                      onPointerDown={beginLogoDrag}
-                      style={{
-                        left: `${logo.xPercent}%`,
-                        top: `${logo.yPercent}%`,
-                        width: `${logo.widthPercent}%`,
-                        opacity: logo.opacity,
-                        pointerEvents: "auto",
-                        cursor: logoDrag ? "grabbing" : "grab",
-                      }}
                     />
                   ) : (
-                    logo.kind === "text" && (
-                      <div
-                        className="logo-overlay logo-text-overlay"
-                        onPointerDown={beginLogoDrag}
+                    previewLogo.kind === "text" && (
+                      <span
+                        className="logo-text-overlay"
                         style={{
-                          left: `${logo.xPercent}%`,
-                          top: `${logo.yPercent}%`,
-                          width: `${logo.widthPercent}%`,
-                          opacity: logo.opacity,
-                          color: logo.textColor,
-                          fontFamily: logo.fontFamily,
-                          fontSize: `${logo.fontSize}px`,
-                          textShadow: `1px 1px 0 ${logo.outlineColor}, -1px -1px 0 ${logo.outlineColor}`,
-                          pointerEvents: "auto",
-                          cursor: logoDrag ? "grabbing" : "grab",
+                          color: previewLogo.textColor,
+                          WebkitTextFillColor: previewLogo.textColor,
+                          WebkitTextStroke: `${Math.max(0.45, 2 * (previewLogo.widthPercent / 18) * previewScale)}px ${previewLogo.outlineColor}`,
+                          paintOrder: "stroke fill",
+                          fontFamily: `"${previewLogo.fontFamily.replace(/"/g, "")}", sans-serif`,
+                          fontSize: `${Math.max(8, previewLogo.fontSize * (previewLogo.widthPercent / 18) * previewScale)}px`,
+                          textShadow: "none",
                         }}
                       >
-                        {logo.text}
-                      </div>
+                        {previewLogo.text}
+                      </span>
                     )
                   )}
-                </>
+                  {TEXT_RESIZE_HANDLES.map((handle) => (
+                    <button
+                      key={handle}
+                      type="button"
+                      className={`resize-handle logo-resize-handle ${handle}`}
+                      aria-label={`Resize logo ${handle}`}
+                      onPointerDown={(event) => beginLogoDrag(event, handle)}
+                    />
+                  ))}
+                </div>
               )}
               {asset && activeCues.map((cue) => {
                 const previewStyle = cueStyle(cue);
@@ -1284,12 +1414,22 @@ export function VideoPlayer({
                     {selectedCueId === cue.id && (
                       <button
                         type="button"
-                        className="subtitle-scale-handle"
+                        className="resize-handle subtitle-scale-handle se"
                         aria-label="Kéo để thay đổi cỡ chữ"
                         title="Kéo để phóng to / thu nhỏ chữ"
-                        onPointerDown={(event) => beginSubtitleScale(event, cue, previewStyle.fontSize)}
+                        onPointerDown={(event) => beginSubtitleScale(event, cue, previewStyle.fontSize, "se")}
                       />
                     )}
+                    {selectedCueId === cue.id && TEXT_RESIZE_HANDLES.filter((handle) => handle !== "se").map((handle) => (
+                      <button
+                        key={handle}
+                        type="button"
+                        className={`resize-handle subtitle-scale-handle ${handle}`}
+                        aria-label={`Resize subtitle ${handle}`}
+                        title="Kéo để phóng to / thu nhỏ chữ"
+                        onPointerDown={(event) => beginSubtitleScale(event, cue, previewStyle.fontSize, handle)}
+                      />
+                    ))}
                   </div>
                 );
               })}
@@ -1297,44 +1437,26 @@ export function VideoPlayer({
                 const previewRegion =
                   draftBlurRegion?.id === region.id ? draftBlurRegion : region;
                 const selectedBlur = activeBlurId === region.id;
+                const draggingBlur = blurDrag?.origin.id === region.id;
                 return (
                   <div
                     key={region.id}
-                    className={`blur-overlay ${blurEditMode ? (selectedBlur ? "blur-overlay-editable selected" : "blur-overlay-selectable") : ""}`}
+                    className={`blur-overlay ${draggingBlur ? "is-dragging" : ""} ${blurEditMode ? (selectedBlur ? "blur-overlay-editable selected" : "blur-overlay-selectable") : ""}`}
                     style={blurRegionPreviewStyle(previewRegion, previewScale)}
                     onPointerDown={(event) =>
                       beginBlurDrag(event, previewRegion, "move")
                     }
                   >
                     <span>{selectedBlur ? `BLUR ${index + 1}` : ""}</span>
-                    {selectedBlur && (
-                      <>
-                        <i
-                          className="roi-handle nw"
-                          onPointerDown={(event) =>
-                            beginBlurDrag(event, previewRegion, "nw")
-                          }
-                        />
-                        <i
-                          className="roi-handle ne"
-                          onPointerDown={(event) =>
-                            beginBlurDrag(event, previewRegion, "ne")
-                          }
-                        />
-                        <i
-                          className="roi-handle sw"
-                          onPointerDown={(event) =>
-                            beginBlurDrag(event, previewRegion, "sw")
-                          }
-                        />
-                        <i
-                          className="roi-handle se"
-                          onPointerDown={(event) =>
-                            beginBlurDrag(event, previewRegion, "se")
-                          }
-                        />
-                      </>
-                    )}
+                    {selectedBlur && RECT_RESIZE_HANDLES.map((handle) => (
+                      <i
+                        key={handle}
+                        className={`roi-handle ${handle}`}
+                        onPointerDown={(event) =>
+                          beginBlurDrag(event, previewRegion, handle)
+                        }
+                      />
+                    ))}
                   </div>
                 );
               })}
@@ -1350,22 +1472,13 @@ export function VideoPlayer({
                   onPointerDown={(event) => beginRoiDrag(event, "move")}
                 >
                   <span>OCR REGION</span>
-                  <i
-                    className="roi-handle nw"
-                    onPointerDown={(event) => beginRoiDrag(event, "nw")}
-                  />
-                  <i
-                    className="roi-handle ne"
-                    onPointerDown={(event) => beginRoiDrag(event, "ne")}
-                  />
-                  <i
-                    className="roi-handle sw"
-                    onPointerDown={(event) => beginRoiDrag(event, "sw")}
-                  />
-                  <i
-                    className="roi-handle se"
-                    onPointerDown={(event) => beginRoiDrag(event, "se")}
-                  />
+                  {RECT_RESIZE_HANDLES.map((handle) => (
+                    <i
+                      key={handle}
+                      className={`roi-handle ${handle}`}
+                      onPointerDown={(event) => beginRoiDrag(event, handle)}
+                    />
+                  ))}
                 </div>
               )}
               {alignmentGuides.x && (

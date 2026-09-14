@@ -24,7 +24,7 @@ function loadVoiceBookmarks() {
   } catch { return []; }
 }
 
-export function DubbingModal({ open, providers, assignments, availableAssignments, cues, pronunciation, sourceVideoReady = false, sourceVideoUploading = false, onClose, onPronunciationChange, onRun, onNotice, job, onJobAction }: { open: boolean; providers: AIProvider[]; assignments: Record<VoiceGroup, ProviderAssignment>; availableAssignments: ProviderAssignment[]; cues: SubtitleCue[]; pronunciation: PronunciationEntry[]; sourceVideoReady?: boolean; sourceVideoUploading?: boolean; onClose: () => void; onPronunciationChange: (entries: PronunciationEntry[]) => void; onRun: (configs: Record<VoiceGroup, VoiceConfig>, options: DubbingRunOptions) => void; onNotice?: (message: string, kind?: 'success' | 'error') => void; job?: DubbingJobStatus; onJobAction?: (action: 'pause' | 'resume' | 'cancel' | 'retry-failed' | 'rebuild') => void }) {
+export function DubbingModal({ open, providers, assignments, availableAssignments, cues, pronunciation, sourceVideoReady = false, sourceVideoUploading = false, initialSourceAudioMode = 'mute', onClose, onPronunciationChange, onRun, onNotice, job, onJobAction }: { open: boolean; providers: AIProvider[]; assignments: Record<VoiceGroup, ProviderAssignment>; availableAssignments: ProviderAssignment[]; cues: SubtitleCue[]; pronunciation: PronunciationEntry[]; sourceVideoReady?: boolean; sourceVideoUploading?: boolean; initialSourceAudioMode?: OriginalAudioMode; onClose: () => void; onPronunciationChange: (entries: PronunciationEntry[]) => void; onRun: (configs: Record<VoiceGroup, VoiceConfig>, options: DubbingRunOptions) => void; onNotice?: (message: string, kind?: 'success' | 'error') => void; job?: DubbingJobStatus; onJobAction?: (action: 'pause' | 'resume' | 'cancel' | 'retry-failed' | 'rebuild') => void }) {
   const [active, setActive] = useState<VoiceGroup>('G1');
   const [mode, setMode] = useState<'voices' | 'dictionary'>('voices');
   const [testing, setTesting] = useState(false);
@@ -95,6 +95,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   useEffect(() => () => stopPreview(), [stopPreview]);
   useEffect(() => {
     if (!open) return;
+    setSourceAudioMode(initialSourceAudioMode);
     setConfigs((currentConfigs) => Object.fromEntries(groups.map((group) => {
       const currentConfig = currentConfigs[group];
       const fallback = assignments[group];
@@ -104,7 +105,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
       const voice = selectedProvider && resolvedProviderType(selectedProvider) === 'hiiu-tts' ? assignment.model : currentConfig.voice;
       return [group, { ...currentConfig, assignment, voice }];
     })) as Record<VoiceGroup, VoiceConfig>);
-  }, [open]);
+  }, [open, initialSourceAudioMode]);
   useEffect(() => { setVoiceOpen(false); setVoiceQuery(''); }, [active, current.assignment.providerId]);
   useEffect(() => {
     if (!open) return;

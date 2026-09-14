@@ -7,6 +7,7 @@ import { chat, ProviderError, synthesize } from '../adapters';
 import { run, workdir } from './ffmpeg';
 import { resolveUpload } from './uploads';
 import { DUB_MASTERING_VERSION, masterDubFile } from './audioMastering';
+import { verbalizeOcrSymbols } from './subtitles';
 
 export type TimingMode = 'natural' | 'strict';
 export type CueStatus = 'pending' | 'translating' | 'rewriting' | 'tts' | 'fitting' | 'done' | 'failed';
@@ -128,6 +129,31 @@ interface CreateJobInput {
   rewrite?: { provider?: AIProvider; model?: string };
 }
 
+export function collapseRepeatedOcrDubbingCues(cues: DubbingCueInput[]) {
+  const output: DubbingCueInput[] = [];
+  for (const cue of cues) {
+    const previous = output.at(-1);
+    const sameOcrLine = Boolean(previous)
+      && previous!.id.startsWith('ocr-')
+      && cue.id.startsWith('ocr-')
+      && previous!.text.normalize('NFC').replace(/\s+/g, ' ').trim() === cue.text.normalize('NFC').replace(/\s+/g, ' ').trim()
+      && previous!.provider.id === cue.provider.id
+      && previous!.model === cue.model
+      && previous!.voice === cue.voice
+      && cue.startMs - previous!.endMs <= 750;
+    if (!sameOcrLine) {
+      output.push(cue);
+      continue;
+    }
+    output[output.length - 1] = {
+      ...previous!,
+      endMs: Math.max(previous!.endMs, cue.endMs),
+      nextText: cue.nextText,
+    };
+  }
+  return output;
+}
+
 const jobsRoot = path.join(workdir, 'jobs');
 const DEFAULTS = {
   maxCueExtensionPercent: 0.15,
@@ -141,11 +167,11 @@ const DEFAULTS = {
   // entire speech block sound rushed. Rewriting is optional and falls back to
   // bounded time-stretch when no Translation provider is configured.
   rewriteTriggerSpeed: 1.15,
-  // Automatic fitting must stay subtle. If a line still does not fit at
-  // 1.12x, keep it intact and let the following cue move later instead of
-  // creating an obviously rushed voice.
-  hardSpeedMax: 1.12,
-  pressuredSpeedMax: 1.12,
+  // Keep dialogue aligned with the source before allowing delay to accumulate.
+  // 1.25x remains inside FFmpeg atempo's clean single-filter range and is only
+  // used for cues whose generated speech cannot finish at the original pace.
+  hardSpeedMax: 1.25,
+  pressuredSpeedMax: 1.25,
   // This is the speed explicitly selected by the user in the voice panel;
   // unlike automatic fitting it may intentionally be faster.
   maxProviderSpeed: 1.2,
@@ -175,7 +201,7 @@ const DEFAULTS = {
 // those files would hide the voice-clone quality upgrade on existing jobs.
 const TTS_CACHE_VERSION = 'tts-v12-vieneu-official-speaker-encoder';
 const SPEECH_PREP_VERSION = 'speech-v3-pop-free-edges';
-export const ADAPTIVE_FIT_VERSION = 13;
+export const ADAPTIVE_FIT_VERSION = 15;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const now = () => new Date().toISOString();
@@ -308,7 +334,10 @@ export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: numb
   const localTempos = ordered.map((item, index) => {
     const next = ordered[index + 1];
     const sourceDurationMs = Math.max(1, item.endMs - item.startMs);
-    const configuredDurationMs = Math.max(sourceDurationMs, item.targetDurationMs || sourceDurationMs);
+    // Match the source speech window first. The former planner treated the
+    // following silence as free duration, so 1.00x clips routinely finished
+    // after the original actor and made every later cue increasingly late.
+    const configuredDurationMs = sourceDurationMs;
     let availableDurationMs = configuredDurationMs;
     if (next) {
       const sourceGapMs = Math.max(0, next.startMs - item.endMs);
@@ -666,6 +695,7 @@ async function ensurePreparedSpeech(rawPath: string, speechPath: string, signal:
 export async function createDubbingJob(input: CreateJobInput) {
   if (!input.cues?.length) throw new Error('Chưa có cue nào để tạo dubbing job.');
   if (input.slowVideoToMatchSpeech && input.audioMix?.separateVocals) throw new Error('Chế độ video chậm theo cue chưa hỗ trợ tách nhạc nền. Hãy giữ toàn bộ audio gốc hoặc tắt audio gốc.');
+  const normalizedCues = collapseRepeatedOcrDubbingCues(input.cues);
   const id = `dub-${Date.now()}-${createHash('sha1').update(`${Math.random()}-${Date.now()}`).digest('hex').slice(0, 8)}`;
   const rewriteProvider = input.rewrite?.provider;
   const rewriteModel = input.rewrite?.model?.trim();
@@ -673,7 +703,7 @@ export async function createDubbingJob(input: CreateJobInput) {
   const config: DubbingJobConfig = {
     timingMode: input.timingMode === 'strict' ? 'strict' : 'natural',
     batchSize: clamp(Math.round(input.batchSize || DEFAULTS.batchSize), 1, 100),
-    ttsConcurrency: effectiveTtsConcurrency(input.cues, input.ttsConcurrency),
+    ttsConcurrency: effectiveTtsConcurrency(normalizedCues, input.ttsConcurrency),
     llmConcurrency: clamp(Math.round(input.llmConcurrency || DEFAULTS.llmConcurrency), 1, 8),
     maxRetries: clamp(Math.round(input.maxRetries ?? DEFAULTS.maxRetries), 0, 3),
     slowVideoToMatchSpeech: input.slowVideoToMatchSpeech === true,
@@ -683,7 +713,7 @@ export async function createDubbingJob(input: CreateJobInput) {
   const providers = new Map<string, AIProvider>();
   if (rewriteProviderRef && rewriteProvider) providers.set(rewriteProviderRef, rewriteProvider);
   const storedCues: StoredCue[] = [];
-  for (const [index, cue] of input.cues.entries()) {
+  for (const [index, cue] of normalizedCues.entries()) {
     if (!cue.id || !cue.provider?.baseUrl || !cue.model || !cue.voice || !cue.text?.trim()) throw new Error(`Cue ${index + 1} is missing provider, model, voice, or text.`);
     const ref = providerReference(cue.provider);
     providers.set(ref, cue.provider);
@@ -816,7 +846,10 @@ class DubbingRunner {
       : undefined;
     const timing = timingFor(allCues, cue, this.job.config.timingMode);
     await this.setCueStatus(cue, 'translating', { error: undefined });
-    let finalText = cue.input.text.trim();
+    // Existing subtitle jobs may still contain raw OCR digits/operators. TTS
+    // must receive spoken Vietnamese, not depend on each provider guessing how
+    // to pronounce symbols and numbers.
+    let finalText = verbalizeOcrSymbols(cue.input.text.trim(), 'vi');
     let rewriteAttempts = 0;
     let ttsDurationMs = 0;
     let requiredSpeed = 1;

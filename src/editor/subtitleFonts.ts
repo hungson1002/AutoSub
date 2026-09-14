@@ -1,4 +1,8 @@
 export const subtitleFonts = [
+  'Montserrat',
+  'Be Vietnam Pro',
+  'Anton',
+  'Bangers',
   'Arial',
   'Arial Black',
   'Arial Narrow',
@@ -54,3 +58,10 @@ export const subtitleFonts = [
   'Yu Gothic',
   'Yu Gothic UI',
 ] as const;
+
+export const bundledSubtitleFonts: Record<string, string> = {
+  Montserrat: 'Montserrat-Variable.ttf',
+  'Be Vietnam Pro': 'BeVietnamPro-Regular.ttf',
+  Anton: 'Anton-Regular.ttf',
+  Bangers: 'Bangers-Regular.ttf',
+};

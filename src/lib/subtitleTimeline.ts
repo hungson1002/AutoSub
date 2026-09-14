@@ -24,7 +24,7 @@ const STYLE_KEYS: Record<Exclude<CuePropertyGroup, "all" | "position">, Array<ke
   typography: ["fontFamily", "bold", "italic"],
   size: ["fontSize"],
   color: ["textColor"],
-  frame: ["background", "outlineColor", "outlineWidth", "backgroundColor", "backgroundOpacity", "boxPaddingX", "boxPaddingY", "boxBorderColor", "boxBorderWidth"],
+  frame: ["background", "outlineColor", "outlineWidth", "backgroundColor", "backgroundOpacity", "boxPaddingX", "boxPaddingY", "boxBorderColor", "boxBorderWidth", "boxBorderRadius"],
 };
 
 function pickStyle(style: Partial<SubtitleStyle>, keys: Array<keyof SubtitleStyle>) {

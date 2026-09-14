@@ -30,9 +30,36 @@ for (const failure of ['NO_FLOW_KEY', 'Request had invalid authentication creden
     await generateGoogleFlowImage('An educational illustration', output);
     assert.equal(generations, 2);
     assert.equal(refreshes, 1);
-    assert.equal(keys[0], keys[1]);
+    assert.notEqual(keys[0], keys[1]);
     await rm(directory, { recursive: true, force: true });
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test('browser Failed to fetch refreshes the current Flow session and retries the image once', async () => {
+  const originalFetch = globalThis.fetch;
+  let generations = 0;
+  let refreshes = 0;
+  const keys: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
+    if (url.endsWith('/v1/credits')) return Response.json({ clients: [{ client_id: 'opera-session', ok: true }] });
+    if (url.endsWith('/v1/refresh-tokens')) { refreshes += 1; return Response.json({ nudged: 1 }); }
+    generations += 1;
+    keys.push(String((init?.headers as Record<string, string>)?.['Idempotency-Key'] || ''));
+    if (generations === 1) return new Response(JSON.stringify({ detail: 'Failed to fetch' }), { status: 400 });
+    return Response.json({ data: [{ b64_json: Buffer.alloc(128, 7).toString('base64') }] });
+  };
+  const directory = await mkdtemp(path.join(tmpdir(), 'autosub-flow-fetch-recovery-'));
+  try {
+    await generateGoogleFlowImage('A connected educational illustration', path.join(directory, 'asset.png'));
+    assert.equal(generations, 2);
+    assert.equal(refreshes, 1);
+    assert.notEqual(keys[0], keys[1]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('missing captcha script preserves the session and does not retry generation', async () => {
@@ -171,7 +198,7 @@ test('video generation refreshes a lost Flow key once before succeeding', async 
     await generateGoogleFlowVideo('Duration: 4 seconds', output);
     assert.equal(generations, 2);
     assert.equal(refreshes, 1);
-    assert.equal(keys[0], keys[1]);
+    assert.notEqual(keys[0], keys[1]);
     assert.equal((await readFile(output)).length, mp4.length);
   } finally {
     globalThis.fetch = originalFetch;

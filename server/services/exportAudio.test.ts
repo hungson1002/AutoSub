@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { assertDubbingSourceDuration, buildExportAudioFilter, buildRetimedSourceAudioFilter, retimedDurationMs } from './exportAudio';
+import { assertDubbingSourceDuration, buildExportAudioFilter, buildRetimedSourceAudioFilter, retimedDurationMs, retimedTimeMs } from './exportAudio';
 
 test('retiming follows processed audio duration used by the dubbing planner', () => {
   assert.equal(retimedDurationMs(10000, [{ originalDurationMs: 1000, ttsDurationMs: 3000, finalAudioDurationMs: 1500, timelineStartMs: 1000 }]), 10500);
@@ -22,6 +22,16 @@ test('duration excludes cues beyond the actual source and clips a crossing cue',
   ]), 10_000);
 });
 
+test('retimed timeline maps later overlay times after slowed cue windows', () => {
+  const metadata = [
+    { originalDurationMs: 1_000, ttsDurationMs: 2_000, timelineStartMs: 1_000, timelineShiftMs: 0 },
+  ];
+
+  assert.equal(retimedTimeMs(500, metadata), 500);
+  assert.equal(retimedTimeMs(1_500, metadata), 2_000);
+  assert.equal(retimedTimeMs(3_000, metadata), 4_000);
+});
+
 test('an already mixed dubbing job is the only audio source during export', () => {
   const filter = buildExportAudioFilter({
     hasDub: true,
@@ -36,8 +46,7 @@ test('an already mixed dubbing job is the only audio source during export', () =
   assert.doesNotMatch(filter, /amix=/);
   assert.match(filter, /alimiter=limit=0\.891:level=false/);
   assert.doesNotMatch(filter, /loudnorm=/);
-  assert.match(filter, /aresample=48000/);
-  assert.match(filter, /apad\[audioout\]$/);
+  assert.match(filter, /apad,aresample=48000:async=1:first_pts=0,asetpts=N\/SR\/TB\[audioout\]$/);
 });
 
 test('retimed original audio slows only long cue segments and concatenates the full source', () => {
@@ -49,12 +58,13 @@ test('retimed original audio slows only long cue segments and concatenates the f
   assert.doesNotMatch(filter, /asplit|atrim/);
   assert.match(filter, /atempo=0\.666667/);
   assert.match(filter, /concat=n=3:v=0:a=1\[retimedOriginal\]$/);
+  assert.match(filter, /aresample=48000:async=1:first_pts=0,asetpts=N\/SR\/TB\[retimePart1\]/);
 });
 
 test('retimed original audio is unchanged when all speech fits', () => {
   assert.equal(buildRetimedSourceAudioFilter([
     { originalDurationMs: 1_000, ttsDurationMs: 900, timelineStartMs: 0, timelineShiftMs: 0 },
-  ]), '[0:a]anull[retimedOriginal]');
+  ]), '[0:a]aresample=48000:async=1:first_pts=0,asetpts=N/SR/TB[retimedOriginal]');
 });
 
 test('retimed original audio is padded or trimmed to the exact slowed-video duration', () => {
@@ -66,7 +76,7 @@ test('retimed original audio is padded or trimmed to the exact slowed-video dura
   assert.equal(target, 11_000);
   const filter = buildRetimedSourceAudioFilter(metadata, '0:a', 'retimedOriginal', target);
   assert.match(filter, /concat=n=5:v=0:a=1\[retimedOriginalJoined\]/);
-  assert.match(filter, /\[retimedOriginalJoined\]apad,atrim=end=11\.000000\[retimedOriginal\]$/);
+  assert.match(filter, /\[retimedOriginalJoined\]apad,atrim=end=11\.000000,aresample=48000:async=1:first_pts=0,asetpts=N\/SR\/TB\[retimedOriginal\]$/);
 });
 
 test('duration uses the same non-overlapping cue windows as audio and video filters', () => {
@@ -91,6 +101,7 @@ test('a voice-only dub can still be mixed with original audio once', () => {
   assert.match(filter, /\[0:a\]volume=0\.250\[original\]/);
   assert.match(filter, /amix=inputs=2:duration=longest/);
   assert.match(filter, /alimiter=limit=0\.891:level=false/);
+  assert.match(filter, /aresample=48000:async=1:first_pts=0,asetpts=N\/SR\/TB\[audioout\]$/);
   assert.doesNotMatch(filter, /loudnorm=/);
 });
 
@@ -106,4 +117,17 @@ test('export applies independent original and dubbing volume controls', () => {
   assert.match(filter, /\[0:a\]volume=0\.200\[original\]/);
   assert.match(filter, /\[1:a\]volume=0\.650,/);
   assert.match(filter, /amix=inputs=2:duration=longest/);
+});
+
+test('export audio is padded then trimmed to the exact render duration', () => {
+  const filter = buildExportAudioFilter({
+    hasDub: true,
+    dubInputIndex: 1,
+    keepAudio: true,
+    originalVolume: 0.25,
+    targetDurationMs: 1_500_000,
+  });
+
+  assert.match(filter, /amix=inputs=2:duration=longest/);
+  assert.match(filter, /apad,atrim=end=1500\.000000,aresample=48000:async=1:first_pts=0,asetpts=N\/SR\/TB\[audioout\]$/);
 });

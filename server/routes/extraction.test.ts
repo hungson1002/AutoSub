@@ -35,6 +35,15 @@ test('full-frame OCR requests every visible text block', () => {
   assert.match(prompt, /"kind":"subtitle"/i);
   assert.match(prompt, /"kind":"onscreen-text"/i);
   assert.doesNotMatch(prompt, /ignore .*scene text/i);
+  assert.match(prompt, /purpose of the text/i);
+  assert.match(prompt, /never by its screen position/i);
+  assert.match(prompt, /top, center, side/i);
+});
+
+test('subtitle-only OCR recognizes dialogue regardless of placement', () => {
+  const prompt = buildOcrPrompt('vi', false);
+  assert.match(prompt, /regardless of its screen position/i);
+  assert.match(prompt, /spoken-dialogue, narration/i);
 });
 
 test('missing extraction progress is reported as failed instead of running forever', async () => {

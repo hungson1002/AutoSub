@@ -26,11 +26,19 @@ test('long-form slow video maps timestamps continuously without segment boundary
     { originalDurationMs: 1_000, ttsDurationMs: 800, timelineStartMs: 3_500, timelineShiftMs: 500 },
     { originalDurationMs: 2_000, ttsDurationMs: 2_500, timelineStartMs: 5_500, timelineShiftMs: 500 },
   ]);
-  assert.match(filter, /clip\(\(PTS-STARTPTS\)\*TB-1\.000000,0,1\.000000\)\*0\.500000000/);
-  assert.match(filter, /clip\(\(PTS-STARTPTS\)\*TB-5\.000000,0,2\.000000\)\*0\.250000000/);
+  assert.match(filter, /clip\(\(PTS-STARTPTS\)\*TB\+0\.000000-1\.000000,0,1\.000000\)\*0\.500000000/);
+  assert.match(filter, /clip\(\(PTS-STARTPTS\)\*TB\+0\.000000-5\.000000,0,2\.000000\)\*0\.250000000/);
   assert.match(filter, /\[slowDubVideo\]$/);
   assert.doesNotMatch(filter, /segment=|concat=/);
   assert.doesNotMatch(filter, /between\(|if\(/);
+});
+
+test('slow video keeps a delayed video-stream start on the same clock as audio and cues', () => {
+  const filter = buildSlowVideoFilter('source', [
+    { originalDurationMs: 1_000, ttsDurationMs: 1_500, timelineStartMs: 1_000, timelineShiftMs: 0 },
+  ], 'slowDubVideo', '30', 0.161);
+  assert.match(filter, /setpts='PTS-STARTPTS\+0\.161000\/TB/);
+  assert.match(filter, /clip\(\(PTS-STARTPTS\)\*TB\+0\.161000-1\.000000/);
 });
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';

@@ -4,8 +4,10 @@ import { Modal } from '../components/Modal';
 import { Plus, Trash2 } from '../components/Icons';
 import { RangeInput } from '../components/RangeInput';
 
-type DragKind = 'move' | 'nw' | 'ne' | 'sw' | 'se';
+type ResizeKind = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+type DragKind = 'move' | ResizeKind;
 type Drag = { kind: DragKind; startX: number; startY: number; origin: BlurRegion };
+const RESIZE_HANDLES: ResizeKind[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -15,6 +17,34 @@ function patchRect(origin: BlurRegion, kind: DragKind, dx: number, dy: number): 
       ...origin,
       xPercent: clamp(origin.xPercent + dx, 0, 100 - origin.widthPercent),
       yPercent: clamp(origin.yPercent + dy, 0, 100 - origin.heightPercent),
+    };
+  }
+  if (kind === 'n') {
+    const y = clamp(origin.yPercent + dy, 0, origin.yPercent + origin.heightPercent - 5);
+    return {
+      ...origin,
+      yPercent: y,
+      heightPercent: origin.yPercent + origin.heightPercent - y,
+    };
+  }
+  if (kind === 'e') {
+    return {
+      ...origin,
+      widthPercent: clamp(origin.widthPercent + dx, 5, 100 - origin.xPercent),
+    };
+  }
+  if (kind === 's') {
+    return {
+      ...origin,
+      heightPercent: clamp(origin.heightPercent + dy, 5, 100 - origin.yPercent),
+    };
+  }
+  if (kind === 'w') {
+    const x = clamp(origin.xPercent + dx, 0, origin.xPercent + origin.widthPercent - 5);
+    return {
+      ...origin,
+      xPercent: x,
+      widthPercent: origin.xPercent + origin.widthPercent - x,
     };
   }
   if (kind === 'nw') {
@@ -61,13 +91,14 @@ function blurPreviewStyle(region: BlurRegion) {
     width: `${region.widthPercent}%`,
     height: `${region.heightPercent}%`,
     borderRadius: `${Math.max(0, Math.min(40, region.borderRadius ?? 0))}px`,
-    backdropFilter: `blur(${strength}px)`,
-    WebkitBackdropFilter: `blur(${strength}px)`,
+    backdropFilter: region.mode === 'inpaint' ? `blur(${Math.max(18, strength * 1.4)}px) saturate(.72)` : `blur(${strength}px)`,
+    WebkitBackdropFilter: region.mode === 'inpaint' ? `blur(${Math.max(18, strength * 1.4)}px) saturate(.72)` : `blur(${strength}px)`,
   };
 }
 
 type BlurEditorProps = {
   open: boolean;
+  initialMode?: BlurRegion['mode'];
   regions: BlurRegion[];
   asset?: VideoAsset;
   currentTimeMs?: number;
@@ -77,6 +108,7 @@ type BlurEditorProps = {
 
 export function BlurEditor({
   open,
+  initialMode = 'blur',
   regions,
   asset,
   currentTimeMs = 0,
@@ -110,7 +142,7 @@ export function BlurEditor({
       startMs: 0,
       endMs: 999999,
       wholeVideo: true,
-      mode: 'blur',
+      mode: initialMode,
       blurStrength: 24,
       borderRadius: 0,
       expandTop: 0,
@@ -142,27 +174,31 @@ export function BlurEditor({
     const next = patchRect(drag.origin, drag.kind, dx, dy);
     onChange(regions.map((region) => region.id === drag.origin.id ? next : region));
   };
-  const previewRegion = (region: BlurRegion, index: number) => (
+  const previewRegion = (region: BlurRegion, index: number) => {
+    const dragging = drag?.origin.id === region.id;
+    return (
     <div
       key={region.id}
-      className={`blur-preview-region ${selected === region.id ? 'selected' : 'selectable'}`}
+      className={`blur-preview-region ${dragging ? 'is-dragging ' : ''}${selected === region.id ? 'selected' : 'selectable'}`}
       style={blurPreviewStyle(region)}
       onPointerDown={(event) => beginDrag(event, region, 'move')}
     >
-      {selected === region.id && <span>{`BLUR ${index + 1}`}</span>}
-      {selected === region.id && <>
-        <i className="roi-handle nw" onPointerDown={(event) => beginDrag(event, region, 'nw')} />
-        <i className="roi-handle ne" onPointerDown={(event) => beginDrag(event, region, 'ne')} />
-        <i className="roi-handle sw" onPointerDown={(event) => beginDrag(event, region, 'sw')} />
-        <i className="roi-handle se" onPointerDown={(event) => beginDrag(event, region, 'se')} />
-      </>}
+      {selected === region.id && <span>{`${region.mode === 'inpaint' ? 'REPAIR' : 'BLUR'} ${index + 1}`}</span>}
+      {selected === region.id && RESIZE_HANDLES.map((handle) => (
+        <i
+          key={handle}
+          className={`roi-handle ${handle}`}
+          onPointerDown={(event) => beginDrag(event, region, handle)}
+        />
+      ))}
     </div>
-  );
+    );
+  };
 
   return <Modal
     open={open}
-    title="Làm mờ subtitle cũ"
-    eyebrow="BLUR REGION"
+    title={initialMode === 'inpaint' ? "Tái tạo vùng nền" : "Làm mờ subtitle cũ"}
+    eyebrow={initialMode === 'inpaint' ? "BACKGROUND REPAIR" : "BLUR REGION"}
     onClose={onClose}
     wide
     className="blur-modal"
@@ -193,7 +229,7 @@ export function BlurEditor({
         <div className="section-title"><span>VÙNG ĐANG CHỌN</span><b>{regions.length}</b></div>
         {regions.length === 0
           ? <div className="empty-box">
-            Chưa có vùng blur.
+            {initialMode === 'inpaint' ? 'Chưa có vùng cần tái tạo.' : 'Chưa có vùng blur.'}
             <button className="button secondary" onClick={add}>Tạo vùng đầu tiên</button>
           </div>
           : <div className="region-list">{regions.map((region, index) => (
@@ -203,7 +239,7 @@ export function BlurEditor({
               onClick={() => setSelected(region.id)}
             >
               <span><i /> Vùng {index + 1}</span>
-              <small>{region.mode === 'blur' ? 'Xóa chữ' : 'Mờ nền mạnh'}</small>
+              <small>{region.mode === 'inpaint' ? 'Tái tạo nền' : region.mode === 'blur' ? 'Xóa chữ' : 'Mờ nền mạnh'}</small>
               <Trash2
                 size={14}
                 onClick={(event) => {
@@ -219,7 +255,9 @@ export function BlurEditor({
             <div className="segmented">
               <button type="button" className={current.mode === 'blur' ? 'active' : ''} onClick={() => patch({ mode: 'blur' })}>Xóa chữ</button>
               <button type="button" className={current.mode === 'neighbor' ? 'active' : ''} onClick={() => patch({ mode: 'neighbor' })}>Mờ nền mạnh</button>
+              <button type="button" className={current.mode === 'inpaint' ? 'active' : ''} onClick={() => patch({ mode: 'inpaint' })}>Tái tạo nền</button>
             </div>
+            {current.mode === 'inpaint' && <small className="field-help">Nội suy từ bốn cạnh để che chữ/logo trên nền đơn giản. Đây không phải AI phục dựng vật thể; nền phức tạp như tay, mặt hoặc chi tiết chuyển động có thể chưa tự nhiên.</small>}
           </div>
           <div className="two-fields">
             <label className="field">
