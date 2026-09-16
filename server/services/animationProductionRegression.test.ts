@@ -47,7 +47,7 @@ test('voice scene boundaries do not overlap audio or subtitle windows', () => {
   p.scenes.push({ ...p.scenes[0], id: 'second', order: 1 });
   const ranges = buildRenderTimeline(p);
   assert.equal(ranges[1].from, ranges[0].durationInFrames);
-  assert.equal(ranges[0].transitionOutFrames, 0);
+  assert.ok(ranges[0].transitionOutFrames > 0, 'visual transition may run without changing the audio boundary');
 });
 
 test('mixed timeline retains external video scenes without overlapping their audio', () => {
@@ -105,8 +105,10 @@ test('concurrent library writes and measured TTS reruns preserve outputs without
     const input = { project: fixture(), provider, model: 'test', voice: 'test' };
     const first = await generateAnimationNarration(input);
     const second = await generateAnimationNarration({ ...input, project: first });
+    const durationLocked = await generateAnimationNarration({ ...input, project: fixture(), preservePlannedDuration: true });
     assert.equal(calls, 2);
     assert.equal(second.scenes[0].durationMs, 4000);
+    assert.equal(durationLocked.scenes[0].durationMs, 6000);
     assert.deepEqual(validateAnimationProject(second), []);
     if (second.scenes[0].renderMode !== 'composite') throw new Error('fixture');
     assert.deepEqual(second.scenes[0].layers.find((layer) => layer.captionTimings)?.captionTimings?.map((cue) => [cue.startMs, cue.endMs]), [[0, 1000], [1000, 4000]]);
@@ -116,7 +118,7 @@ test('concurrent library writes and measured TTS reruns preserve outputs without
 
 test('Director resumes the accepted plan and shares duplicate submissions', async () => {
   let calls = 0;
-  const plan = { name: 'Checkpoint integration', continuityBible: 'One consistent illustrated presenter with an immutable face, outfit, palette and story world.', segments: Array.from({ length: 4 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân dẫn đến kết quả.', visualBeats: [{ purpose: 'explain', narrationCue: 'Đây là nguyên nhân dẫn đến kết quả.', visual: 'The same presenter demonstrates the concrete cause and its visible result in one coherent story scene.', motion: 'locked', transition: 'crossfade' }], motionGraphic: 'none' })) };
+  const plan = { name: 'Checkpoint integration', continuityBible: 'One consistent illustrated presenter with an immutable face, outfit, palette and story world.', segments: Array.from({ length: 7 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân, và đây là kết quả được giải thích rõ ràng.', visualBeats: Array.from({ length: i < 6 ? 2 : 1 }, (_, beat) => ({ purpose: 'explain', narrationCue: beat ? 'đây là kết quả' : 'Đây là nguyên nhân', visual: beat ? 'The same presenter points to the concrete visible result.' : 'The same presenter demonstrates the concrete cause.', motion: 'locked', transition: 'crossfade' })), motionGraphic: 'none' })) };
   const server = createServer(async (req, res) => {
     for await (const _chunk of req) { /* drain */ }
     calls++;

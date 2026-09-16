@@ -1,6 +1,8 @@
 export const ANIMATION_PROJECT_VERSION = 1 as const;
 
 export type AnimationRenderMode = 'composite' | 'generated-video';
+export type SceneTransitionType = 'cut' | 'crossfade' | 'fade-black' | 'slide-left' | 'slide-right' | 'slide-up' | 'zoom' | 'wipe-left';
+export interface SceneTransition { type: SceneTransitionType; durationMs: number }
 export type AssetType = 'character' | 'sprite' | 'background' | 'object' | 'icon' | 'image' | 'audio' | 'effect';
 export type LayerType = 'image' | 'sprite' | 'text' | 'shape' | 'diagram' | 'chart' | 'particle' | 'audio';
 export type Easing = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out';
@@ -99,6 +101,8 @@ interface SceneBase {
   durationMs: number;
   narration: string;
   order: number;
+  /** Visual-only transition into this scene. Audio always keeps its exact scene timing. */
+  transition?: SceneTransition;
 }
 
 export interface CompositeScene extends SceneBase {
@@ -212,6 +216,7 @@ const commandTypes = new Set<AnimationCommandType>([
 const assetTypes = new Set<AssetType>(['character', 'sprite', 'background', 'object', 'icon', 'image', 'audio', 'effect']);
 const layerTypes = new Set<LayerType>(['image', 'sprite', 'text', 'shape', 'diagram', 'chart', 'particle', 'audio']);
 const productionTechniques = new Set<AnimationProductionTechnique>(['image-camera', 'object-composite', 'diagram', 'sprite', 'rig', 'generated-video', 'hold']);
+const sceneTransitionTypes = new Set<SceneTransitionType>(['cut', 'crossfade', 'fade-black', 'slide-left', 'slide-right', 'slide-up', 'zoom', 'wipe-left']);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
@@ -293,6 +298,13 @@ export function validateAnimationProject(value: unknown): ValidationIssue[] {
     if (!isNonEmptyString(raw.name)) issues.push({ path: `${path}.name`, message: 'Scene name is required.' });
     if (!isFiniteNumber(raw.durationMs) || raw.durationMs < 1) issues.push({ path: `${path}.durationMs`, message: 'Scene duration must be positive.' });
     if (!isFiniteNumber(raw.order) || raw.order < 0) issues.push({ path: `${path}.order`, message: 'Scene order must be zero or greater.' });
+    if (raw.transition !== undefined) {
+      if (!isRecord(raw.transition)) issues.push({ path: `${path}.transition`, message: 'Scene transition must be an object.' });
+      else {
+        if (!isNonEmptyString(raw.transition.type) || !sceneTransitionTypes.has(raw.transition.type as SceneTransitionType)) issues.push({ path: `${path}.transition.type`, message: 'Unknown scene transition.' });
+        if (!isFiniteNumber(raw.transition.durationMs) || raw.transition.durationMs < 0 || raw.transition.durationMs > 2000) issues.push({ path: `${path}.transition.durationMs`, message: 'Transition duration must be between 0 and 2000 ms.' });
+      }
+    }
     if (raw.renderMode === 'generated-video') {
       if (typeof raw.prompt !== 'string') issues.push({ path: `${path}.prompt`, message: 'Generated video prompt must be a string.' });
       return;

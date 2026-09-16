@@ -18,6 +18,21 @@
 .animation-file-menu { position: relative; }
 .animation-file-menu summary { display: flex; gap: 5px; align-items: center; padding: 10px; cursor: pointer; color: #acb8c7; font-size: 12px; list-style: none; }
 .animation-file-menu > div { position: absolute; right: 0; top: 100%; z-index: 90; display: grid; padding: 6px; min-width: 130px; border: 1px solid var(--studio-line); border-radius: 8px; background: var(--studio-panel); }
+.animation-project-menu { position: relative; }
+.animation-project-browser { position: absolute; top: calc(100% + 8px); right: 0; z-index: 120; display: grid; width: min(440px, calc(100vw - 24px)); max-height: min(560px, calc(100dvh - 92px)); overflow: hidden; border: 1px solid #394655; border-radius: 10px; background: #111923; box-shadow: 0 18px 55px rgba(0,0,0,.5); }
+.animation-project-browser-head { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--studio-line); color: #edf2f7; }
+.animation-project-browser-head button, .animation-project-browser-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; border: 1px solid var(--studio-line); border-radius: 6px; background: #17212c; color: #cbd5df; cursor: pointer; }
+.animation-project-browser-head button { width: 34px; border: 0; background: transparent; }
+.animation-project-browser-actions { display: flex; gap: 7px; padding: 10px; border-bottom: 1px solid var(--studio-line); }
+.animation-project-browser-actions button { padding: 0 10px; }
+.animation-project-browser-actions button:last-child { width: 34px; padding: 0; margin-left: auto; }
+.animation-project-list { display: grid; gap: 6px; min-height: 92px; padding: 10px; overflow: auto; }
+.animation-project-list > span { padding: 24px 10px; color: #9ba8b7; text-align: center; }
+.animation-project-list > button { position: relative; display: grid; gap: 5px; min-width: 0; padding: 11px 82px 11px 12px; border: 1px solid var(--studio-line); border-radius: 7px; background: #131d27; color: #e3e9ef; cursor: pointer; text-align: left; }
+.animation-project-list > button:hover, .animation-project-list > button.active { border-color: #d77b44; background: #1e211f; }
+.animation-project-list strong, .animation-project-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.animation-project-list small { color: #98a7b7; font-size: 11px; }
+.animation-project-list em { position: absolute; top: 50%; right: 12px; translate: 0 -50%; color: #72d6a6; font-size: 10px; font-style: normal; }
 .animation-setup-panel { grid-column: 1; grid-row: 2 / 4; min-width: 0; overflow: auto; border-right: 1px solid var(--studio-line); background: var(--studio-panel); scrollbar-width: thin; scrollbar-color: #3b4654 transparent; }
 .animation-setup-panel[hidden], .animation-detail-timeline[hidden] { display: none; }
 .studio-preview-first .animation-director-bar { display: flex; flex-direction: column; align-items: stretch; gap: 18px; padding: 20px 16px; background: transparent; }
@@ -40,12 +55,25 @@
 .animation-character-upload { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 58px; border: 1px dashed #465363; border-radius: 7px; color: #b8c3cf; cursor: pointer; font-size: 12px; }
 .animation-character-upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .animation-character-reference { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; color: #dce4ec; font-size: 12px; }
-.animation-character-reference img { width: 52px; height: 52px; border-radius: 6px; object-fit: cover; background: #0d131a; }
+.animation-character-reference > button { width: 52px; height: 52px; padding: 0; overflow: hidden; border: 1px solid #445160; border-radius: 6px; background: #0d131a; cursor: zoom-in; }
+.animation-character-reference img { width: 100%; height: 100%; object-fit: cover; }
+.animation-character-reference span { display: grid; gap: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.animation-character-reference b { color: #ffad7a; font-size: 10px; font-weight: 650; text-transform: uppercase; }
 .animation-character-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.animation-character-options button { display: grid; gap: 5px; min-width: 0; padding: 5px; border: 1px solid var(--studio-line); border-radius: 7px; background: #101821; color: #cbd5df; cursor: pointer; text-align: left; }
-.animation-character-options button:hover, .animation-character-options button[aria-checked="true"] { border-color: #ff8a45; box-shadow: 0 0 0 1px rgba(255,138,69,.22); }
+.animation-character-options article { display: grid; gap: 5px; min-width: 0; padding: 5px; border: 1px solid var(--studio-line); border-radius: 7px; background: #101821; }
+.animation-character-options article:hover, .animation-character-options article.selected { border-color: #ff8a45; box-shadow: 0 0 0 1px rgba(255,138,69,.22); }
+.animation-character-thumb { display: grid; gap: 5px; min-width: 0; padding: 0; border: 0; background: transparent; color: #cbd5df; cursor: zoom-in; text-align: left; }
 .animation-character-options img { width: 100%; aspect-ratio: 1; border-radius: 4px; object-fit: cover; background: #0b1118; }
 .animation-character-options span { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.animation-character-select { min-height: 30px; border: 1px solid #3b4857; border-radius: 5px; background: #17222d; color: #bcc8d4; cursor: pointer; font-size: 11px; }
+.animation-character-select[aria-checked="true"] { border-color: #ff8a45; background: #54301f; color: #ffe0cc; }
+.animation-character-regenerate { justify-self: start; border: 0; background: transparent; color: #aab7c5; cursor: pointer; font-size: 11px; }
+.animation-character-preview-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(3,7,12,.82); }
+.animation-character-preview-dialog { display: grid; gap: 12px; width: min(680px, 92vw); max-height: 92dvh; padding: 14px; border: 1px solid #455363; border-radius: 12px; background: #111923; box-shadow: 0 24px 80px rgba(0,0,0,.65); }
+.animation-character-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: #eef3f8; }
+.animation-character-preview-head button { display: grid; width: 36px; height: 36px; place-items: center; border: 1px solid var(--studio-line); border-radius: 7px; background: #18232e; color: #d7e0e8; cursor: pointer; }
+.animation-character-preview-dialog > img { width: 100%; min-height: 0; max-height: calc(92dvh - 126px); border-radius: 8px; object-fit: contain; background: #080d12; }
+.animation-character-preview-dialog > .button { justify-self: end; width: auto !important; min-width: 170px; }
 .animation-reference-note { margin-top: -8px; color: #d9a47f; font-size: 10px; line-height: 1.4; }
 .studio-preview-first .animation-director-voice { display: grid !important; gap: 8px !important; font-size: 12px; }
 .studio-preview-first .animation-director-voice select, .studio-preview-first .animation-director-voice input, .studio-preview-first .animation-image-provider { width: 100%; min-width: 0; font-size: 12px; }
@@ -63,6 +91,8 @@
 .animation-director-error details { min-width: 0; flex: 1; }
 .animation-director-error summary { cursor: pointer; font-weight: 600; }
 .animation-director-error p { max-height: 180px; overflow: auto; overflow-wrap: anywhere; margin: 10px 0 0; font-size: 12px; }
+.animation-director-error .animation-retry-missing { width: auto; min-width: 142px; height: 34px; flex: 0 0 auto; display: inline-flex; padding: 0 12px; gap: 7px; color: #20140d; background: #ff873d; }
+.animation-director-error .animation-retry-missing:disabled { color: #8f7a6d; background: #33271f; cursor: not-allowed; }
 .animation-edit-disclosure { border-bottom: 1px solid var(--studio-line); }
 .animation-edit-disclosure > summary { display: flex; align-items: center; justify-content: space-between; padding: 16px; color: #c3cdd8; font-size: 13px; cursor: pointer; list-style: none; }
 .studio-preview-first .animation-ai-edit-bar { flex-wrap: wrap; padding: 0 16px 16px; border: 0; background: transparent; }

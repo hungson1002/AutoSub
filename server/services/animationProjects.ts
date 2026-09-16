@@ -53,6 +53,47 @@ export async function saveAnimationProject(value: unknown, expectedId?: string) 
   return project;
 }
 
+export interface AnimationProjectSummary {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  fps: number;
+  sceneCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listAnimationProjects(): Promise<AnimationProjectSummary[]> {
+  try {
+    const entries = await readdir(projectsRoot, { withFileTypes: true });
+    const projects = await Promise.all(entries
+      .filter((entry) => entry.isDirectory() && safeId(entry.name))
+      .map(async (entry) => {
+        try {
+          const value: unknown = JSON.parse(await readFile(projectFile(entry.name), 'utf8'));
+          assertAnimationProject(value);
+          return {
+            id: value.id,
+            name: value.name,
+            width: value.width,
+            height: value.height,
+            fps: value.fps,
+            sceneCount: value.scenes.length,
+            createdAt: value.createdAt,
+            updatedAt: value.updatedAt,
+          } satisfies AnimationProjectSummary;
+        } catch { return undefined; }
+      }));
+    return projects
+      .filter((project): project is AnimationProjectSummary => Boolean(project))
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
 export async function listAnimationProjectVersions(id: string) {
   if (!safeId(id)) throw new Error('Project id is invalid.');
   try { const files = (await readdir(versionsDir(id))).filter((name) => /^\d+\.json$/.test(name)).sort().reverse(); return Promise.all(files.slice(0, 50).map(async (name) => { const project = JSON.parse(await readFile(path.join(versionsDir(id), name), 'utf8')) as AnimationProject; return { id: name.replace('.json', ''), createdAt: new Date(Number(name.replace('.json', ''))).toISOString(), name: project.name, sceneCount: project.scenes.length }; })); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }

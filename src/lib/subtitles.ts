@@ -94,10 +94,11 @@ const measureSubtitleLine = (line: string, style: SubtitleStyle) => {
     if (context) {
       const family = style.fontFamily.replace(/"/g, '');
       context.font = `${style.italic === true ? 'italic ' : ''}${style.bold === true ? '700 ' : '400 '}${style.fontSize}px "${family}", sans-serif`;
-      return context.measureText(line).width;
+      return context.measureText(line).width + Math.max(0, Array.from(line).length - 1) * (style.letterSpacing ?? 0);
     }
   }
-  return Array.from(line).reduce((width, character) => width + (character === ' ' ? .32 : .58) * style.fontSize, 0);
+  return Array.from(line).reduce((width, character) => width + (character === ' ' ? .32 : .58) * style.fontSize, 0)
+    + Math.max(0, Array.from(line).length - 1) * (style.letterSpacing ?? 0);
 };
 
 const roundedRectDrawing = (width: number, height: number, radius: number) => {
@@ -151,7 +152,7 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
     const font = effective.fontFamily.split(',')[0]?.trim() || 'Arial';
     const outline = effective.background === 'outline' ? Math.max(0, assPixels(effective.outlineWidth ?? 2)) : 0;
     const edgeColor = assColor(effective.outlineColor);
-    return `{\\fn${font}\\fs${assPixels(effective.fontSize)}\\c${assColor(effective.textColor)}\\3c${edgeColor}\\b${effective.bold === true ? 1 : 0}\\i${effective.italic === true ? 1 : 0}\\bord${outline}}`;
+    return `{\\fn${font}\\fs${assPixels(effective.fontSize)}\\c${assColor(effective.textColor)}\\3c${edgeColor}\\b${effective.bold === true ? 1 : 0}\\i${effective.italic === true ? 1 : 0}\\u${effective.underline === true ? 1 : 0}\\fsp${assPixels(effective.letterSpacing ?? 0)}\\bord${outline}}`;
   };
   const enabledCues = cues.filter((cue) => cue.enabled);
   const defaultStyleTag = cueStyleTag(style);
@@ -176,7 +177,7 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
   const outlineWidth = style.background === 'outline' ? Math.max(0, assPixels(style.outlineWidth ?? 2)) : 0;
   const marginV = style.position === 'top' ? 97 : style.position === 'bottom' ? 108 : 0;
   const common = `${fontFamily},${assPixels(style.fontSize)},${assColor(style.textColor)},${assColor(style.textColor)}`;
-  const flags = `${isBold ? -1 : 0},${isItalic ? -1 : 0},0,0,100,100,0,0`;
+  const flags = `${isBold ? -1 : 0},${isItalic ? -1 : 0},${style.underline === true ? -1 : 0},0,100,100,${assPixels(style.letterSpacing ?? 0)},0`;
   return `[Script Info]\nScriptType: v4.00+\nScaledBorderAndShadow: yes\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Outline,${common},${assColor(style.outlineColor)},&HFF000000,${flags},1,${outlineWidth},0,${alignment},154,154,${marginV},1\nStyle: Box,${common},${assColor(style.outlineColor)},&HFF000000,${flags},1,0,0,${alignment},154,154,${marginV},1\nStyle: None,${common},&HFF000000,&HFF000000,${flags},1,0,0,${alignment},154,154,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;
 }
 

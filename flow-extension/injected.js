@@ -3,18 +3,36 @@
  * Also intercepts TRPC fetch responses to capture fresh signed media URLs.
  */
 (() => {
-const BRIDGE_VERSION = '1.2.23';
+const BRIDGE_VERSION = '1.2.29';
 if (window.__FLOW_AGENT_MAIN_INJECTED__ === BRIDGE_VERSION) return;
 window.__FLOW_AGENT_MAIN_INJECTED__ = BRIDGE_VERSION;
 
 const SITE_KEY = '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV';
 
-function relayAuthorization(value) {
+function requestHost(value) {
+  try { return new URL(value, location.href).hostname; } catch { return ''; }
+}
+
+function requestUrl(input) {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.href;
+  return input?.url || '';
+}
+
+function isFlowApiUrl(value) {
+  const host = requestHost(value);
+  return host === 'flow.google.com' || host === 'aisandbox-pa.googleapis.com'
+    || host === 'aisandbox-pa.sandbox.googleapis.com';
+}
+
+function relayAuthorization(value, requestUrl) {
   if (typeof value !== 'string' || !/^Bearer\s+/i.test(value)) return;
+  if (!isFlowApiUrl(requestUrl)) return;
   window.postMessage({
     source: 'flow-agent-main',
     type: 'FLOW_AUTH_TOKEN',
     authorization: value,
+    apiHost: requestHost(requestUrl).startsWith('aisandbox-pa.') ? 'aisandbox' : 'page',
   }, window.location.origin);
 }
 
@@ -35,7 +53,7 @@ if (!window.__FLOW_AGENT_NETWORK_INTERCEPTED__) {
       const input = args[0];
       const init = args[1];
       const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
-      relayAuthorization(headers.get('authorization'));
+      relayAuthorization(headers.get('authorization'), requestUrl(input));
     } catch {}
     const response = await _originalFetch.apply(this, args);
     try {
@@ -56,9 +74,15 @@ if (!window.__FLOW_AGENT_NETWORK_INTERCEPTED__) {
   };
 
   // Some Flow bundles use XMLHttpRequest rather than window.fetch.
+  const xhrUrls = new WeakMap();
+  const _originalOpen = XMLHttpRequest.prototype.open;
   const _originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    xhrUrls.set(this, String(url || ''));
+    return _originalOpen.call(this, method, url, ...rest);
+  };
   XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-    if (String(name).toLowerCase() === 'authorization') relayAuthorization(String(value));
+    if (String(name).toLowerCase() === 'authorization') relayAuthorization(String(value), xhrUrls.get(this));
     return _originalSetRequestHeader.call(this, name, value);
   };
 }

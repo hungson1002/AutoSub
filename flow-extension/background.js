@@ -11,10 +11,13 @@ importScripts('session-sync.js');
 let callbackUrl = 'http://127.0.0.1:3001/api/ext/callback';
 let ws = null;
 let flowKey = null;
+let flowKeySource = null;
+let rejectedFlowToken = null;
 let selectedFlowTabId = null;
 let selectedFlowAccount = null;
 let selectedFlowUrl = null;
 let sessionUpdates = Promise.resolve();
+const pendingTabTokens = new Map();
 
 function persistSessionUpdate(token, capturedMetrics) {
   const account = selectedFlowAccount;
@@ -67,6 +70,7 @@ function selectFlowAccount(tab) {
 
 async function invalidateFlowSession() {
   flowKey = null;
+  flowKeySource = null;
   metrics.tokenCapturedAt = null;
   await persistSessionUpdate(null, { ...metrics });
 }
@@ -180,6 +184,7 @@ async function init() {
     'requestLog',
     'selectedFlowAccount',
     'selectedFlowUrl',
+    'rejectedFlowToken',
   ]);
   if (data.metrics) Object.assign(metrics, data.metrics);
   if (data.callbackSecret) callbackSecret = data.callbackSecret;
@@ -187,6 +192,7 @@ async function init() {
   if (Array.isArray(data.requestLog)) requestLog = data.requestLog.slice(0, 100);
   if (data.selectedFlowAccount) selectedFlowAccount = data.selectedFlowAccount;
   if (data.selectedFlowUrl) selectedFlowUrl = data.selectedFlowUrl;
+  if (typeof data.rejectedFlowToken === 'string') rejectedFlowToken = data.rejectedFlowToken;
 
   // Browser sign-in may have changed while the worker was stopped.
   flowKey = null;
@@ -220,7 +226,7 @@ ensureInitialized();
 
 // â”€â”€â”€ Token Capture â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function captureBearerToken(value, sourceAccount = null) {
+function captureBearerToken(value, sourceAccount = null, source = 'network') {
   const bearerMatch = String(value || '').match(/^Bearer\s+(.+)$/i);
   if (!bearerMatch) return false;
 
@@ -228,11 +234,18 @@ function captureBearerToken(value, sourceAccount = null) {
   // requiring the historical `ya29.` prefix.
   const token = bearerMatch[1].trim();
   if (token.length < 32 || /\s/.test(token)) return false;
+  if (token === rejectedFlowToken) return false;
+  if (rejectedFlowToken) {
+    rejectedFlowToken = null;
+    void chrome.storage.local.remove('rejectedFlowToken');
+  }
 
   const account = sourceAccount || selectedFlowAccount || 'default';
   const now = Date.now();
 
+  if (source === 'labs_session' && flowKey && flowKeySource !== 'labs_session') return true;
   flowKey = token;
+  flowKeySource = source;
   metrics.tokenCapturedAt = now;
   void persistSessionUpdate(token, { ...metrics }).catch((error) => console.error('[Flow Agent] Token sync failed:', error));
   console.log('[Flow Agent] Bearer token captured for account:', account);
@@ -243,7 +256,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     // Requests made by this worker reuse flowKey. Observing them would make
     // an old account token look freshly captured forever.
-    if (details.tabId < 0 || selectedFlowTabId === null || details.tabId !== selectedFlowTabId) return;
+    if (details.tabId < 0) return;
     const requestHeaders = details?.requestHeaders || [];
     try {
       const observedUrl = new URL(details.url);
@@ -261,7 +274,15 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     const authHeader = requestHeaders.find(
       (h) => h.name?.toLowerCase() === 'authorization',
     );
-    captureBearerToken(authHeader?.value, selectedFlowAccount);
+    const source = details.url.startsWith('https://aisandbox-pa.') ? 'aisandbox' : 'page';
+    if (details.tabId === selectedFlowTabId) {
+      captureBearerToken(authHeader?.value, selectedFlowAccount, source);
+    } else if (authHeader?.value) {
+      // Navigation requests can run before the document_start content script
+      // tells us which Flow tab is active. Hold only the token from that exact
+      // tab briefly, then accept it once FLOW_TAB_ACTIVE confirms the tab.
+      pendingTabTokens.set(details.tabId, { authorization: authHeader.value, source, at: Date.now() });
+    }
   },
   { urls: ['https://aisandbox-pa.googleapis.com/*', 'https://flow.google.com/*', 'https://labs.google/*'] },
   ['requestHeaders', 'extraHeaders'],
@@ -280,6 +301,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     }
     if (msg.visible === false && selectedFlowTabId !== null) return;
     selectFlowAccount({ id: sender.tab.id, url: senderUrl });
+    const pending = pendingTabTokens.get(sender.tab.id);
+    pendingTabTokens.delete(sender.tab.id);
+    if (pending && Date.now() - pending.at < 30000) {
+      captureBearerToken(pending.authorization, selectedFlowAccount, pending.source);
+    }
     void refreshSelectedAccountSession(msg.visible === true);
     return;
   }
@@ -289,7 +315,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   if (sender.tab.id !== selectedFlowTabId) return;
   if (flowAccountFromUrl(senderUrl) !== selectedFlowAccount) return;
   if (msg?.type === 'FLOW_AUTH_TOKEN') {
-    captureBearerToken(msg.authorization, selectedFlowAccount);
+    captureBearerToken(msg.authorization, selectedFlowAccount, msg.apiHost === 'aisandbox' ? 'aisandbox' : 'page');
   } else if (msg?.type === 'FLOW_MAIN_READY') {
     metrics.mainWorldReadyAt = Date.now();
     chrome.storage.local.set({ metrics });
@@ -627,7 +653,7 @@ async function handleAgentCommand(msg) {
           await invalidateFlowSession();
         }
         await refreshSelectedAccountSession(true);
-        if (isTokenFresh()) return;
+        if (isTokenFresh() && flowKeySource !== 'labs_session') return;
         if (['account_mismatch', 'sign_in_required'].includes(flowSessionStatus.status)) return;
         await captureTokenFromFlowTab(force);
         await sleep(3000);
@@ -1018,7 +1044,8 @@ async function handleApiRequest(msg) {
     return;
   }
 
-  if (selectedFlowUrl?.startsWith('https://flow.google.com/')) {
+  const hasSelectedTabToken = isTokenFresh() && flowKeySource && flowKeySource !== 'labs_session';
+  if (selectedFlowUrl?.startsWith('https://flow.google.com/') && !hasSelectedTabToken) {
     await refreshSelectedAccountSession(false);
     if (flowSessionStatus.status !== 'ready' || !flowKey) {
       sendToAgent({ id, status: 401, error: 'FLOW_ACCOUNT_SESSION_UNVERIFIED' });
@@ -1115,9 +1142,9 @@ async function handleApiRequest(msg) {
     // resending the same dead token.
     if (response.status === 401) {
       console.warn('[Flow Agent] 401 UNAUTHENTICATED â€” invalidating cached token to force refresh');
-      flowKey = null;
-      metrics.tokenCapturedAt = null;
-      chrome.storage.local.set({ flowKey: null });
+      rejectedFlowToken = activeFlowKey;
+      await chrome.storage.local.set({ rejectedFlowToken });
+      await invalidateFlowSession();
     }
 
     sendToAgent({

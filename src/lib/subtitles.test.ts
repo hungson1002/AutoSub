@@ -74,6 +74,12 @@ test('ASS export converts CSS font pixels and uses the same default canvas posit
   assert.match(ass, /\\an5\\pos\(960,886\)/);
 });
 
+test('ASS export preserves underline and letter spacing from the font controls', () => {
+  const ass = cuesToAss([cue], { ...defaultStyle, underline: true, letterSpacing: 3 });
+  assert.match(ass, /\\u1\\fsp4\\bord/);
+  assert.match(ass, /,-1,0,100,100,4,0,1,2\.7,0,2,154/);
+});
+
 test('repairs persisted OCR cues that incorrectly share one video-long end time', () => {
   const source = [
     { ...cue, id: 'ocr-1-old', startMs: 1_000, endMs: 20_000 },

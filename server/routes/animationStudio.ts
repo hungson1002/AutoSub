@@ -4,11 +4,12 @@ import { validateAnimationProject } from '../../shared/animationStudio';
 import {
   createAnimationProject,
   getAnimationProject,
+  listAnimationProjects,
   saveAnimationProject,
   listAnimationProjectVersions,
   restoreAnimationProjectVersion,
 } from '../services/animationProjects';
-import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene, generateAnimationCharacterOptions } from '../services/animationDirector';
+import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene, generateAnimationCharacterOptions, retryMissingAnimationImages } from '../services/animationDirector';
 import { enqueueAnimationProjectRender, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
 import { generateAnimationAsset, generateAnimationNarration, getAnimationAssetFile, listAnimationAssets, registerAnimationAsset, resolveAnimationAssets, updateAnimationAsset } from '../services/animationAssets';
 import { autoFixAnimationQuality, checkAnimationQuality } from '../services/animationQuality';
@@ -25,8 +26,14 @@ export async function animationStudioRoutes(app: FastifyInstance) {
     catch (error) { return reply.code(400).send({ error: message(error, 'Không thể bắt đầu job Animation.') }); }
   });
   app.post('/api/animation-studio/character-options', async (request, reply) => {
-    try { return await generateAnimationCharacterOptions(request.body as Parameters<typeof generateAnimationCharacterOptions>[0]); }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error('Tạo nhân vật quá 6 phút.')), 6 * 60_000);
+    const abortDisconnectedClient = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    request.raw.once('aborted', abortDisconnectedClient);
+    reply.raw.once('close', abortDisconnectedClient);
+    try { return await generateAnimationCharacterOptions(request.body as Parameters<typeof generateAnimationCharacterOptions>[0], controller.signal); }
     catch (error) { return reply.code(400).send({ error: message(error, 'Không thể tạo các lựa chọn nhân vật.') }); }
+    finally { clearTimeout(timeout); request.raw.off('aborted', abortDisconnectedClient); reply.raw.off('close', abortDisconnectedClient); }
   });
   app.get('/api/animation-studio/director-jobs', async (request) => animationDirectorJobs.list((request.query as { projectId?: string }).projectId));
   app.get('/api/animation-studio/director-jobs/:id', async (request, reply) => {
@@ -66,6 +73,7 @@ export async function animationStudioRoutes(app: FastifyInstance) {
     catch { return reply.code(404).send({ error: 'Không tìm thấy file asset.' }); }
   });
   app.post('/api/animation-studio/narration', async (request, reply) => { try { return await generateAnimationNarration(request.body as Parameters<typeof generateAnimationNarration>[0]); } catch (error) { return reply.code(400).send({ error: message(error, 'Không thể tạo voiceover.') }); } });
+  app.post('/api/animation-studio/retry-missing-images', async (request, reply) => { try { return await retryMissingAnimationImages(request.body as Parameters<typeof retryMissingAnimationImages>[0]); } catch (error) { return reply.code(400).send({ error: message(error, 'Không thể tạo lại các ảnh minh họa còn thiếu.') }); } });
 
   app.post('/api/animation-studio/projects/:id/render', async (request, reply) => {
     try {
@@ -106,6 +114,11 @@ export async function animationStudioRoutes(app: FastifyInstance) {
   app.post('/api/animation-studio/projects', async (request, reply) => {
     try { return reply.code(201).send(await createAnimationProject(request.body as { name?: string; width?: number; height?: number; fps?: number })); }
     catch (error) { return reply.code(400).send({ error: message(error, 'Cannot create animation project.') }); }
+  });
+
+  app.get('/api/animation-studio/projects', async (_request, reply) => {
+    try { return await listAnimationProjects(); }
+    catch (error) { return reply.code(500).send({ error: message(error, 'Không thể đọc danh sách project.') }); }
   });
 
   app.get('/api/animation-studio/projects/:id', async (request, reply) => {

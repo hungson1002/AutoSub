@@ -8,7 +8,7 @@ import type { AIProvider } from '../types';
 import { buildAuthHeaders, providerBase, withAuthQuery } from '../providers/base';
 import { synthesize } from '../adapters';
 import type { AnimationProject } from '../../shared/animationStudio';
-import { generateGoogleFlowImage } from './googleFlow';
+import { generateGoogleFlowImage, generateGoogleFlowImages } from './googleFlow';
 import { resolveUpload } from './uploads';
 import { allocateNarrationTimings, createSentenceTimeMapper, splitNarrationUnits } from './animationTiming';
 
@@ -85,7 +85,7 @@ export async function getAnimationAssetFile(id: string) {
   throw new Error('Không tìm thấy file asset.');
 }
 
-type AnimationAssetGenerationInput = { prompt: string; name?: string; type?: AnimationAsset['type']; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number; referenceUploadId?: string; referenceAssetId?: string };
+export type AnimationAssetGenerationInput = { prompt: string; name?: string; type?: AnimationAsset['type']; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number; referenceUploadId?: string; referenceAssetId?: string };
 
 export function animationAssetCacheKey(input: AnimationAssetGenerationInput) {
   const prompt = String(input.prompt || '').trim().slice(0, 4000);
@@ -100,6 +100,14 @@ export async function findCachedAnimationAsset(cacheKey: string) {
 }
 
 const generationLocks = new Map<string, Promise<AnimationAsset>>();
+
+async function normalizeAndRegisterGeneratedAsset(id: string, input: AnimationAssetGenerationInput, cacheKey: string) {
+  const prompt = String(input.prompt || '').trim().slice(0, 4000);
+  const source = await readFile(generatedFile(id));
+  const { data, info } = await sharp(source, { limitInputPixels: 40_000_000 }).rotate().png().toBuffer({ resolveWithObject: true });
+  await writeFile(generatedFile(id), data);
+  return registerAnimationAsset({ id, type: input.type || 'image', name: String(input.name || prompt).trim().slice(0, 160), uri: `/api/animation-studio/assets/${id}/file`, tags: Array.isArray(input.tags) ? input.tags.map(String) : words(prompt).slice(0, 12), style: String(input.style || '').trim().slice(0, 80) || undefined, width: info.width, height: info.height, createdAt: new Date().toISOString(), source: 'generated', status: 'candidate', cacheKey, generationPrompt: prompt });
+}
 
 async function generateAnimationAssetUncached(input: AnimationAssetGenerationInput & { cacheKey: string }) {
   const prompt = String(input.prompt || '').trim().slice(0, 4000); if (prompt.length < 8) throw new Error('Mô tả asset cần ít nhất 8 ký tự.');
@@ -118,11 +126,7 @@ async function generateAnimationAssetUncached(input: AnimationAssetGenerationInp
     const bytes = Buffer.from(encoded, 'base64'); if (!bytes.length || bytes.length > 30 * 1024 * 1024) throw new Error('Ảnh sinh ra trống hoặc vượt quá 30 MB.');
     await writeFile(generatedFile(id), bytes);
   }
-  // Decode before registration and use actual geometry, not requested dimensions.
-  const source = await readFile(generatedFile(id));
-  const { data, info } = await sharp(source, { limitInputPixels: 40_000_000 }).rotate().png().toBuffer({ resolveWithObject: true });
-  await writeFile(generatedFile(id), data);
-  return registerAnimationAsset({ id, type: input.type || 'image', name: String(input.name || prompt).trim().slice(0, 160), uri: `/api/animation-studio/assets/${id}/file`, tags: Array.isArray(input.tags) ? input.tags.map(String) : words(prompt).slice(0, 12), style: String(input.style || '').trim().slice(0, 80) || undefined, width: info.width, height: info.height, createdAt: new Date().toISOString(), source: 'generated', status: 'candidate', cacheKey: input.cacheKey, generationPrompt: prompt });
+  return normalizeAndRegisterGeneratedAsset(id, input, input.cacheKey);
 }
 
 export async function generateAnimationAsset(input: AnimationAssetGenerationInput) {
@@ -138,6 +142,23 @@ export async function generateAnimationAsset(input: AnimationAssetGenerationInpu
   generationLocks.set(cacheKey, pending);
   try { return await pending; }
   finally { if (generationLocks.get(cacheKey) === pending) generationLocks.delete(cacheKey); }
+}
+
+export async function generateFlowAnimationAssetBatch(inputs: AnimationAssetGenerationInput[], batchPrompt: string, signal?: AbortSignal) {
+  if (!inputs.length || inputs.length > 4) throw new Error('Batch nhân vật cần từ 1 đến 4 ảnh.');
+  if (inputs.some((input) => input.generator !== 'flow-agent' || input.referenceUploadId || input.referenceAssetId)) return Promise.all(inputs.map(generateAnimationAsset));
+  const cacheKeys = inputs.map(animationAssetCacheKey);
+  const resolved = await Promise.all(cacheKeys.map(findCachedAnimationAsset));
+  const missingIndexes = resolved.map((asset, index) => asset ? -1 : index).filter((index) => index >= 0);
+  if (!missingIndexes.length) return resolved as AnimationAsset[];
+  const ids = missingIndexes.map(() => randomUUID());
+  const outputFiles = ids.map(generatedFile);
+  await mkdir(path.dirname(outputFiles[0]), { recursive: true });
+  const first = inputs[missingIndexes[0]];
+  await generateGoogleFlowImages(batchPrompt.trim().slice(0, 4000), outputFiles, { model: first.model || 'narwhal', size: `${first.width || 1024}x${first.height || 1024}`, signal });
+  const created = await Promise.all(missingIndexes.map((inputIndex, batchIndex) => normalizeAndRegisterGeneratedAsset(ids[batchIndex], inputs[inputIndex], cacheKeys[inputIndex])));
+  missingIndexes.forEach((inputIndex, batchIndex) => { resolved[inputIndex] = created[batchIndex]; });
+  return resolved as AnimationAsset[];
 }
 
 export function wavDurationMs(audio: Buffer) {
@@ -167,7 +188,7 @@ export async function audioDurationMs(audio: Buffer, extension = 'media') {
   }
 }
 
-export async function generateAnimationNarration(input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number }, onStage: (stage: string) => Promise<void> = async () => {}) {
+export async function generateAnimationNarration(input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number; preservePlannedDuration?: boolean }, onStage: (stage: string) => Promise<void> = async () => {}) {
   let project = input.project;
   const speed = Math.max(.5, Math.min(2, Number(input.speed) || 1));
   for (const scene of input.project.scenes) {
@@ -201,10 +222,13 @@ export async function generateAnimationNarration(input: { project: AnimationProj
       audioLayers.push({ id: `voiceover-${scene.id}-${index}`, type: 'audio', name: `Voiceover · ${scene.name}`, assetId: asset.id, visible: true, locked: true, zIndex: 999, width: 1, height: 1, startMs: cursor, durationMs, volume: 1, transform: defaultTransform() });
       cursor += durationMs;
     }
-    const durationMs = cursor;
+    const measuredDurationMs = cursor;
+    const durationMs = input.preservePlannedDuration ? Math.max(scene.durationMs, measuredDurationMs) : measuredDurationMs;
     const oldCaptions = scene.layers.find((layer) => layer.name === 'Voiceover · Subtitle')?.captionTimings || allocateNarrationTimings(scene.narration, scene.durationMs);
-    const retime = createSentenceTimeMapper(oldCaptions, captions, scene.durationMs, durationMs);
+    const retime = createSentenceTimeMapper(oldCaptions, captions, scene.durationMs, measuredDurationMs);
+    const retimeVisuals = measuredDurationMs > scene.durationMs;
     const retimeCommand = (command: AnimationCommand): AnimationCommand => {
+      if (!retimeVisuals) return command;
       const startMs = retime(command.startMs);
       const endMs = retime(command.startMs + command.durationMs);
       return { ...command, startMs, durationMs: Math.max(0, endMs - startMs) };
@@ -214,10 +238,10 @@ export async function generateAnimationNarration(input: { project: AnimationProj
     const replacement: typeof scene = { ...scene, durationMs, layers: [...scene.layers.filter((layer) => !((layer.type === 'audio' || layer.type === 'text') && layer.name.startsWith('Voiceover ·'))).map((layer) => layer.type !== 'audio' ? layer : { ...layer, startMs: retime(layer.startMs || 0), durationMs: layer.durationMs === undefined ? undefined : Math.min(layer.durationMs, durationMs - retime(layer.startMs || 0)) }), ...audioLayers, subtitle], commands: scene.commands.filter((command) => !command.parameters?.autoVoiceover).map(retimeCommand), camera: { ...scene.camera, commands: scene.camera.commands.map(retimeCommand) } };
     const productionPlan = project.productionPlan ? {
       ...project.productionPlan,
-      narrationUnits: project.productionPlan.narrationUnits.map((unit) => unit.sceneId === scene.id ? { ...unit, startMs: retime(unit.startMs || 0), endMs: retime(unit.endMs ?? scene.durationMs), timingSource: 'measured-sentence' as const } : unit),
-      beats: project.productionPlan.beats.map((beat) => beat.sceneId === scene.id ? { ...beat, startMs: retime(beat.startMs || 0), endMs: retime(beat.endMs ?? scene.durationMs) } : beat),
+      narrationUnits: project.productionPlan.narrationUnits.map((unit) => unit.sceneId === scene.id ? { ...unit, startMs: 0, endMs: measuredDurationMs, timingSource: 'measured-sentence' as const } : unit),
+      beats: project.productionPlan.beats.map((beat) => beat.sceneId === scene.id && retimeVisuals ? { ...beat, startMs: retime(beat.startMs || 0), endMs: retime(beat.endMs ?? scene.durationMs) } : beat),
     } : undefined;
-    project = { ...project, assets: [...new Map([...project.assets, ...newAssets].map((asset) => [asset.id, asset])).values()], productionPlan, assetManifest: undefined, scenes: project.scenes.map((item) => item.id === scene.id ? replacement : item), updatedAt: new Date().toISOString(), generationWarnings: [...new Set([...(project.generationWarnings || []).filter((warning) => !warning.startsWith('Phụ đề đang ở mức câu')), 'Timing được đo theo từng câu TTS; cue giữa câu chưa có forced alignment.'])] };
+    project = { ...project, assets: [...new Map([...project.assets, ...newAssets].map((asset) => [asset.id, asset])).values()], productionPlan, assetManifest: undefined, scenes: project.scenes.map((item) => item.id === scene.id ? replacement : item), updatedAt: new Date().toISOString(), generationWarnings: (project.generationWarnings || []).filter((warning) => !warning.startsWith('Phụ đề đang ở mức câu') && !warning.startsWith('Timing được đo theo từng câu TTS')) };
   }
   return project;
 }

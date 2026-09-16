@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import type { AnimationAsset, AnimationCommandType, AnimationProject, CompositeScene, SceneLayer } from '../../shared/animationStudio';
+import type { AnimationAsset, AnimationCommandType, AnimationProject, CompositeScene, SceneLayer, SceneTransitionType } from '../../shared/animationStudio';
 import { ANIMATION_PROJECT_VERSION, defaultTransform } from '../../shared/animationStudio';
 import { AnimationCanvas } from '../animationStudio/AnimationCanvas';
 import { MotionRecipePanel } from '../animationStudio/MotionRecipePanel';
 import { applyMotionRecipe } from '../../shared/animationMotionRecipes';
-import { ChevronDown, Download, Image, Layers3, Maximize, Pause, Play, Plus, Save, Settings2, Sparkles, Square, Trash2, Type, Volume2, X } from '../components/Icons';
-import { animationAssetUrl, api, friendlyErrorMessage, type AnimationDirectorJobStatus } from '../lib/api';
+import { BookOpen, ChevronDown, Download, Image, Layers3, Maximize, Pause, Play, Plus, RefreshCw, Save, Settings2, Sparkles, Square, Trash2, Type, Volume2, X } from '../components/Icons';
+import { animationAssetUrl, api, friendlyErrorMessage, type AnimationDirectorJobStatus, type AnimationProjectSummary } from '../lib/api';
 import { capabilityAssignments } from '../lib/settings';
 import type { AIProvider, AppSettings } from '../types';
 import { buildRenderTimeline } from '../remotion/timeline';
+import { SCENE_TRANSITION_OPTIONS, sceneTransition, sceneTransitionStyles } from '../animationStudio/sceneTransitions';
 import './AnimationStudioPage.css';
 
 const now = () => new Date().toISOString();
@@ -53,6 +54,7 @@ function storyboardProject(): AnimationProject {
       order: 0,
       durationMs: 5000,
       narration: '',
+      transition: { type: 'cut', durationMs: 0 },
       renderMode: 'composite',
       backgroundColor: '#ffffff',
       layers: [{
@@ -97,9 +99,11 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [characterReference, setCharacterReference] = useState<{ uploadId: string; name: string }>();
   const [characterOptions, setCharacterOptions] = useState<AnimationAsset[]>([]);
   const [selectedCharacterAssetId, setSelectedCharacterAssetId] = useState('');
+  const [characterPreview, setCharacterPreview] = useState<{ id?: string; name: string; uri: string }>();
   const [preparingCharacters, setPreparingCharacters] = useState(false);
   const [directorError, setDirectorError] = useState('');
   const [directorWarning, setDirectorWarning] = useState('');
+  const [retryingMissingImages, setRetryingMissingImages] = useState(false);
   useEffect(() => {
     if (!directorJobId) return;
     let disposed = false;
@@ -146,6 +150,9 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [presentationOpen, setPresentationOpen] = useState(false);
   const [creatingVoiceover, setCreatingVoiceover] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [savedProjects, setSavedProjects] = useState<AnimationProjectSummary[]>([]);
+  const [loadingProjects, setLoadingProjects] = useState(false);
   const [setupOpen, setSetupOpen] = useState(() => window.innerWidth > 900);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [versions, setVersions] = useState<Array<{ id: string; createdAt: string; name: string; sceneCount: number }>>([]);
@@ -154,11 +161,15 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const previewAudioRef = useRef<HTMLAudioElement[]>([]);
   const commandDragRef = useRef<{ id: string; startX: number; startMs: number; durationMs: number; mode: 'move' | 'resize'; laneWidth: number } | undefined>(undefined);
   const startedAt = useRef(0);
+  const lastPreviewFrameAt = useRef(0);
+  const characterPreviewCloseRef = useRef<HTMLButtonElement | null>(null);
+  const characterGenerationRef = useRef<AbortController | null>(null);
   const scene = project.scenes.find((item): item is CompositeScene => item.id === sceneId && item.renderMode === 'composite') || project.scenes.find((item): item is CompositeScene => item.renderMode === 'composite');
   const selectedLayer = scene?.layers.find((layer) => layer.id === selectedLayerId);
   const subtitleLayer = scene?.layers.find((layer) => layer.type === 'text' && layer.name.startsWith('Voiceover · Subtitle'));
   const subtitleFontSize = subtitleLayer?.fontSize || Math.max(24, Math.round(Math.min(project.width, project.height) * .032));
   const selectedAsset = selectedLayer?.assetId ? project.assets.find((asset) => asset.id === selectedLayer.assetId) : undefined;
+  const selectedCharacter = characterOptions.find((asset) => asset.id === selectedCharacterAssetId);
   const selectedCommand = scene?.commands.find((command) => command.id === selectedCommandId);
   const directorAssignment = capabilityAssignments(settings, 'translation')[0];
   const directorProvider = providers.find((item) => item.id === directorAssignment?.providerId);
@@ -169,6 +180,13 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const ttsAssignment = capabilityAssignments(settings, 'tts')[0]; const ttsProvider = providers.find((item) => item.id === ttsAssignment?.providerId);
   const compositeScenes = project.scenes.filter((item): item is CompositeScene => item.renderMode === 'composite');
   const totalDurationMs = compositeScenes.reduce((total, item) => total + item.durationMs, 0);
+  const sceneIndex = compositeScenes.findIndex((item) => item.id === scene?.id);
+  const previousScene = sceneIndex > 0 ? compositeScenes[sceneIndex - 1] : undefined;
+  const nextScene = sceneIndex >= 0 ? compositeScenes[sceneIndex + 1] : undefined;
+  const incomingTransition = scene ? sceneTransition(scene) : undefined;
+  const outgoingTransition = nextScene ? sceneTransition(nextScene) : undefined;
+  const transitionActive = Boolean(sequenceMode && previousScene && incomingTransition && incomingTransition.type !== 'cut' && timeMs < incomingTransition.durationMs);
+  const transitionStyles = incomingTransition ? sceneTransitionStyles(incomingTransition.type, incomingTransition.durationMs ? timeMs / incomingTransition.durationMs : 1) : undefined;
   const sceneOffsetMs = (targetId: string) => compositeScenes.slice(0, Math.max(0, compositeScenes.findIndex((item) => item.id === targetId))).reduce((total, item) => total + item.durationMs, 0);
 
   useEffect(() => { void api.listAnimationAssets(assetQuery).then(setLibraryAssets).catch(() => setLibraryAssets([])); }, [assetQuery]);
@@ -183,8 +201,11 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   useEffect(() => {
     if (!playing || !scene) return;
     startedAt.current = performance.now() - (sequenceMode ? sequenceTimeMs : timeMs);
+    lastPreviewFrameAt.current = 0;
     let frame = 0;
     const tick = (timestamp: number) => {
+      if (lastPreviewFrameAt.current && timestamp - lastPreviewFrameAt.current < 1000 / Math.max(1, project.fps)) { frame = requestAnimationFrame(tick); return; }
+      lastPreviewFrameAt.current = timestamp;
       const next = timestamp - startedAt.current;
       if (sequenceMode) {
         if (next >= totalDurationMs) { setSequenceTimeMs(totalDurationMs); setTimeMs(scene.durationMs); setPlaying(false); return; }
@@ -198,7 +219,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [playing, scene?.id, sequenceMode, totalDurationMs]);
+  }, [playing, scene?.id, sequenceMode, totalDurationMs, project.fps]);
 
   useEffect(() => {
     if (!ttsProvider) { setTtsVoices([]); return; }
@@ -221,6 +242,26 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   }, [presentationOpen]);
 
   useEffect(() => {
+    let disposed = false;
+    void api.listAnimationProjects()
+      .then((items) => { if (!disposed) setSavedProjects(items); })
+      .catch(() => { /* the project menu can retry explicitly */ });
+    return () => { disposed = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!characterPreview && !projectsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (characterPreview) setCharacterPreview(undefined);
+      else setProjectsOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    if (characterPreview) requestAnimationFrame(() => characterPreviewCloseRef.current?.focus());
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [characterPreview, projectsOpen]);
+
+  useEffect(() => {
     previewAudioRef.current.forEach((audio) => audio.pause());
     previewAudioRef.current = [];
     if (!playing || !scene) return;
@@ -237,8 +278,12 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     if (!scene) return;
     setProject((current) => ({ ...current, scenes: current.scenes.map((item) => item.id === scene.id ? change(item as CompositeScene) : item), updatedAt: now() }));
   };
+  const updateOutgoingTransition = (transition: CompositeScene['transition']) => {
+    if (!nextScene) return;
+    setProject((current) => ({ ...current, scenes: current.scenes.map((item) => item.id === nextScene.id && item.renderMode === 'composite' ? { ...item, transition } : item), updatedAt: now() }));
+  };
   const updateLayer = (layerId: string, change: Partial<SceneLayer>) => updateScene((current) => ({ ...current, layers: current.layers.map((layer) => layer.id === layerId ? { ...layer, ...change } : layer) }));
-  const addScene = () => { const id = makeId('scene'); const next: CompositeScene = { id, name: `Cảnh ${project.scenes.length + 1}`, order: project.scenes.length, durationMs: 5000, narration: '', renderMode: 'composite', backgroundColor: '#07111f', layers: [], commands: [], camera: { transform: defaultTransform(), commands: [] } }; setProject((current) => ({ ...current, scenes: [...current.scenes, next], updatedAt: now() })); setSceneId(id); setSelectedLayerId(''); setTimeMs(0); };
+  const addScene = () => { const id = makeId('scene'); const next: CompositeScene = { id, name: `Cảnh ${project.scenes.length + 1}`, order: project.scenes.length, durationMs: 5000, narration: '', transition: { type: 'crossfade', durationMs: 320 }, renderMode: 'composite', backgroundColor: '#07111f', layers: [], commands: [], camera: { transform: defaultTransform(), commands: [] } }; setProject((current) => ({ ...current, scenes: [...current.scenes, next], updatedAt: now() })); setSceneId(id); setSelectedLayerId(''); setTimeMs(0); };
   const addCommand = (type: AnimationCommandType) => {
     if (!selectedLayer || !scene) return; const durationMs = Math.min(1000, Math.max(0, scene.durationMs - timeMs));
     const base = { id: makeId('command'), type, targetId: selectedLayer.id, startMs: Math.round(timeMs), durationMs: Math.round(durationMs), easing: 'ease-in-out' as const };
@@ -340,13 +385,17 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     const generation = selectedAssetGeneration();
     if (!generation) { setDirectorError('Hãy chọn provider tạo ảnh.'); return; }
     if (!usingFlowAgentAssets) { setDirectorError('Hãy chọn Nano Banana 2 để tạo và giữ nhân vật nhất quán từ ảnh tham chiếu.'); return; }
-    setPreparingCharacters(true); setDirectorError(''); setCharacterOptions([]); setSelectedCharacterAssetId('');
+    characterGenerationRef.current?.abort();
+    const controller = new AbortController();
+    characterGenerationRef.current = controller;
+    setPreparingCharacters(true); setDirectorError('');
     try {
-      const options = await api.generateAnimationCharacterOptions({ brief, provider: directorProvider, model: directorAssignment.model, assetGeneration: generation, width: project.width, height: project.height });
-      setCharacterOptions(options);
-    } catch (error) { setDirectorError(friendlyErrorMessage(error, 'Không thể tạo bốn lựa chọn nhân vật.')); }
-    finally { setPreparingCharacters(false); }
+      const options = await api.generateAnimationCharacterOptions({ brief, provider: directorProvider, model: directorAssignment.model, assetGeneration: generation, width: project.width, height: project.height }, controller.signal);
+      setCharacterOptions(options); setSelectedCharacterAssetId('');
+    } catch (error) { if (!controller.signal.aborted) setDirectorError(friendlyErrorMessage(error, 'Không thể tạo bốn lựa chọn nhân vật.')); }
+    finally { if (characterGenerationRef.current === controller) { characterGenerationRef.current = null; setPreparingCharacters(false); } }
   };
+  const cancelCharacterOptions = () => { characterGenerationRef.current?.abort(); characterGenerationRef.current = null; setPreparingCharacters(false); setDirectorError('Đã dừng lượt tạo nhân vật.'); };
   const generateAsset = async () => {
     const generation = selectedAssetGeneration();
     if (!generation) { onNotice('Hãy chọn provider tạo ảnh trước.', 'error'); return; }
@@ -361,6 +410,39 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     try { await api.registerAnimationAsset(selectedAsset); const asset = await api.updateAnimationAsset(selectedAsset.id, change); setLibraryAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]); setProject((current) => ({ ...current, assets: current.assets.map((item) => item.id === asset.id ? asset : item), updatedAt: now() })); }
     catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể cập nhật metadata asset.'), 'error'); }
   };
+  const refreshSavedProjects = async () => {
+    setLoadingProjects(true);
+    try { setSavedProjects(await api.listAnimationProjects()); }
+    catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể đọc danh sách project đã lưu.'), 'error'); }
+    finally { setLoadingProjects(false); }
+  };
+  const clearDirectorSession = () => {
+    setDirectorJob(undefined); setDirectorJobId(''); setDirecting(false); setDirectorError(''); setDirectorWarning('');
+    try { localStorage.removeItem('autosub.animation-director-job-id'); } catch { /* optional browser persistence */ }
+  };
+  const replaceCurrentProject = (nextProject: AnimationProject, isPersisted: boolean) => {
+    setProject(nextProject); setSceneId(nextProject.scenes.find((item) => item.renderMode === 'composite')?.id || nextProject.scenes[0]?.id || '');
+    setSelectedLayerId(''); setSelectedCommandId(''); setTimeMs(0); setSequenceTimeMs(0); setSequenceMode(false); setPlaying(false);
+    setPersisted(isPersisted); setHistoryOpen(false); setProjectsOpen(false); setCharacterReference(undefined); setCharacterOptions([]); setSelectedCharacterAssetId(''); setCharacterPreview(undefined);
+    clearDirectorSession();
+  };
+  const canReplaceCurrentProject = () => persisted || (!brief.trim() && project.scenes.length === 1) || window.confirm('Project hiện tại chưa được lưu. Bạn có muốn đóng và tiếp tục không?');
+  const createNewProject = () => {
+    if (!canReplaceCurrentProject()) return;
+    setBrief(''); replaceCurrentProject(storyboardProject(), false); onNotice('Đã mở project mới.');
+  };
+  const closeCurrentProject = () => {
+    if (!canReplaceCurrentProject()) return;
+    setBrief(''); replaceCurrentProject(storyboardProject(), false); onNotice('Đã đóng project hiện tại.');
+  };
+  const openSavedProject = async (id: string) => {
+    if (id === project.id) { setProjectsOpen(false); return; }
+    if (!canReplaceCurrentProject()) return;
+    setLoadingProjects(true);
+    try { const opened = await api.getAnimationProject(id); setBrief(''); replaceCurrentProject(opened, true); onNotice(`Đã mở project “${opened.name}”.`); }
+    catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể mở project đã lưu.'), 'error'); }
+    finally { setLoadingProjects(false); }
+  };
   const save = async () => {
     setSaving(true);
     try {
@@ -370,7 +452,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         value = { ...project, id: created.id, createdAt: created.createdAt, updatedAt: created.updatedAt };
       }
       const saved = await api.saveAnimationProject(value);
-      setProject(saved); setPersisted(true); void api.listAnimationProjectVersions(saved.id).then(setVersions); onNotice('Đã lưu project Animation Studio.');
+      setProject(saved); setPersisted(true); void api.listAnimationProjectVersions(saved.id).then(setVersions); void api.listAnimationProjects().then(setSavedProjects); onNotice('Đã lưu project Animation Studio.');
     } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể lưu project.'), 'error'); }
     finally { setSaving(false); }
   };
@@ -397,10 +479,22 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       try { localStorage.setItem('autosub.animation-director-job-id', job.id); } catch { /* server result is still retained */ }
     } catch (error) { setDirectorError(friendlyErrorMessage(error, 'AI Director không thể dựng scene.')); setDirecting(false); }
   };
+  const retryMissingImages = async () => {
+    const generation = selectedAssetGeneration();
+    if (!generation || !directorProvider || !directorAssignment?.model) { setDirectorError('Thiếu cấu hình AI hoặc provider tạo ảnh để tạo lại ảnh lỗi.'); return; }
+    setRetryingMissingImages(true); setDirectorError('');
+    try {
+      const result = await api.retryMissingAnimationImages({ project, assetGeneration: generation, provider: directorProvider, model: directorAssignment.model });
+      setProject(result.project);
+      setDirectorWarning(result.project.generationWarnings?.join('\n') || '');
+      onNotice(result.remaining ? `Đã tạo lại ${result.repaired} ảnh; còn ${result.remaining} ảnh lỗi.` : `Đã tạo lại đầy đủ ${result.repaired} ảnh lỗi.`, result.remaining ? 'error' : 'success');
+    } catch (error) { setDirectorError(friendlyErrorMessage(error, 'Không thể tạo lại ảnh lỗi.')); }
+    finally { setRetryingMissingImages(false); }
+  };
   const applyDirectorProject = (directed: AnimationProject) => {
     setProject(directed); setSceneId(directed.scenes[0]?.id || ''); setSelectedLayerId('');
     setTimeMs(0); setSequenceTimeMs(0); setSequenceMode(false); setPlaying(false); setPersisted(false);
-    setDirectorWarning(directed.generationWarnings?.join('\n') || '');
+    setDirectorWarning(directed.generationWarnings?.filter((warning) => !warning.startsWith('Timing được đo theo từng câu TTS')).join('\n') || '');
     onNotice(`AI Director đã dựng ${directed.scenes.length} scene có thể chỉnh sửa.`);
   };
   const restoreDirectorResult = async () => {
@@ -526,6 +620,11 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const jumpToSequenceScene = (targetId: string) => { const offset = sceneOffsetMs(targetId); setPlaying(false); setSequenceMode(true); setSequenceTimeMs(offset); setSceneId(targetId); setSelectedLayerId(''); setTimeMs(0); };
   const toggleSequencePreview = () => { if (playing && sequenceMode) { setPlaying(false); return; } const restart = sequenceTimeMs >= totalDurationMs; if (restart) { setSequenceTimeMs(0); setSceneId(compositeScenes[0]?.id || sceneId); setTimeMs(0); } setSequenceMode(true); setPlaying(true); };
   const startPresentation = () => { const first = compositeScenes[0]; if (!first) return; setPresentationOpen(true); setSequenceMode(true); setSequenceTimeMs(0); setSceneId(first.id); setSelectedLayerId(''); setTimeMs(0); setPlaying(true); };
+  const directorWarningTitle = /thiếu hình|không tạo được ảnh|lỗi phiên flow|ảnh minh họa/i.test(directorWarning)
+    ? 'Video còn thiếu ảnh minh họa. Xem chi tiết'
+    : /timing|forced alignment|căn thời gian/i.test(directorWarning)
+      ? 'Lưu ý căn thời gian phụ đề. Xem chi tiết'
+      : 'Có lưu ý chất lượng. Xem chi tiết';
   if (!scene) return <div className="animation-studio-page"><p>Project chưa có composite scene.</p></div>;
 
   return <section className={`animation-studio-page studio-preview-first${setupOpen ? ' setup-open' : ''}${timelineOpen ? ' timeline-open' : ''}`} aria-label="Animation Studio">
@@ -533,6 +632,14 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       <div className="animation-project-title"><span>AI Storyboard</span><input aria-label="Tên project" value={project.name} onChange={(event) => setProject((current) => ({ ...current, name: event.target.value, updatedAt: now() }))} /></div>
       <div className="animation-toolbar-meta" aria-label="Thông số project"><span>{project.width} × {project.height}</span><span>{project.fps} FPS</span></div>
       <div className="animation-toolbar-actions">
+        <div className="animation-project-menu">
+          <button className="button quiet" type="button" aria-expanded={projectsOpen} aria-controls="animation-project-browser" onClick={() => { const next = !projectsOpen; setProjectsOpen(next); if (next) void refreshSavedProjects(); }}><BookOpen size={15} aria-hidden="true" /> Dự án{savedProjects.length ? ` (${savedProjects.length})` : ''}</button>
+          {projectsOpen && <div id="animation-project-browser" className="animation-project-browser" role="dialog" aria-label="Project Animation Studio đã lưu">
+            <div className="animation-project-browser-head"><strong>Project đã lưu</strong><button type="button" aria-label="Đóng danh sách project" onClick={() => setProjectsOpen(false)}><X size={15} aria-hidden="true" /></button></div>
+            <div className="animation-project-browser-actions"><button type="button" onClick={createNewProject}><Plus size={14} aria-hidden="true" /> Project mới</button><button type="button" onClick={closeCurrentProject}>Đóng project</button><button type="button" aria-label="Tải lại danh sách project" disabled={loadingProjects} onClick={() => void refreshSavedProjects()}><RefreshCw size={14} aria-hidden="true" /></button></div>
+            <div className="animation-project-list">{loadingProjects && !savedProjects.length ? <span>Đang tải project…</span> : savedProjects.length ? savedProjects.map((item) => <button type="button" key={item.id} className={item.id === project.id && persisted ? 'active' : ''} onClick={() => void openSavedProject(item.id)}><strong>{item.name}</strong><small>{item.sceneCount} cảnh · {item.width}×{item.height} · {new Date(item.updatedAt).toLocaleString('vi-VN')}</small>{item.id === project.id && persisted && <em>Đang mở</em>}</button>) : <span>Chưa có project nào được lưu.</span>}</div>
+          </div>}
+        </div>
         <button className="button quiet" type="button" aria-expanded={setupOpen} aria-controls="animation-setup" onClick={() => setSetupOpen((value) => !value)}><Settings2 size={15} aria-hidden="true" /> Thiết lập AI</button>
         <details className="animation-file-menu"><summary>Thêm <ChevronDown size={14} aria-hidden="true" /></summary><div>
         <button className="button quiet" type="button" onClick={() => void toggleHistory()}>Lịch sử</button>
@@ -544,8 +651,18 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         <button className="button primary" type="button" onClick={() => void save()} disabled={saving}><Save size={15} aria-hidden="true" /> {saving ? 'Đang lưu' : 'Lưu'}</button>
       </div>
     </header>
+    {characterPreview && <div className="animation-character-preview-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCharacterPreview(undefined); }}>
+      <div className="animation-character-preview-dialog" role="dialog" aria-modal="true" aria-label={`Xem nhân vật ${characterPreview.name}`}>
+        <div className="animation-character-preview-head"><strong>{characterPreview.name}</strong><button ref={characterPreviewCloseRef} type="button" aria-label="Đóng ảnh nhân vật" onClick={() => setCharacterPreview(undefined)}><X size={18} aria-hidden="true" /></button></div>
+        <img src={characterPreview.uri} alt={characterPreview.name} />
+        {characterPreview.id && <button className="button primary" type="button" onClick={() => { setCharacterReference(undefined); setSelectedCharacterAssetId(characterPreview.id || ''); setCharacterPreview(undefined); }}>Chọn nhân vật này</button>}
+      </div>
+    </div>}
     {presentationOpen && <div className="animation-presentation" role="dialog" aria-modal="true" aria-label="Trình chiếu toàn bộ video">
-      <AnimationCanvas scene={scene} assets={project.assets} width={project.width} height={project.height} timeMs={timeMs} showSubtitles={showSubtitles} onSelect={() => undefined} onMove={() => undefined} />
+      <div className="animation-canvas-wrap animation-transition-preview">
+        {transitionActive && previousScene && transitionStyles && <div className="animation-transition-layer" style={transitionStyles.outgoing}><AnimationCanvas scene={previousScene} assets={project.assets} width={project.width} height={project.height} timeMs={Math.max(0, previousScene.durationMs - 1)} showSubtitles={false} interactive={false} onSelect={() => undefined} onMove={() => undefined} /></div>}
+        <div className="animation-transition-layer" style={transitionActive ? transitionStyles?.incoming : undefined}><AnimationCanvas scene={scene} assets={project.assets} width={project.width} height={project.height} timeMs={timeMs} showSubtitles={showSubtitles} interactive={false} onSelect={() => undefined} onMove={() => undefined} /></div>
+      </div>
       <div className="animation-presentation-status"><span>{sequenceSeconds}s / {(totalDurationMs / 1000).toFixed(1)}s</span><strong>{scene.name}</strong></div>
       <button type="button" className="animation-presentation-close" aria-label="Đóng trình chiếu" onClick={() => { setPresentationOpen(false); setPlaying(false); }}><X size={20} aria-hidden="true" /></button>
     </div>}
@@ -560,9 +677,14 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         <label className="animation-subtitle-toggle"><input type="checkbox" checked={showSubtitles} onChange={(event) => setShowSubtitles(event.target.checked)} /><span>Phụ đề</span></label>
         {showSubtitles && <label className="animation-subtitle-size"><span>Cỡ chữ</span><input aria-label="Cỡ chữ phụ đề" type="number" min="16" max="120" value={subtitleFontSize} onChange={(event) => updateSubtitleFontSize(Math.max(16, Math.min(120, Number(event.target.value) || 16)))} /></label>}
         {showSubtitles && subtitleLayer && <button className="button quiet animation-edit-subtitle" type="button" onClick={() => setSelectedLayerId(subtitleLayer.id)}>Sửa câu hiện tại</button>}
-        <label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tạo một ảnh minh họa cho từng câu</span></label>
+        <label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tạo composition theo từng ý, đổi focus bằng chuyển động</span></label>
         {autoGenerateAssets && <><select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => { const value = event.target.value; setImageProviderId(value); setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1'); setCharacterOptions([]); setSelectedCharacterAssetId(''); }}><option value="flow-agent">Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : ' · chưa kết nối'}</option>{providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{!usingFlowAgentAssets && <small className="animation-reference-note">Ảnh tham chiếu nhân vật hiện cần Nano Banana 2.</small>}</>}
-        {autoGenerateAssets && <div className="animation-character-picker"><div className="animation-character-picker-head"><span>Nhân vật và phong cách</span>{(characterReference || selectedCharacterAssetId) && <button type="button" onClick={() => { setCharacterReference(undefined); setSelectedCharacterAssetId(''); setCharacterOptions([]); }}>Đổi</button>}</div>{characterReference ? <div className="animation-character-reference"><img src={animationAssetUrl(characterReference.uploadId)} alt="Nhân vật tham chiếu" /><span>{characterReference.name}</span></div> : selectedCharacterAssetId ? <div className="animation-character-reference"><img src={characterOptions.find((item) => item.id === selectedCharacterAssetId)?.uri} alt="Nhân vật đã chọn" /><span>{characterOptions.find((item) => item.id === selectedCharacterAssetId)?.name}</span></div> : <label className="animation-character-upload"><Image size={16} aria-hidden="true" /><span>Tải ảnh nhân vật của bạn</span><input type="file" accept="image/png,image/jpeg,image/webp" disabled={preparingCharacters} onChange={(event) => { void uploadCharacterReference(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label>}{!characterReference && !selectedCharacterAssetId && <button className="button quiet" type="button" disabled={preparingCharacters || brief.trim().length < 10 || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void prepareCharacterOptions()}>{preparingCharacters ? 'Đang tạo 4 nhân vật…' : 'Không có ảnh? Tạo 4 nhân vật để chọn'}</button>}{characterOptions.length > 0 && !selectedCharacterAssetId && <div className="animation-character-options" role="radiogroup" aria-label="Chọn nhân vật">{characterOptions.map((asset) => <button type="button" role="radio" aria-checked={selectedCharacterAssetId === asset.id} key={asset.id} onClick={() => setSelectedCharacterAssetId(asset.id)}><img src={asset.uri} alt={asset.name} /><span>{asset.name}</span></button>)}</div>}</div>}
+        {autoGenerateAssets && <div className="animation-character-picker">
+          <div className="animation-character-picker-head"><span>Nhân vật và phong cách</span>{(characterReference || selectedCharacterAssetId) && <button type="button" onClick={() => { setCharacterReference(undefined); setSelectedCharacterAssetId(''); }}>Đổi lựa chọn</button>}</div>
+          {characterReference ? <div className="animation-character-reference"><button type="button" aria-label="Xem lớn ảnh nhân vật tham chiếu" onClick={() => setCharacterPreview({ name: characterReference.name, uri: animationAssetUrl(characterReference.uploadId) })}><img src={animationAssetUrl(characterReference.uploadId)} alt="" /></button><span><b>Ảnh của bạn</b>{characterReference.name}</span></div> : selectedCharacter ? <div className="animation-character-reference"><button type="button" aria-label={`Xem lớn ${selectedCharacter.name}`} onClick={() => setCharacterPreview({ id: selectedCharacter.id, name: selectedCharacter.name, uri: selectedCharacter.uri })}><img src={selectedCharacter.uri} alt="" /></button><span><b>Đã chọn</b>{selectedCharacter.name}</span></div> : <label className="animation-character-upload"><Image size={16} aria-hidden="true" /><span>Tải ảnh nhân vật của bạn</span><input type="file" accept="image/png,image/jpeg,image/webp" disabled={preparingCharacters} onChange={(event) => { void uploadCharacterReference(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label>}
+          {!characterReference && characterOptions.length === 0 && <button className="button quiet" type="button" disabled={!preparingCharacters && (brief.trim().length < 10 || (usingFlowAgentAssets && !flowAgent?.connected))} onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng tạo 4 nhân vật' : 'Không có ảnh? Tạo 4 nhân vật để chọn'}</button>}
+          {!characterReference && characterOptions.length > 0 && <><div className="animation-character-options" role="radiogroup" aria-label="Chọn nhân vật">{characterOptions.map((asset) => <article className={selectedCharacterAssetId === asset.id ? 'selected' : ''} key={asset.id}><button className="animation-character-thumb" type="button" aria-label={`Xem lớn ${asset.name}`} onClick={() => setCharacterPreview({ id: asset.id, name: asset.name, uri: asset.uri })}><img src={asset.uri} alt="" /><span>{asset.name}</span></button><button className="animation-character-select" type="button" role="radio" aria-checked={selectedCharacterAssetId === asset.id} onClick={() => setSelectedCharacterAssetId(asset.id)}>{selectedCharacterAssetId === asset.id ? 'Đã chọn' : 'Chọn'}</button></article>)}</div><button className="animation-character-regenerate" type="button" onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng lượt tạo mới' : 'Tạo lại 4 phương án'}</button></>}
+        </div>}
         <button className="button primary" type="button" disabled={directing || preparingCharacters || brief.trim().length < 10 || (autoGenerateAssets && (!usingFlowAgentAssets || !flowAgent?.connected)) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang viết kịch bản, tạo ảnh và lồng tiếng…' : autoGenerateAssets && !characterReference && !selectedCharacterAssetId ? 'Chuẩn bị nhân vật' : 'Bắt đầu tạo video'}</button>
       </div>
       {directorJob && <div className="animation-director-job">
@@ -572,7 +694,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         {directorJob.hasResult && <button className="button quiet" type="button" onClick={() => void restoreDirectorResult()}>Mở kết quả đã lưu</button>}
       </div>}
       {directorError && <div className="animation-director-error" role="alert"><details><summary>Lỗi hoặc gián đoạn kết nối. Xem chi tiết</summary><p>{directorError}</p></details><button type="button" aria-label="Đóng thông báo lỗi" onClick={() => setDirectorError('')}><X size={14} aria-hidden="true" /></button></div>}
-      {directorWarning && <div className="animation-director-error warning" role="status"><details><summary>Video đang dùng ảnh thay thế. Xem chi tiết</summary><p>{directorWarning}</p></details><button type="button" aria-label="Đóng cảnh báo" onClick={() => setDirectorWarning('')}><X size={14} aria-hidden="true" /></button></div>}
+      {directorWarning && <div className="animation-director-error warning" role="status"><details><summary>{directorWarningTitle}</summary><p>{directorWarning}</p></details>{/thiếu hình|không tạo được ảnh|ảnh minh họa/i.test(directorWarning) && <button className="button primary animation-retry-missing" type="button" disabled={retryingMissingImages || !flowAgent?.connected} onClick={() => void retryMissingImages()}><RefreshCw size={14} aria-hidden="true" />{retryingMissingImages ? 'Đang tạo lại…' : 'Tạo lại ảnh lỗi'}</button>}<button type="button" aria-label="Đóng cảnh báo" onClick={() => setDirectorWarning('')}><X size={14} aria-hidden="true" /></button></div>}
     </div>
     <details className="animation-edit-disclosure"><summary>Chỉnh sửa bằng AI <ChevronDown size={14} aria-hidden="true" /></summary>
     <div className="animation-ai-edit-bar">
@@ -598,8 +720,11 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         </details>
       </aside>
       <main className="animation-stage-panel">
-        <div className="animation-stage-controls"><button type="button" className="animation-play" aria-label={playing ? 'Tạm dừng' : 'Phát cảnh'} onClick={() => { if (playing) { setPlaying(false); setSequenceMode(false); return; } setSequenceMode(false); if (timeMs >= scene.durationMs) setTimeMs(0); setPlaying(true); }}>{playing ? <Pause size={15} /> : <Play size={15} />}</button><span>{seconds}s / {(scene.durationMs / 1000).toFixed(1)}s</span><label>Thời lượng cảnh <input aria-label="Thời lượng cảnh tính bằng giây" type="number" min="0.5" max="60" step="0.1" value={Number((scene.durationMs / 1000).toFixed(1))} onChange={(event) => { const durationMs = Math.round(Math.max(.5, Math.min(60, Number(event.target.value) || .5)) * 1000); updateScene((current) => ({ ...current, durationMs, commands: current.commands.filter((command) => command.startMs + command.durationMs <= durationMs), camera: { ...current.camera, commands: current.camera.commands.filter((command) => command.startMs + command.durationMs <= durationMs) } })); setTimeMs((value) => Math.min(value, durationMs)); }} /> giây</label><small>{sequenceMode ? `Đang xem toàn bộ · ${sequenceSeconds}s` : 'Kéo trực tiếp layer để đổi vị trí'}</small></div>
-        <div className="animation-canvas-wrap" data-overlap-owner="canvas-selection"><AnimationCanvas scene={scene} assets={project.assets} width={project.width} height={project.height} timeMs={timeMs} selectedLayerId={selectedLayerId} exporting={rendering} showSubtitles={showSubtitles} onCanvasReady={(canvas) => { canvasRef.current = canvas; }} onSelect={(layerId) => setSelectedLayerId(layerId || '')} onMove={(layerId, x, y) => { const layer = scene.layers.find((item) => item.id === layerId); if (layer) updateLayer(layerId, { transform: { ...layer.transform, position: { x, y } } }); }} /></div>
+        <div className="animation-stage-controls"><button type="button" className="animation-play" aria-label={playing ? 'Tạm dừng' : 'Phát cảnh'} onClick={() => { if (playing) { setPlaying(false); setSequenceMode(false); return; } setSequenceMode(false); if (timeMs >= scene.durationMs) setTimeMs(0); setPlaying(true); }}>{playing ? <Pause size={15} /> : <Play size={15} />}</button><span>{seconds}s / {(scene.durationMs / 1000).toFixed(1)}s</span><label>Thời lượng cảnh <input aria-label="Thời lượng cảnh tính bằng giây" type="number" min="0.5" max="60" step="0.1" value={Number((scene.durationMs / 1000).toFixed(1))} onChange={(event) => { const durationMs = Math.round(Math.max(.5, Math.min(60, Number(event.target.value) || .5)) * 1000); updateScene((current) => ({ ...current, durationMs, commands: current.commands.filter((command) => command.startMs + command.durationMs <= durationMs), camera: { ...current.camera, commands: current.camera.commands.filter((command) => command.startMs + command.durationMs <= durationMs) } })); setTimeMs((value) => Math.min(value, durationMs)); }} /> giây</label><label>Chuyển sang cảnh sau <select aria-label="Hiệu ứng chuyển sang cảnh sau" disabled={!nextScene} value={outgoingTransition?.type || 'cut'} onChange={(event) => { const type = event.target.value as SceneTransitionType; updateOutgoingTransition({ type, durationMs: type === 'cut' ? 0 : outgoingTransition?.durationMs || 320 }); }}>{nextScene ? SCENE_TRANSITION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>) : <option value="cut">Không có cảnh sau</option>}</select></label>{nextScene && outgoingTransition?.type !== 'cut' && <label>Độ mượt <input aria-label="Thời lượng chuyển sang cảnh sau tính bằng mili giây" type="number" min="80" max="2000" step="20" value={outgoingTransition?.durationMs || 320} onChange={(event) => updateOutgoingTransition({ type: outgoingTransition?.type || 'crossfade', durationMs: Math.max(80, Math.min(2000, Number(event.target.value) || 320)) })} /> ms</label>}<small>{sequenceMode ? `Đang xem toàn bộ · ${sequenceSeconds}s` : 'Chuyển cảnh được lưu tại điểm nối với cảnh kế tiếp'}</small></div>
+        <div className="animation-canvas-wrap animation-transition-preview" data-overlap-owner="canvas-selection">
+          {transitionActive && previousScene && transitionStyles && <div className="animation-transition-layer" style={transitionStyles.outgoing}><AnimationCanvas scene={previousScene} assets={project.assets} width={project.width} height={project.height} timeMs={Math.max(0, previousScene.durationMs - 1)} showSubtitles={false} interactive={false} onSelect={() => undefined} onMove={() => undefined} /></div>}
+          <div className="animation-transition-layer" style={transitionActive ? transitionStyles?.incoming : undefined}><AnimationCanvas scene={scene} assets={project.assets} width={project.width} height={project.height} timeMs={timeMs} selectedLayerId={selectedLayerId} exporting={rendering} showSubtitles={showSubtitles} onCanvasReady={(canvas) => { canvasRef.current = canvas; }} onSelect={(layerId) => setSelectedLayerId(layerId || '')} onMove={(layerId, x, y) => { const layer = scene.layers.find((item) => item.id === layerId); if (layer) updateLayer(layerId, { transform: { ...layer.transform, position: { x, y } } }); }} /></div>
+        </div>
       </main>
       <aside className="animation-inspector" aria-label="Thuộc tính layer">
         <div className="animation-panel-heading"><span>INSPECTOR</span>{selectedLayer && <button type="button" aria-label="Xóa layer" onClick={deleteLayer}><Trash2 size={14} /></button>}</div>

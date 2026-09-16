@@ -41,6 +41,7 @@ export interface TranslationMemoryItem {
 type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent'; referenceUploadId?: string; referenceAssetId?: string };
 export interface AnimationDirectorJobStatus { id: string; projectId: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'; stage: string; error?: string; hasResult?: boolean }
 export interface AnimationDirectorInput { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }
+export interface AnimationProjectSummary { id: string; name: string; width: number; height: number; fps: number; sceneCount: number; createdAt: string; updatedAt: string }
 export function buildTranslationMemory(cues: SubtitleCue[], cueId: string, limit = 24): TranslationMemoryItem[] {
   const cueIndex = cues.findIndex((cue) => cue.id === cueId);
   const previous = cues
@@ -274,6 +275,7 @@ export const api = {
   deleteStorageItems: (items: Array<Pick<StorageItem, 'categoryId' | 'name'>>) => request<{ deletedCount: number; freedBytes: number; errors: Array<{ categoryId: string; name: string; error: string }> }>('/api/storage/delete', { method: 'POST', body: JSON.stringify({ items }) }),
   createAnimationProject: (input: { name: string; width: number; height: number; fps: number }) =>
     request<AnimationProject>("/api/animation-studio/projects", { method: "POST", body: JSON.stringify(input) }),
+  listAnimationProjects: () => request<AnimationProjectSummary[]>("/api/animation-studio/projects"),
   getAnimationProject: (id: string) => request<AnimationProject>(`/api/animation-studio/projects/${encodeURIComponent(id)}`),
   saveAnimationProject: (project: AnimationProject) => request<AnimationProject>(`/api/animation-studio/projects/${encodeURIComponent(project.id)}`, { method: "PUT", body: JSON.stringify(project) }),
   listAnimationProjectVersions: (id: string) => request<Array<{ id: string; createdAt: string; name: string; sceneCount: number }>>(`/api/animation-studio/projects/${encodeURIComponent(id)}/versions`),
@@ -281,7 +283,7 @@ export const api = {
   directAnimationProject: (input: { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }) =>
     request<AnimationProject>("/api/animation-studio/direct", { method: "POST", body: JSON.stringify(input) }),
   startAnimationDirectorJob: (input: AnimationDirectorInput, resumeId?: string): Promise<AnimationDirectorJobStatus> => request<AnimationDirectorJobStatus>('/api/animation-studio/director-jobs', { method: 'POST', body: JSON.stringify({ input, resumeId }) }),
-  generateAnimationCharacterOptions: (input: { brief: string; provider: AIProvider; model: string; assetGeneration: AnimationAssetGeneration; width?: number; height?: number }) => request<AnimationAsset[]>('/api/animation-studio/character-options', { method: 'POST', body: JSON.stringify(input) }),
+  generateAnimationCharacterOptions: (input: { brief: string; provider: AIProvider; model: string; assetGeneration: AnimationAssetGeneration; width?: number; height?: number }, signal?: AbortSignal) => request<AnimationAsset[]>('/api/animation-studio/character-options', { method: 'POST', body: JSON.stringify(input), signal }),
   animationDirectorJob: (id: string) => request<AnimationDirectorJobStatus>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}`),
   animationDirectorResult: (id: string) => request<AnimationProject>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/result`),
   animationDirectorInput: (id: string) => request<AnimationDirectorInput>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/input`),
@@ -314,6 +316,7 @@ export const api = {
   updateAnimationAsset: (id: string, change: Partial<Pick<AnimationAsset, "name" | "tags" | "style" | "animations">>) => request<AnimationAsset>(`/api/animation-studio/assets/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(change) }),
   generateAnimationAsset: (input: { prompt: string; name?: string; type?: AnimationAsset["type"]; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number }) => request<AnimationAsset>("/api/animation-studio/assets/generate", { method: "POST", body: JSON.stringify(input) }),
   generateAnimationNarration: (input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number }) => request<AnimationProject>("/api/animation-studio/narration", { method: "POST", body: JSON.stringify(input) }),
+  retryMissingAnimationImages: (input: { project: AnimationProject; assetGeneration: AnimationAssetGeneration; provider: AIProvider; model: string }) => request<{ project: AnimationProject; repaired: number; remaining: number }>("/api/animation-studio/retry-missing-images", { method: "POST", body: JSON.stringify(input) }),
   system: () =>
     request<{
       ffmpeg: boolean;

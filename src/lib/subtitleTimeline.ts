@@ -21,8 +21,8 @@ const GROUP_LABELS: Record<CuePropertyGroup, string> = {
 };
 
 const STYLE_KEYS: Record<Exclude<CuePropertyGroup, "all" | "position">, Array<keyof SubtitleStyle>> = {
-  typography: ["fontFamily", "bold", "italic"],
-  size: ["fontSize"],
+  typography: ["fontFamily", "bold", "italic", "underline"],
+  size: ["fontSize", "letterSpacing"],
   color: ["textColor"],
   frame: ["background", "outlineColor", "outlineWidth", "backgroundColor", "backgroundOpacity", "boxPaddingX", "boxPaddingY", "boxBorderColor", "boxBorderWidth", "boxBorderRadius"],
 };

@@ -14,6 +14,7 @@ interface Props {
   onCanvasReady?: (canvas: HTMLCanvasElement | null) => void;
   exporting?: boolean;
   showSubtitles?: boolean;
+  interactive?: boolean;
 }
 
 type Viewport = { scale: number; left: number; top: number };
@@ -41,16 +42,18 @@ function drawImageCover(context: CanvasRenderingContext2D, image: HTMLImageEleme
   context.drawImage(image, (sourceWidth - cropWidth) / 2, (sourceHeight - cropHeight) / 2, cropWidth, cropHeight, 0, 0, width, height);
 }
 
-export function AnimationCanvas({ scene, assets, width, height, timeMs, selectedLayerId, onSelect, onMove, onCanvasReady, exporting = false, showSubtitles = true }: Props) {
+export function AnimationCanvas({ scene, assets, width, height, timeMs, selectedLayerId, onSelect, onMove, onCanvasReady, exporting = false, showSubtitles = true, interactive = true }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawRef = useRef<() => void>(() => undefined);
+  const onCanvasReadyRef = useRef(onCanvasReady);
   const dragRef = useRef<{ id: string; dx: number; dy: number } | undefined>(undefined);
   const currentRef = useRef(evaluateScene(scene, timeMs));
-  currentRef.current = evaluateScene(scene, timeMs);
+  onCanvasReadyRef.current = onCanvasReady;
 
   useEffect(() => {
-    onCanvasReady?.(canvasRef.current);
-    return () => onCanvasReady?.(null);
-  }, [onCanvasReady]);
+    onCanvasReadyRef.current?.(canvasRef.current);
+    return () => onCanvasReadyRef.current?.(null);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -74,6 +77,7 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
       context.fillStyle = scene.backgroundColor;
       context.fillRect(0, 0, width, height);
       const evaluated = evaluateScene(scene, timeMs);
+      currentRef.current = evaluated;
       context.translate(width / 2 + evaluated.camera.position.x, height / 2 + evaluated.camera.position.y);
       context.scale(evaluated.camera.scale.x, evaluated.camera.scale.y);
       context.rotate(evaluated.camera.rotation * Math.PI / 180);
@@ -194,11 +198,18 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
       }
       context.restore();
     };
+    drawRef.current = resize;
     resize();
-    const observer = new ResizeObserver(resize);
+    return () => { if (drawRef.current === resize) drawRef.current = () => undefined; };
+  }, [assets, exporting, scene, selectedLayerId, showSubtitles, timeMs, width, height]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => drawRef.current());
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [assets, exporting, scene, selectedLayerId, showSubtitles, timeMs, width, height]);
+  }, []);
 
   const projectPoint = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current!;
@@ -208,6 +219,7 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
   };
 
   const pointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!interactive) return;
     const point = projectPoint(event);
     const hit = [...currentRef.current.layers].reverse().find((layer) => (showSubtitles || !layer.name.startsWith('Voiceover · Subtitle')) && contains(layer, point.x, point.y));
     onSelect(hit?.id);
@@ -218,11 +230,12 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
   };
 
   const pointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!interactive) return;
     const drag = dragRef.current;
     if (!drag) return;
     const point = projectPoint(event);
     onMove(drag.id, Math.round(point.x - drag.dx), Math.round(point.y - drag.dy));
   };
 
-  return <canvas ref={canvasRef} className={`animation-canvas${exporting ? ' exporting' : ''}`} style={exporting ? { width, height } : undefined} tabIndex={0} aria-label="Khung xem trước scene. Có thể kéo layer đang chọn." onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={() => { dragRef.current = undefined; }} onPointerCancel={() => { dragRef.current = undefined; }} />;
+  return <canvas ref={canvasRef} className={`animation-canvas${exporting ? ' exporting' : ''}`} style={exporting ? { width, height } : undefined} tabIndex={interactive ? 0 : -1} aria-hidden={!interactive || undefined} aria-label={interactive ? 'Khung xem trước scene. Có thể kéo layer đang chọn.' : undefined} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={() => { dragRef.current = undefined; }} onPointerCancel={() => { dragRef.current = undefined; }} />;
 }

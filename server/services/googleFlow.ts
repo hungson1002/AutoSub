@@ -49,6 +49,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
       throw new FlowSessionError('Trang Google Flow chưa tải được script xác minh (grecaptcha not available). Mở tab Google Flow, tải lại trang và kiểm tra tiện ích chặn script nếu lỗi vẫn còn.', 'FLOW_SCRIPT_NOT_READY');
     }
     if (/CAPTCHA_FAILED/i.test(detail)) throw new FlowSessionError(`Flow Agent chưa xác minh được phiên Google Flow: ${detail}`, 'CAPTCHA_FAILED');
+    if (/FLOW_ACCOUNT_SESSION_UNVERIFIED/i.test(detail)) throw new FlowSessionError('Phiên tài khoản Google Flow chưa được xác minh. Mở tab Google Flow, hoàn tất xác minh rồi bấm tạo lại các ảnh lỗi.', 'FLOW_ACCOUNT_SESSION_UNVERIFIED');
     if (response.status === 402) throw new FlowCreditError(`Tài khoản Google Flow không đủ credit: ${detail}`);
     // The bridge can wrap an upstream OAuth rejection in HTTP 400.
     // An existing key does not mean Google still accepts it.
@@ -165,15 +166,20 @@ async function requestWithSessionRecovery<T>(request: (attempt: number) => Promi
   }
 }
 
-export async function generateGoogleFlowImage(prompt: string, outputFile: string, options: { model?: string; size?: string; referenceImagePath?: string; signal?: AbortSignal; idempotencyKey?: string } = {}) {
-  await validateGoogleFlowSession(undefined, options.signal);
+type FlowImageOptions = { model?: string; size?: string; referenceImagePath?: string; signal?: AbortSignal; idempotencyKey?: string };
+
+export async function generateGoogleFlowImages(prompt: string, outputFiles: string[], options: FlowImageOptions = {}) {
+  if (!outputFiles.length || outputFiles.length > 4) throw new Error('Flow Agent chỉ hỗ trợ batch từ 1 đến 4 ảnh.');
+  const deadline = AbortSignal.timeout(5 * 60_000);
+  const requestSignal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+  await validateGoogleFlowSession(undefined, requestSignal);
   const reference = options.referenceImagePath ? await readFile(options.referenceImagePath) : undefined;
   const extension = options.referenceImagePath?.toLowerCase().match(/\.(png|jpe?g|webp)$/)?.[1];
   const mime = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : 'image/png';
   const body = JSON.stringify({
       prompt,
       model: options.model || 'narwhal',
-      n: 1,
+      n: outputFiles.length,
       size: options.size || '1024x1024',
       response_format: 'b64_json',
       ...(reference ? { image_base64: `data:${mime};base64,${reference.toString('base64')}` } : {}),
@@ -182,18 +188,31 @@ export async function generateGoogleFlowImage(prompt: string, outputFile: string
   // original paid request. A fresh key remains the default for a new, explicit
   // generation so clicking "Tạo lại" still creates a new take.
   const idempotencyKey = options.idempotencyKey?.trim()
-    || `autosub-image-${createHash('sha256').update(`${outputFile}\n${prompt}\n${randomUUID()}`).digest('hex').slice(0, 32)}`;
+    || `autosub-image-${createHash('sha256').update(`${outputFiles.join('|')}\n${prompt}\n${randomUUID()}`).digest('hex').slice(0, 32)}`;
   const retryIdempotencyKey = `${idempotencyKey}-retry-${randomUUID().replace(/-/g, '').slice(0, 12)}`;
-  const result = await requestWithSessionRecovery<{ data?: Array<{ b64_json?: string }> }>((attempt) => fetch(`${baseUrl()}/v1/images/generations`, {
-    method: 'POST', signal: options.signal,
-    headers: { ...headers(true), 'Idempotency-Key': attempt ? retryIdempotencyKey : idempotencyKey }, body,
-  }), options.signal, true);
-  const encoded = result.data?.[0]?.b64_json;
-  if (!encoded) throw new Error('Flow Agent hoàn tất nhưng không trả về dữ liệu ảnh.');
-  const bytes = Buffer.from(encoded, 'base64');
-  if (bytes.length < 100) throw new Error('Flow Agent trả về file ảnh không hợp lệ.');
-  await writeFile(outputFile, bytes);
-  return { model: options.model || 'narwhal', bytes: bytes.length };
+  try {
+    const result = await requestWithSessionRecovery<{ data?: Array<{ b64_json?: string }> }>((attempt) => fetch(`${baseUrl()}/v1/images/generations`, {
+      method: 'POST', signal: requestSignal,
+      headers: { ...headers(true), 'Idempotency-Key': attempt ? retryIdempotencyKey : idempotencyKey }, body,
+    }), requestSignal, true);
+    if (!result.data || result.data.length < outputFiles.length) throw new Error(`Flow Agent chỉ trả về ${result.data?.length || 0}/${outputFiles.length} ảnh.`);
+    const results = outputFiles.map((outputFile, index) => {
+      const encoded = result.data?.[index]?.b64_json;
+      if (!encoded) throw new Error(`Flow Agent không trả về dữ liệu ảnh thứ ${index + 1}.`);
+      const bytes = Buffer.from(encoded, 'base64');
+      if (bytes.length < 100) throw new Error(`Flow Agent trả về ảnh thứ ${index + 1} không hợp lệ.`);
+      return { outputFile, bytes };
+    });
+    await Promise.all(results.map(({ outputFile, bytes }) => writeFile(outputFile, bytes)));
+    return results.map(({ bytes }) => ({ model: options.model || 'narwhal', bytes: bytes.length }));
+  } catch (error) {
+    if (deadline.aborted && !options.signal?.aborted) throw new Error('Flow Agent tạo 4 nhân vật quá 5 phút nên AutoSub đã dừng lượt bị treo. Hãy thử lại.');
+    throw error;
+  }
+}
+
+export async function generateGoogleFlowImage(prompt: string, outputFile: string, options: FlowImageOptions = {}) {
+  return (await generateGoogleFlowImages(prompt, [outputFile], options))[0];
 }
 
 async function uploadReference(filePath: string, signal?: AbortSignal) {

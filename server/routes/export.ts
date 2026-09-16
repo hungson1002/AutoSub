@@ -240,6 +240,36 @@ async function probeVideoFrameRate(file: string, signal?: AbortSignal) {
   return "30";
 }
 
+export function boundedSourceVideoBitrate(
+  streamBitrate: number | undefined,
+  totalBitrate: number | undefined,
+) {
+  const measured = Number.isFinite(streamBitrate) && Number(streamBitrate) > 0
+    ? Number(streamBitrate)
+    : Math.max(0, Number(totalBitrate) - 160_000);
+  // Avoid broken metadata producing either an unusable encode or another
+  // multi-gigabyte export. This range still covers normal SD through 4K input.
+  return Math.round(clamp(measured || 2_500_000, 350_000, 40_000_000));
+}
+
+async function probeSourceVideoBitrate(file: string, signal?: AbortSignal) {
+  const result = await run("ffprobe", [
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=bit_rate:format=bit_rate",
+    "-of", "json",
+    file,
+  ], signal);
+  const parsed = JSON.parse(result.stdout || "{}") as {
+    streams?: Array<{ bit_rate?: string }>;
+    format?: { bit_rate?: string };
+  };
+  return boundedSourceVideoBitrate(
+    Number(parsed.streams?.[0]?.bit_rate),
+    Number(parsed.format?.bit_rate),
+  );
+}
+
 async function probeVideoStartSeconds(file: string, signal?: AbortSignal) {
   const result = await run(
     "ffprobe",
@@ -1226,37 +1256,46 @@ export async function exportRoutes(app: FastifyInstance) {
       const requestedCrf = Math.round(clamp(Number(options.crf ?? 20), 16, 35));
       const requestedQuality = String(requestedCrf);
       const videoEncoder = copyVideoStream ? undefined : await preferredH264Encoder();
+      const targetVideoBitrate = copyVideoStream
+        ? undefined
+        : await probeSourceVideoBitrate(input, requestAbort.signal);
+      const targetBitrate = `${Math.round((targetVideoBitrate || 2_500_000) / 1000)}k`;
+      const maxBitrate = `${Math.round((targetVideoBitrate || 2_500_000) * 1.35 / 1000)}k`;
+      const bufferSize = `${Math.round((targetVideoBitrate || 2_500_000) * 2 / 1000)}k`;
       if (copyVideoStream) {
         args.push("-c:v", "copy");
       } else if (videoEncoder === "h264_amf") {
         args.push(
           "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality",
-          "-rc", "qvbr", "-qvbr_quality_level", requestedQuality,
+          "-rc", "vbr_peak", "-b:v", targetBitrate,
+          "-maxrate", maxBitrate, "-bufsize", bufferSize,
           "-vbaq", "true", "-preanalysis", "true",
           "-pix_fmt", "yuv420p", "-profile:v", "high", "-tag:v", "avc1",
         );
       } else if (videoEncoder === "h264_nvenc") {
         args.push(
           "-c:v", "h264_nvenc", "-preset", "fast",
-          "-cq", requestedQuality, "-b:v", "0",
+          "-rc", "vbr", "-cq", requestedQuality, "-b:v", targetBitrate,
+          "-maxrate", maxBitrate, "-bufsize", bufferSize,
           "-pix_fmt", "yuv420p", "-profile:v", "high", "-tag:v", "avc1",
         );
       } else if (videoEncoder === "h264_qsv") {
         args.push(
           "-c:v", "h264_qsv", "-preset", "veryfast",
-          "-global_quality", requestedQuality,
+          "-b:v", targetBitrate, "-maxrate", maxBitrate, "-bufsize", bufferSize,
           "-pix_fmt", "yuv420p", "-profile:v", "high", "-tag:v", "avc1",
         );
       } else {
         args.push(
           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high",
-          // Export speed matters more for long-form edits. Ultrafast keeps the
-          // frame graph moving on CPU-only machines; lower CRF offsets the
-          // preset's lower compression efficiency at the cost of larger files.
-          "-tag:v", "avc1", "-crf", String(Math.max(12, requestedCrf - 4)), "-preset", "ultrafast",
+          // One-pass average bitrate keeps long exports close to the source
+          // size. The old CRF 16 + ultrafast combination could inflate 1 GB
+          // source videos to several gigabytes.
+          "-tag:v", "avc1", "-preset", "veryfast",
+          "-b:v", targetBitrate, "-maxrate", maxBitrate, "-bufsize", bufferSize,
         );
       }
-      if (audio) args.push("-c:a", "aac");
+      if (audio) args.push("-c:a", "aac", "-b:a", "160k");
       else args.push("-an");
       // Logo inputs loop, while audio is padded/trimmed in the filter graph.
       // Keep one finite output duration so export matches the editor timeline.

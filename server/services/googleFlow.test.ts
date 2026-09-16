@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { flowAgentStatus, generateGoogleFlowImage, generateGoogleFlowVideo, validateGoogleFlowSession } from './googleFlow';
+import { flowAgentStatus, generateGoogleFlowImage, generateGoogleFlowImages, generateGoogleFlowVideo, validateGoogleFlowSession } from './googleFlow';
 
 for (const failure of ['NO_FLOW_KEY', 'Request had invalid authentication credentials. Expected OAuth 2 access token']) test(`${failure} refreshes the active browser session and retries once`, async () => {
   const originalFetch = globalThis.fetch;
@@ -147,6 +147,29 @@ test('Flow Agent image generation stores returned base64 image', async () => {
   try {
     await generateGoogleFlowImage('A clean product background', output);
     assert.equal((await readFile(output)).length, 128);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Flow Agent batches four image alternatives into one generation request', async () => {
+  const originalFetch = globalThis.fetch;
+  const directory = await mkdtemp(path.join(tmpdir(), 'autosub-flow-image-batch-'));
+  const outputs = Array.from({ length: 4 }, (_, index) => path.join(directory, `asset-${index}.png`));
+  let generationRequests = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
+    generationRequests += 1;
+    const body = JSON.parse(String(init?.body || '{}')) as { n?: number };
+    assert.equal(body.n, 4);
+    return Response.json({ data: Array.from({ length: 4 }, (_, index) => ({ b64_json: Buffer.alloc(128, index + 1).toString('base64') })) });
+  };
+  try {
+    await generateGoogleFlowImages('Four distinct character alternatives', outputs);
+    assert.equal(generationRequests, 1);
+    for (let index = 0; index < outputs.length; index += 1) assert.equal((await readFile(outputs[index]))[0], index + 1);
   } finally {
     globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });

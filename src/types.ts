@@ -226,6 +226,8 @@ export interface SubtitleStyle {
   boxBorderRadius?: number;
   bold: boolean;
   italic: boolean;
+  underline?: boolean;
+  letterSpacing?: number;
   position: "top" | "middle" | "bottom" | "custom";
   customX?: number;
   customY?: number;
@@ -538,6 +540,8 @@ export const defaultStyle: SubtitleStyle = {
   boxBorderRadius: 0,
   bold: false,
   italic: false,
+  underline: false,
+  letterSpacing: 0,
   position: "bottom",
   customX: 50,
   customY: 82,

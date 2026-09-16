@@ -1,4 +1,5 @@
 import type { AnimationProject, AnimationScene } from '../../shared/animationStudio';
+import { sceneTransition } from '../animationStudio/sceneTransitions';
 
 export interface RenderSceneRange {
   scene: AnimationScene;
@@ -11,24 +12,21 @@ export interface RenderSceneRange {
 export const millisecondsToFrames = (milliseconds: number, fps: number) =>
   Math.max(1, Math.round(milliseconds / 1000 * fps));
 
-export function buildRenderTimeline(project: AnimationProject, transitionMilliseconds = 240): RenderSceneRange[] {
+export function buildRenderTimeline(project: AnimationProject): RenderSceneRange[] {
   const fps = Math.max(1, project.fps);
   const scenes = [...project.scenes]
     .sort((a, b) => a.order - b.order);
-  const preferredTransition = millisecondsToFrames(transitionMilliseconds, fps);
   let cursor = 0;
   return scenes.map((scene, index) => {
     const durationInFrames = millisecondsToFrames(scene.durationMs, fps);
-    const previousDuration = index ? millisecondsToFrames(scenes[index - 1]!.durationMs, fps) : 0;
-    // Narrated scenes own their full audio window. Overlapping scene sequences
-    // would also overlap speech and subtitle cues, regardless of visual opacity.
-    const hasVoice = (item: AnimationScene | undefined) => item?.renderMode === 'generated-video' || (item?.renderMode === 'composite' && (Boolean(item.narration.trim()) || item.layers.some((layer) => layer.type === 'audio' && layer.visible)));
-    const transitionInFrames = index && !hasVoice(scene) && !hasVoice(scenes[index - 1]) ? Math.min(preferredTransition, Math.floor(previousDuration / 3), Math.floor(durationInFrames / 3)) : 0;
-    const transitionOutFrames = index < scenes.length - 1 && !hasVoice(scene) && !hasVoice(scenes[index + 1])
-      ? Math.min(preferredTransition, Math.floor(durationInFrames / 3), Math.floor(millisecondsToFrames(scenes[index + 1]!.durationMs, fps) / 3))
-      : 0;
-    const from = Math.max(0, cursor - transitionInFrames);
-    cursor = from + durationInFrames;
+    const requested = sceneTransition(scene);
+    const previous = scenes[index - 1];
+    const transitionInFrames = index && scene.renderMode === 'composite' && previous?.renderMode === 'composite' && requested.type !== 'cut' ? Math.min(millisecondsToFrames(requested.durationMs, fps), Math.floor(durationInFrames / 3)) : 0;
+    const next = scenes[index + 1];
+    const nextTransition = next ? sceneTransition(next) : undefined;
+    const transitionOutFrames = scene.renderMode === 'composite' && next?.renderMode === 'composite' && nextTransition && nextTransition.type !== 'cut' ? Math.min(millisecondsToFrames(nextTransition.durationMs, fps), Math.floor(durationInFrames / 3)) : 0;
+    const from = cursor;
+    cursor += durationInFrames;
     return { scene, from, durationInFrames, transitionInFrames, transitionOutFrames };
   });
 }

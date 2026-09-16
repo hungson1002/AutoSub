@@ -217,6 +217,7 @@ type Props = {
   onDeleteCue?: (id: string) => void;
   onDeleteCues?: (ids: string[]) => void;
   onSplitCueAtTime?: (timeMs: number) => void;
+  onDuplicateCue?: (id: string) => void;
   onExportStem?: (stem: "vocals" | "background") => void;
   onOpenAudioMix?: () => void;
   onOpenDubbingAudioMode?: (mode: OriginalAudioMode) => void;
@@ -251,6 +252,8 @@ export function VideoPlayer({
   onAddTextCue,
   onDeleteCue,
   onDeleteCues,
+  onSplitCueAtTime,
+  onDuplicateCue,
   roi,
   onRoiChange,
   onBlurRegionsChange,
@@ -1660,6 +1663,8 @@ export function VideoPlayer({
             onChange={onCueChange}
             onSeek={seek}
             onAddText={onAddTextCue}
+            onSplit={onSplitCueAtTime}
+            onDuplicate={onDuplicateCue}
             onDelete={onDeleteCue}
             onDeleteMany={onDeleteCues}
           />

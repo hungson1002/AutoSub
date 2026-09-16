@@ -1,11 +1,53 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, directorRepairRule, jsonFromDirectorReply, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets } from './animationDirector';
+import { animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, buildVisualDensityPlan, directorRepairRule, jsonFromDirectorReply, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets } from './animationDirector';
 import { animationAssetCacheKey, wavDurationMs } from './animationAssets';
 import { animationCraftRules } from './directorKnowledge';
 import { animationPerformancePlanIssues } from './animationDirector';
 import { evaluateScene } from '../../src/animationStudio/evaluator';
 import { defaultTransform } from '../../shared/animationStudio';
+
+test('visual density stays at an understandable 20-24 changes per minute and reuses compositions', () => {
+  const targets = [
+    { seconds: 60, min: 22, max: 28 },
+    { seconds: 300, min: 100, max: 120 },
+    { seconds: 600, min: 200, max: 230 },
+    { seconds: 900, min: 280, max: 330 },
+  ];
+  for (const target of targets) {
+    const plan = buildVisualDensityPlan(target.seconds);
+    assert.ok(plan.visualCount >= target.min && plan.visualCount <= target.max);
+    assert.equal(plan.visualsPerScene.reduce((sum, count) => sum + count, 0), plan.visualCount);
+    assert.ok(plan.visualCount / (target.seconds / 60) >= 20 && plan.visualCount / (target.seconds / 60) <= 24);
+    assert.ok(plan.visualsPerScene.every((count) => count >= 1 && count <= 2));
+    assert.ok(plan.sceneCount < plan.visualCount);
+    assert.ok(plan.visualDurationsSeconds.slice(0, plan.openingVisualCount).every((duration) => duration >= 2 && duration <= 2.5));
+    assert.ok(plan.visualDurationsSeconds.slice(plan.openingVisualCount).every((duration) => duration >= 2.5 && duration <= 3.5));
+    assert.ok(Math.abs(plan.sceneDurationsSeconds.reduce((sum, duration) => sum + duration, 0) - target.seconds) < 0.001);
+  }
+  const firstMinute = buildVisualDensityPlan(60);
+  assert.ok(15 / firstMinute.openingVisualCount >= 2 && 15 / firstMinute.openingVisualCount <= 2.5);
+  assert.ok(firstMinute.visualCount <= 25);
+});
+
+test('cue timing cannot leave the first storyboard image visible past three seconds', () => {
+  const now = new Date().toISOString();
+  const visuals = Array.from({ length: 2 }, (_, index) => ({ id: `dense-${index}`, type: 'background' as const, name: `Dense ${index}`, uri: `/dense-${index}.png`, tags: [], createdAt: now }));
+  const timeline = buildVisualBeatTimeline({
+    sceneIndex: 0,
+    durationMs: 5_000,
+    width: 1280,
+    height: 720,
+    narration: 'Nguyên nhân xuất hiện từ đầu, trong khi kết quả chỉ được nói ở tận cuối câu.',
+    visuals,
+    beats: [
+      { purpose: 'cause', narrationCue: 'Nguyên nhân', visual: 'cause', motion: 'locked', transition: 'crossfade' },
+      { purpose: 'result', narrationCue: 'kết quả', visual: 'result', motion: 'locked', transition: 'crossfade' },
+    ],
+  });
+  const secondImageStart = timeline.commands.find((command) => command.id === 'visual-in-0-1')?.startMs;
+  assert.ok(secondImageStart !== undefined && secondImageStart <= 3_000);
+});
 
 test('rejects action stills and slide-only plans but compiles a moving subject', () => {
   const segments = normalizeLongAnimationSegments({ segments: [{ narration: 'Quả bóng đi từ trái sang phải.', visualBeats: [{ purpose: 'action', visual: 'A ball', motion: 'push', narrationCue: 'Quả bóng đi từ trái sang phải', action: 'Ball travels left to right' }] }] }, 1);

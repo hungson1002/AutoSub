@@ -154,7 +154,7 @@ test("property clipboard combines multiple checked groups", () => {
   const clipboard = copyCueProperties(textCue, defaultStyle, ["position", "size", "color"]);
   assert.deepEqual(clipboard.groups, ["position", "size", "color"]);
   assert.deepEqual(clipboard.screenPosition, { xPercent: 18, yPercent: 22 });
-  assert.deepEqual(clipboard.styleOverrides, { fontSize: 52, textColor: "#ffee00" });
+  assert.deepEqual(clipboard.styleOverrides, { fontSize: 52, letterSpacing: 0, textColor: "#ffee00" });
 });
 
 test("paste-property selection can omit copied groups", () => {

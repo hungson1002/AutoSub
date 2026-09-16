@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { blurRegionWindowSeconds, buildSlowVideoFilter, embeddedFontFamily, replaceAssFontFamily, safeDrawtextPosition } from "./export";
+import { blurRegionWindowSeconds, boundedSourceVideoBitrate, buildSlowVideoFilter, embeddedFontFamily, replaceAssFontFamily, safeDrawtextPosition } from "./export";
+
+test("export bitrate follows the source instead of unconstrained CRF output", () => {
+  assert.equal(boundedSourceVideoBitrate(900_000, 1_050_000), 900_000);
+  assert.equal(boundedSourceVideoBitrate(undefined, 1_060_000), 900_000);
+  assert.equal(boundedSourceVideoBitrate(undefined, undefined), 2_500_000);
+  assert.equal(boundedSourceVideoBitrate(100_000_000, 100_200_000), 40_000_000);
+});
 
 test("export replaces an uploaded browser font alias in every ASS style and cue", () => {
   const ass = [

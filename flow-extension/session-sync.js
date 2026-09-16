@@ -96,7 +96,7 @@ async function refreshSelectedAccountSession(allowSignIn = false) {
           || normalizeFlowEmail(current.email) !== email) return;
       const sessionEmail = normalizeFlowEmail(session?.user?.email);
       if (sessionEmail === email && typeof session?.access_token === 'string'
-          && captureBearerToken(`Bearer ${session.access_token}`, account)) {
+          && captureBearerToken(`Bearer ${session.access_token}`, account, 'labs_session')) {
         flowSessionStatus = { status: 'ready', email, source: 'verified_labs_session' };
         if (accountSyncTabId !== null) {
           const syncId = accountSyncTabId;

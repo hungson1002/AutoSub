@@ -38,6 +38,7 @@ window.addEventListener('message', (event) => {
   chrome.runtime.sendMessage({
     type: 'FLOW_AUTH_TOKEN',
     authorization: event.data.authorization,
+    apiHost: event.data.apiHost,
     url: location.href,
   }).catch(() => {});
 });
@@ -109,4 +110,3 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   return true; // keep channel open for async reply
 });
 }
-

@@ -5,7 +5,7 @@ import type { AnimationAsset, AnimationCommand, AnimationProject, AnimationScene
 import { defaultTransform, validateAnimationProject } from '../../shared/animationStudio';
 import { chat } from '../adapters';
 import type { AIProvider } from '../types';
-import { generateAnimationAsset, generateAnimationNarration, listAnimationAssets } from './animationAssets';
+import { generateAnimationAsset, generateAnimationNarration, generateFlowAnimationAssetBatch, listAnimationAssets } from './animationAssets';
 import { saveAnimationProject } from './animationProjects';
 import { FlowSessionError, validateGoogleFlowSession } from './googleFlow';
 import { animationCraftRules } from './directorKnowledge';
@@ -43,6 +43,32 @@ export type LongAnimationSegment = {
 };
 
 type DirectorAssetRequest = NonNullable<DirectorReply['assetRequests']>[number];
+
+const narrationWordCount = (segments: Array<{ narration?: string }>) => segments.reduce((total, segment) => total + String(segment.narration || '').trim().split(/\s+/u).filter(Boolean).length, 0);
+
+export function buildVisualDensityPlan(durationSeconds: number) {
+  const duration = Math.max(1, Math.round(durationSeconds));
+  const openingSeconds = Math.min(15, duration);
+  const openingVisualCount = Math.max(1, Math.round(openingSeconds / 2.25));
+  const mainSeconds = Math.max(0, duration - openingSeconds);
+  const mainVisualCount = mainSeconds ? Math.max(1, Math.round(mainSeconds / 2.9)) : 0;
+  const visualDurationsSeconds = [
+    ...Array.from({ length: openingVisualCount }, () => openingSeconds / openingVisualCount),
+    ...Array.from({ length: mainVisualCount }, () => mainSeconds / mainVisualCount),
+  ];
+  const visualCount = visualDurationsSeconds.length;
+  // A scene is one stable composition. Two adjacent meaningful beats usually
+  // reuse that composition with camera/highlight motion instead of buying a new image.
+  const sceneCount = Math.ceil(visualCount / 2);
+  const visualsPerScene = Array.from({ length: sceneCount }, (_, index) => Math.min(2, visualCount - index * 2));
+  let cursor = 0;
+  const sceneDurationsSeconds = visualsPerScene.map((count) => {
+    const value = visualDurationsSeconds.slice(cursor, cursor + count).reduce((sum, seconds) => sum + seconds, 0);
+    cursor += count;
+    return value;
+  });
+  return { sceneCount, visualCount, openingVisualCount, visualsPerScene, visualDurationsSeconds, sceneDurationsSeconds };
+}
 
 export function animationPerformancePlanIssues(segments: LongAnimationSegment[]) {
   const issues: string[] = [];
@@ -105,23 +131,35 @@ export function jsonFromDirectorReply(raw: string): DirectorReply {
   throw new Error('JSON từ AI Director bị thiếu phần kết thúc.');
 }
 
-export async function generateAnimationCharacterOptions(input: { brief: string; provider: AIProvider; model: string; assetGeneration: DirectorAssetGeneration; width?: number; height?: number }) {
+export async function generateAnimationCharacterOptions(input: { brief: string; provider: AIProvider; model: string; assetGeneration: DirectorAssetGeneration; width?: number; height?: number }, signal?: AbortSignal) {
   const brief = String(input.brief || '').trim().slice(0, 8_000);
   if (brief.length < 10) throw new Error('Hãy nhập nội dung trước khi tạo nhân vật.');
   if (!input.provider || !input.model) throw new Error('Chưa cấu hình AI để thiết kế nhân vật.');
-  if (input.assetGeneration.generator === 'flow-agent') await validateGoogleFlowSession();
-  const raw = await chat(input.provider, input.model, [{ role: 'system', content: 'Return compact JSON only: {"characterOptions":[{"name":"","prompt":""}]}. Create exactly four clearly different lead-character design options for the supplied story. Each prompt must describe one full-body character reference sheet: front three-quarter pose, complete uncropped silhouette, recognizable face, clothing, colors, proportions and one coherent art style suitable for consistent reuse in later story illustrations. Use a simple neutral background. No text, labels, grids, multiple poses, UI or logos.' }, { role: 'user', content: brief }], undefined, 4096);
+  if (input.assetGeneration.generator === 'flow-agent') await validateGoogleFlowSession(undefined, signal);
+  const raw = await chat(input.provider, input.model, [{ role: 'system', content: 'Return compact JSON only: {"characterOptions":[{"name":"","prompt":""}]}. Create exactly four clearly different lead-character design options for the supplied story. Each prompt must describe one full-body character reference sheet: front three-quarter pose, complete uncropped silhouette, recognizable face, clothing, colors, proportions and one coherent art style suitable for consistent reuse in later story illustrations. Use a simple neutral background. No text, labels, grids, multiple poses, UI or logos.' }, { role: 'user', content: brief }], signal, 4096);
   const planned = jsonFromDirectorReply(raw).characterOptions || [];
   const fallbacks = ['cinematic illustrated realism', 'expressive 3D animated film style', 'modern graphic novel illustration', 'warm hand-painted storybook illustration'];
   const options = Array.from({ length: 4 }, (_, index) => ({
     name: String(planned[index]?.name || `Nhân vật ${index + 1}`).trim().slice(0, 80),
     prompt: String(planned[index]?.prompt || `Create the lead character for this story in ${fallbacks[index]}: ${brief}`).trim(),
   }));
-  const assets: AnimationAsset[] = [];
-  for (const [index, option] of options.entries()) {
-    assets.push(await generateDirectorAsset({ key: `character-option-${index + 1}`, name: option.name, prompt: `${option.prompt}. This is a reusable identity and art-style reference for the story: ${brief}. Show exactly one character, full body, uncropped, no text or labels.`, type: 'character', tags: ['character-option', `option-${index + 1}`], style: 'character reference' }, { ...input.assetGeneration, referenceUploadId: undefined, referenceAssetId: undefined }, input.width || 1024, input.height || 1024));
+  const requests = options.map((option, index) => ({
+    prompt: `${option.prompt}. This is a reusable identity and art-style reference for the story: ${brief}. Show exactly one character, full body, uncropped, no text or labels.`,
+    name: option.name,
+    type: 'character' as const,
+    tags: ['character-option', `option-${index + 1}`],
+    style: 'character reference',
+    ...input.assetGeneration,
+    referenceUploadId: undefined,
+    referenceAssetId: undefined,
+    width: input.width || 1024,
+    height: input.height || 1024,
+  }));
+  if (input.assetGeneration.generator === 'flow-agent') {
+    const directions = options.map((option, index) => `${index + 1}. ${option.name}: ${option.prompt}`).join('\n');
+    return generateFlowAnimationAssetBatch(requests, `Create four strongly distinct lead-character design alternatives for this story. Each returned image must contain exactly one full-body character in a front three-quarter pose, complete uncropped silhouette, recognizable face, clothing, colors and proportions, on a simple neutral background. Vary identity, silhouette and art direction clearly across the batch. No text, labels, grids, multiple poses, UI or logos. Story: ${brief}\nDesign directions:\n${directions}`, signal);
   }
-  return assets;
+  return Promise.all(requests.map(generateAnimationAsset));
 }
 
 export function directorRepairRule(reason: string) {
@@ -231,7 +269,20 @@ export function buildBeatPerformances(input: { sceneIndex: number; durationMs: n
 
 export function buildVisualBeatTimeline(input: { sceneIndex: number; durationMs: number; width: number; height: number; visuals: Array<AnimationAsset | undefined>; beats: LongAnimationSegment['visualBeats']; narration?: string }) {
   const { sceneIndex, durationMs, width, height, visuals, beats } = input;
-  const windows = buildAnimationBeatWindows({ beats, narration: input.narration, durationMs });
+  const cueWindows = buildAnimationBeatWindows({ beats, narration: input.narration, durationMs });
+  const starts = cueWindows.map((window) => window.startMs);
+  if (durationMs <= Math.max(1, beats.length) * 3000) {
+    for (let index = 1; index < starts.length; index++) {
+      const earliest = Math.max(starts[index - 1] + 1, durationMs - (starts.length - index) * 3000);
+      const latest = Math.min(durationMs - 1, starts[index - 1] + 3000);
+      starts[index] = Math.max(earliest, Math.min(latest, starts[index]));
+    }
+  }
+  const windows = cueWindows.map((window, index) => ({
+    ...window,
+    startMs: starts[index],
+    endMs: index + 1 < starts.length ? starts[index + 1] : durationMs,
+  }));
   const layers: SceneLayer[] = [];
   const commands: AnimationCommand[] = [];
   const count = Math.max(1, visuals.length);
@@ -262,15 +313,15 @@ export function buildVisualBeatTimeline(input: { sceneIndex: number; durationMs:
   return { layers, commands };
 }
 
-async function directLongAnimationProject(input: DirectAnimationInput, brief: string, targetDurationSeconds: number, automaticDuration: boolean, checkpointKey: string, onStage: (stage: string) => Promise<void>) {
+async function directLongAnimationProject(input: DirectAnimationInput, brief: string, targetDurationSeconds: number, _automaticDuration: boolean, checkpointKey: string, onStage: (stage: string) => Promise<void>) {
   const library = await listAnimationAssets();
   const assets = [...library.filter((asset) => !input.project.assets.some((item) => item.id === asset.id)), ...input.project.assets];
-  const timedSceneCount = Math.ceil(targetDurationSeconds / 8);
-  const authoredSentenceCount = brief.split(/(?<=[.!?…])\s+/u).map((item) => item.trim()).filter(Boolean).length;
-  const sceneCount = Math.max(1, Math.min(150, automaticDuration && brief.split(/\s+/).length >= 40 ? Math.max(timedSceneCount, authoredSentenceCount) : timedSceneCount));
+  const density = buildVisualDensityPlan(targetDurationSeconds);
+  const sceneCount = density.sceneCount;
+  const visualsPerScene = density.visualsPerScene;
   const targetWords = Math.round(targetDurationSeconds * 2.25);
   const hasCharacterReference = Boolean(input.assetGeneration?.referenceUploadId || input.assetGeneration?.referenceAssetId);
-  const storyRules = `STORYBOARD CONTRACT: turn the user's input into a narrated visual story. If it is already a detailed script, preserve its facts, order and intent while making it natural to speak. If it is only a premise, invent a complete coherent script. Each segment contains exactly one narration sentence and exactly one matching image prompt; never reuse a generic image for unrelated narration. Return a continuityBible that locks the art style, recurring characters, clothing, proportions, color palette and world. ${hasCharacterReference ? 'A selected character reference image will be supplied to the image generator: treat that identity and its art style as immutable, and design every other character in the same visual universe.' : 'A selected AI character design will be supplied to the image generator and is the immutable identity/style anchor.'} Images must be full-frame compositions with no captions, subtitles, labels, logos, UI cards or baked-in text. Use a held image and a soft crossfade; do not request sprites, actors, diagrams or camera movement.`;
+  const storyRules = `STORYBOARD CONTRACT: turn the user's input into a narrated visual story. If it is already a detailed script, preserve its facts, order and intent while making it natural to speak. If it is only a premise, invent a complete coherent script. Each segment is one coherent visual idea and may contain one or two short related narration sentences. Do not create a new composition for every sentence or phrase. A segment's visualBeats are meaningful internal changes within the same composition: change focus with a gentle push, pull or pan while keeping the same subjects, setting and visual grammar. All visualBeats inside one segment must describe one reusable full-frame composition containing the elements needed for those internal changes. narrationCue must be the exact clause where the focus changes. The first 15 seconds may move at 2-2.5 seconds per beat; the main explanation should stay near 2.5-3.5 seconds. Important comparisons or mechanism explanations may use a longer held beat. Never exceed 25 meaningful visual changes per minute except a deliberate short montage. Return a continuityBible that locks the art style, recurring characters, clothing, proportions, color palette and world. ${hasCharacterReference ? 'A selected character reference image will be supplied to the image generator: treat that identity and its art style as immutable, and design every other character in the same visual universe.' : 'A selected AI character design will be supplied to the image generator and is the immutable identity/style anchor.'} Images must have no captions, subtitles, labels, logos, UI cards or baked-in text. Prefer comprehension over constant cutting.`;
   brief = `${brief}\n\n${storyRules}`;
   const checkpoint = await loadAnimationCheckpoint<{ plan: DirectorReply; segments: LongAnimationSegment[]; sceneIds: string[] }>(checkpointKey);
   let plan: DirectorReply;
@@ -290,21 +341,28 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
     continuity = '';
     for (let chunkIndex = 0; chunkIndex < chunks; chunkIndex++) {
       const chunkSize = Math.min(20, sceneCount - plannedSegments.length);
+      const chunkVisualCounts = visualsPerScene.slice(plannedSegments.length, plannedSegments.length + chunkSize);
       await onStage(`Đang viết storyboard ${chunkIndex + 1}/${chunks}`);
       const prior = plannedSegments.at(-1);
-      const planRaw = await chat(input.provider, input.model, [{ role: 'system', content: `You are a storyboard director. Return compact JSON only: {"name":"","continuityBible":"","segments":[{"title":"","narration":"one spoken sentence","visualBeats":[{"purpose":"hook|explain|example|payoff","narrationCue":"the exact narration sentence","visual":"complete image-generation prompt","motion":"locked","transition":"crossfade"}],"motionGraphic":"none"}]}. This is chunk ${chunkIndex + 1}/${chunks}; create exactly ${chunkSize} consecutive Vietnamese narration sentences, covering positions ${plannedSegments.length + 1}-${plannedSegments.length + chunkSize} of ${sceneCount}, and about ${Math.round(targetWords * chunkSize / sceneCount)} spoken words. ${chunkIndex === 0 ? 'Open with curiosity.' : `Continue directly after: ${prior?.narration || ''}`} ${chunkIndex === chunks - 1 ? 'Resolve the idea in the final sentence.' : 'Do not conclude the story yet.'} Each image prompt must show the concrete action, subject, setting, emotion, framing and lighting needed to illustrate its sentence. ${continuity ? `Use this immutable continuityBible verbatim: ${continuity}` : 'Infer and return one detailed continuityBible from the user input and selected character reference.'} Do not force a white background or predetermined art style. No text inside images.\n\n${storyRules}` }, { role: 'user', content: brief }], undefined, 16_384);
-      const chunk = jsonFromDirectorReply(planRaw);
+      const planRaw = await chat(input.provider, input.model, [{ role: 'system', content: `You are a storyboard director. Return compact JSON only: {"name":"","continuityBible":"","segments":[{"title":"","narration":"one coherent visual idea in one or two short related sentences","visualBeats":[{"purpose":"hook|explain|comparison|mechanism|payoff","narrationCue":"exact focus-change clause from narration","visual":"the same reusable composition prompt for this segment","motion":"push|pull|pan-left|pan-right|locked","transition":"crossfade"}],"motionGraphic":"none"}]}. This is chunk ${chunkIndex + 1}/${chunks}; create exactly ${chunkSize} consecutive visual ideas, covering positions ${plannedSegments.length + 1}-${plannedSegments.length + chunkSize} of ${sceneCount}, and about ${Math.round(targetWords * chunkSize / sceneCount)} spoken words. The required meaningful visualBeat count for each returned segment, in order, is exactly [${chunkVisualCounts.join(', ')}]. Beats within one segment reuse one composition and alter focus through motion; they are not separate image prompts. ${chunkIndex === 0 ? 'Only the first 15 seconds may use the faster hook pace.' : `Continue directly after: ${prior?.narration || ''}`} ${chunkIndex === chunks - 1 ? 'Resolve the idea in the final segment.' : 'Do not conclude the story yet.'} ${continuity ? `Use this immutable continuityBible verbatim: ${continuity}` : 'Infer and return one detailed continuityBible from the user input and selected character reference.'} Do not force a white background or predetermined art style. No text inside images.\n\n${storyRules}` }, { role: 'user', content: brief }], undefined, 16_384);
+      let chunk = jsonFromDirectorReply(planRaw);
+      const chunkTargetWords = Math.round(targetWords * chunkSize / sceneCount);
+      if (narrationWordCount((chunk.segments || []).slice(0, chunkSize)) < chunkTargetWords * .88) {
+        const expandedRaw = await chat(input.provider, input.model, [{ role: 'system', content: `The storyboard narration is too short for the requested video duration. Return the same compact JSON shape with exactly ${chunkSize} segments and ${chunkTargetWords - Math.round(chunkTargetWords * .04)}-${chunkTargetWords + Math.round(chunkTargetWords * .04)} total Vietnamese spoken words. Preserve facts, order and continuity, but add useful explanation rather than filler. Keep exactly [${chunkVisualCounts.join(', ')}] visualBeats per segment; every narrationCue must be an exact atomic clause from its expanded narration. Return JSON only.` }, { role: 'user', content: JSON.stringify(chunk) }], undefined, 16_384);
+        const expanded = jsonFromDirectorReply(expandedRaw);
+        if ((expanded.segments || []).length >= chunkSize && narrationWordCount((expanded.segments || []).slice(0, chunkSize)) > narrationWordCount((chunk.segments || []).slice(0, chunkSize))) chunk = expanded;
+      }
       if (!continuity) continuity = String(chunk.continuityBible || '').trim().slice(0, 1800);
       if (!plan.name) plan.name = chunk.name;
       plannedSegments.push(...(chunk.segments || []).slice(0, chunkSize));
     }
     plan = { ...plan, continuityBible: continuity, segments: plannedSegments };
     segments = normalizeLongAnimationSegments(plan, sceneCount);
-  const asStoryboard = (items: LongAnimationSegment[]) => items.map((segment) => ({
+  const asStoryboard = (items: LongAnimationSegment[], expectedCounts = visualsPerScene) => items.map((segment, index) => ({
     ...segment,
-    visualBeats: segment.visualBeats.filter((beat) => beat.visual.trim()).slice(0, 1).map((beat) => ({
+    visualBeats: segment.visualBeats.filter((beat) => beat.visual.trim()).slice(0, expectedCounts[index] || 1).map((beat, beatIndex) => ({
       ...beat,
-      motion: 'locked' as const,
+      motion: beat.motion === 'locked' ? (beatIndex % 2 ? 'pan-right' as const : 'push' as const) : beat.motion,
       transition: 'crossfade' as const,
       objects: undefined,
       actors: undefined,
@@ -313,50 +371,66 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
     motionGraphic: 'none' as const,
   }));
   segments = asStoryboard(segments);
-  if (segments.some((segment) => !segment.visualBeats.length)) {
+  if (segments.some((segment, index) => segment.visualBeats.length !== visualsPerScene[index])) {
     for (const [index, segment] of segments.entries()) {
-      if (segment.visualBeats.length) continue;
-      const repaired = jsonFromDirectorReply(await chat(input.provider, input.model, [{ role: 'system', content: `Repair one storyboard segment. Keep its title and narration verbatim. Return JSON with one segments item containing exactly one full-frame image prompt and the exact narration sentence as narrationCue. Preserve this continuityBible: ${continuity}. Return no text in the image or camera direction. ${storyRules}` }, { role: 'user', content: JSON.stringify(segment) }], undefined, 4096));
-      const [candidate] = asStoryboard(normalizeLongAnimationSegments(repaired, 1));
-      if (candidate?.narration === segment.narration && candidate.visualBeats.length) segments[index] = candidate;
+      const expectedCount = visualsPerScene[index] || 1;
+      if (segment.visualBeats.length === expectedCount) continue;
+      const repaired = jsonFromDirectorReply(await chat(input.provider, input.model, [{ role: 'system', content: `Repair one storyboard segment. Keep its title and narration verbatim. Return JSON with one segments item containing exactly ${expectedCount} meaningful visualBeats inside one reusable composition. Each narrationCue is an exact different focus-change clause; do not invent a new image for each clause. Preserve this continuityBible: ${continuity}. Return no text in images. ${storyRules}` }, { role: 'user', content: JSON.stringify(segment) }], undefined, 8192));
+      const [candidate] = asStoryboard(normalizeLongAnimationSegments(repaired, 1), [expectedCount]);
+      if (candidate?.narration === segment.narration && candidate.visualBeats.length === expectedCount) segments[index] = candidate;
     }
   }
   if (segments.length < sceneCount) throw new Error(`AI Director chỉ trả về ${segments.length}/${sceneCount} cảnh. Hãy thử dựng lại để bảo đảm đủ nhịp hình và thời lượng.`);
-  if (segments.some((segment) => !segment.visualBeats.length)) throw new Error('Director trả cảnh không có kế hoạch hình/chuyển động. Không tự bịa ảnh để lấp cảnh.');
+  if (segments.some((segment, index) => segment.visualBeats.length !== visualsPerScene[index])) throw new Error('Director chưa trả đủ mật độ hình theo atomic idea. Hãy tiếp tục job để sửa các cảnh còn thiếu thay vì kéo dài một ảnh quá 3 giây.');
+  if (narrationWordCount(segments) < targetWords * .8) throw new Error(`AI Director viết narration quá ngắn (${narrationWordCount(segments)}/${targetWords} từ) so với thời lượng ${Math.round(targetDurationSeconds / 60 * 10) / 10} phút. Project chưa được tạo để tránh xuất video ngắn sai yêu cầu; hãy tiếp tục job để AI viết lại đủ nội dung.`);
     sceneIds = segments.map(() => randomUUID());
     await saveAnimationCheckpoint(checkpointKey, { plan, segments, sceneIds });
   }
   const generationWarnings: string[] = [];
-  const totalWords = segments.reduce((total, segment) => total + segment.narration.split(/\s+/).length, 0);
   const targetMs = targetDurationSeconds * 1000;
   let allocatedMs = 0;
-  const sceneDurationsMs = segments.map((segment, index) => {
-    const durationMs = index === segments.length - 1 ? Math.max(3000, targetMs - allocatedMs) : Math.max(3000, Math.round(targetMs * (segment.narration.split(/\s+/).length / Math.max(1, totalWords))));
+  const sceneDurationsMs = segments.map((_segment, index) => {
+    const durationMs = index === segments.length - 1 ? Math.max(1, targetMs - allocatedMs) : Math.round((density.sceneDurationsSeconds[index] || 1) * 1000);
     allocatedMs += durationMs;
     return durationMs;
   });
   if (!continuity) generationWarnings.push('Director chưa trả hồ sơ nhất quán; cần kiểm tra thiết kế chủ thể trước khi xuất.');
   const sceneAssets: Array<Array<AnimationAsset | undefined>> = segments.map((segment) => Array(segment.visualBeats.length).fill(undefined));
   if (input.assetGeneration) {
-    let sessionUnavailable = false;
-    for (const [index, segment] of segments.entries()) {
-      if (sessionUnavailable) break;
-      const aspect = input.project.width > input.project.height ? '16:9 landscape' : input.project.width < input.project.height ? '9:16 portrait' : '1:1 square';
-      for (const [shotIndex, beat] of segment.visualBeats.entries()) {
-        await onStage(`Ảnh cảnh ${index + 1}/${segments.length}, nhịp ${shotIndex + 1}/${segment.visualBeats.length}`);
-        const request: DirectorAssetRequest = { key: `story-scene-${index}-${shotIndex}`, name: `${segment.title || `Minh họa cảnh ${index + 1}`} · ${beat.purpose}`, prompt: `${beat.visual}. Full-frame ${aspect} story illustration. Match the narration sentence exactly: “${segment.narration}”. Preserve recurring character identity, clothing, proportions, world, palette and art style across every shot. Compose a clear single visual moment with no text, captions, labels, cards, borders, logos or UI.`, type: 'background', tags: ['storyboard', `scene-${index + 1}`, `shot-${shotIndex + 1}`, beat.purpose], style: 'story-matched consistent illustration' };
+    const assetGeneration = input.assetGeneration;
+    const aspect = input.project.width > input.project.height ? '16:9 landscape' : input.project.width < input.project.height ? '9:16 portrait' : '1:1 square';
+    const tasks = segments.map((segment, index) => ({ segment, index }));
+    const concurrency = assetGeneration.generator === 'flow-agent' ? 4 : 2;
+    let cursor = 0;
+    let completed = 0;
+    let stopError: unknown;
+    await onStage(`Đang tạo ${tasks.length} ảnh cảnh · tối đa ${Math.min(concurrency, tasks.length)} ảnh đồng thời`);
+    const worker = async () => {
+      while (!stopError) {
+        const task = tasks[cursor++];
+        if (!task) return;
+        const { segment, index } = task;
+        const composition = [...new Set(segment.visualBeats.map((beat) => beat.visual.trim()).filter(Boolean))].join('. Internal focus areas: ');
+        const request: DirectorAssetRequest = { key: `story-scene-${index}`, name: segment.title || `Minh họa cảnh ${index + 1}`, prompt: `${composition}. Create one reusable full-frame ${aspect} composition containing the subjects and details needed for every focus change in this coherent idea. Match the narration: “${segment.narration}”. Preserve recurring character identity, clothing, proportions, world, palette and art style. No text, captions, labels, cards, borders, logos or UI.`, type: 'background', tags: ['storyboard', `scene-${index + 1}`, 'reusable-composition'], style: 'story-matched consistent illustration' };
         request.prompt = `LOCKED CHARACTER AND VISUAL CONTINUITY: ${continuity || 'Keep the selected character and inferred art style identical across the whole story.'}\n${request.prompt}`;
-        try { sceneAssets[index][shotIndex] = await generateDirectorAsset(request, input.assetGeneration, input.project.width, input.project.height); }
+        try {
+          const asset = await generateDirectorAsset(request, assetGeneration, input.project.width, input.project.height);
+          sceneAssets[index] = sceneAssets[index].map(() => asset);
+        }
         catch (error) {
           generationWarnings.push(`Không tạo được ảnh minh họa câu ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
           if (error instanceof FlowSessionError) {
             generationWarnings.push('Đã ngừng tạo ảnh do lỗi phiên Flow. Kịch bản và prompt từng câu vẫn được giữ để thử lại; không lấy ảnh không liên quan thay thế.');
-            sessionUnavailable = true;
-            break;
+            stopError = error;
           }
         }
+        completed += 1;
+        try { await onStage(`Composition ${index + 1}/${segments.length} · đã xong ${completed}/${tasks.length}`); }
+        catch (error) { stopError = error; }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker));
+    if (stopError && !(stopError instanceof FlowSessionError)) throw stopError;
   }
   const generatedSceneAssets = sceneAssets.flat().filter((asset): asset is AnimationAsset => Boolean(asset));
   const allAssets = [...new Map([...assets, ...generatedSceneAssets].map((asset) => [asset.id, asset])).values()];
@@ -364,16 +438,14 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
     const durationMs = sceneDurationsMs[index] || 3000; allocatedMs += durationMs;
     const visuals = sceneAssets[index];
     const timeline = buildVisualBeatTimeline({ sceneIndex: index, durationMs, width: input.project.width, height: input.project.height, visuals, beats: segment.visualBeats, narration: segment.narration });
-    segment.visualBeats.forEach((beat, beatIndex) => {
-      if (!visuals[beatIndex]) generationWarnings.push(`Câu ${index + 1}: thiếu hình minh họa, cần tạo lại trước khi xuất.`);
-    });
+    if (visuals.some((visual) => !visual)) generationWarnings.push(`Câu ${index + 1}: thiếu ảnh composition minh họa, cần tạo lại trước khi xuất.`);
     const layers: SceneLayer[] = timeline.layers.length ? timeline.layers : [{ id: `visual-${index}-0`, name: 'Thiếu hình minh họa', text: 'Chưa có hình minh họa', fontSize: 30, type: 'text' as const, visible: true, locked: false, zIndex: 0, width: Math.round(input.project.width * .62), height: 80, fill: '#ffffff', transform: { ...defaultTransform(), position: { x: input.project.width / 2, y: input.project.height / 2 } } }];
-    return { id: sceneIds[index], name: segment.title || `Cảnh ${index + 1}`, order: index, durationMs, narration: segment.narration, renderMode: 'composite', backgroundColor: '#101218', layers, commands: timeline.commands, camera: { transform: defaultTransform(), commands: [] } };
+    return { id: sceneIds[index], name: segment.title || `Cảnh ${index + 1}`, order: index, durationMs, narration: segment.narration, transition: { type: index ? 'crossfade' : 'cut', durationMs: index ? 320 : 0 }, renderMode: 'composite', backgroundColor: '#101218', layers, commands: timeline.commands, camera: { transform: defaultTransform(), commands: [] } };
   });
   const productionPlan = compileAnimationProductionPlan({ segments, sceneIds, sceneDurationsMs, continuityBible: continuity, diagnostics: generationWarnings });
   let project: AnimationProject = { ...input.project, id: input.project.id || randomUUID(), name: String(plan.name || brief).slice(0, 160), assets: allAssets, scenes, productionPlan, assetManifest: undefined, styleProfile: { name: 'AI Storyboard', style: continuity || 'story-matched illustration with consistent recurring characters', palette: input.project.styleProfile?.palette || [], pacing: 'balanced' }, updatedAt: new Date().toISOString(), generationWarnings };
   const issues = validateAnimationProject(project); if (issues.length) throw new Error(issues.slice(0, 8).map((item) => `${item.path}: ${item.message}`).join('; '));
-  if (input.narration) project = await generateAnimationNarration({ project, ...input.narration }, onStage);
+  if (input.narration) project = await generateAnimationNarration({ project, ...input.narration, preservePlannedDuration: true }, onStage);
   await onStage('Đang kiểm tra project và tài nguyên');
   project = { ...project, scenes: project.scenes.map((scene) => scene.renderMode !== 'composite' ? scene : {
     ...scene,
@@ -397,7 +469,7 @@ export async function directAnimationProject(input: DirectAnimationInput, onStag
     ? Math.max(1, Math.round(requestedDurationSeconds))
     : inputWords >= 40 ? Math.max(15, Math.min(1200, Math.round(inputWords / 2.25))) : 60;
   if (targetDurationSeconds > 0) {
-    const key = animationCheckpointKey({ version: 3, mode: 'storyboard-per-sentence', projectId: input.project.id, brief, targetDurationSeconds, automaticDuration, width: input.project.width, height: input.project.height, fps: input.project.fps, style: input.project.styleProfile, provider: input.provider.id, model: input.model, referenceUploadId: input.assetGeneration?.referenceUploadId, referenceAssetId: input.assetGeneration?.referenceAssetId, assets: input.project.assets.map((asset) => ({ id: asset.id, uri: asset.uri, sprite: asset.sprite })) });
+    const key = animationCheckpointKey({ version: 6, mode: 'paced-reusable-compositions', projectId: input.project.id, brief, targetDurationSeconds, automaticDuration, width: input.project.width, height: input.project.height, fps: input.project.fps, style: input.project.styleProfile, provider: input.provider.id, model: input.model, referenceUploadId: input.assetGeneration?.referenceUploadId, referenceAssetId: input.assetGeneration?.referenceAssetId, assets: input.project.assets.map((asset) => ({ id: asset.id, uri: asset.uri, sprite: asset.sprite })) });
     const executionKey = animationCheckpointKey({ key, image: { generator: input.assetGeneration?.generator, provider: input.assetGeneration?.provider?.id, model: input.assetGeneration?.model }, narration: input.narration && { provider: input.narration.provider.id, model: input.narration.model, voice: input.narration.voice, speed: input.narration.speed } });
     return runAnimationOnce(executionKey, () => directLongAnimationProject(input, brief, targetDurationSeconds, automaticDuration, key, onStage));
   }
@@ -454,6 +526,73 @@ Canvas is ${input.project.width}x${input.project.height}. Use assetId values fro
   if (input.narration) assembled = await generateAnimationNarration({ project: assembled, ...input.narration }, onStage);
   await onStage('Đang hoàn tất project');
   return withAnimationAssetManifest(assembled);
+}
+
+export async function retryMissingAnimationImages(input: { project: AnimationProject; assetGeneration: DirectorAssetGeneration; provider: AIProvider; model: string }, onStage: (stage: string) => Promise<void> = async () => {}) {
+  if (input.assetGeneration.generator === 'flow-agent') await validateGoogleFlowSession();
+  const plan = input.project.productionPlan;
+  if (!plan) throw new Error('Project cũ không có production plan nên không xác định được prompt của ảnh còn thiếu.');
+  const tasks = plan.beats.flatMap((beat) => {
+    if (beat.technique !== 'image-camera') return [];
+    const scene = input.project.scenes.find((item): item is CompositeScene => item.id === beat.sceneId && item.renderMode === 'composite');
+    if (!scene) return [];
+    const sceneIndex = input.project.scenes.findIndex((item) => item.id === scene.id);
+    const sceneBeats = plan.beats.filter((item) => item.sceneId === scene.id && item.technique === 'image-camera');
+    const beatIndex = sceneBeats.findIndex((item) => item.id === beat.id);
+    const layerId = `visual-${sceneIndex}-${beatIndex}`;
+    return scene.layers.some((layer) => layer.id === layerId && layer.type === 'image' && layer.assetId) ? [] : [{ beat, scene, sceneIndex, beatIndex, layerId, beatCount: sceneBeats.length }];
+  });
+  if (!tasks.length) return { project: input.project, repaired: 0, remaining: 0 };
+  let project = input.project;
+  let repaired = 0;
+  const failures: string[] = [];
+  const processedScenes = new Set<string>();
+  for (const [taskIndex, task] of tasks.entries()) {
+    if (processedScenes.has(task.scene.id)) continue;
+    processedScenes.add(task.scene.id);
+    const liveScene = project.scenes.find((item): item is CompositeScene => item.id === task.scene.id && item.renderMode === 'composite');
+    if (liveScene?.layers.some((layer) => layer.id === task.layerId && layer.type === 'image' && layer.assetId)) continue;
+    const compositionTasks = tasks.filter((candidate) => candidate.scene.id === task.scene.id);
+    await onStage(`Tạo lại ảnh lỗi ${taskIndex + 1}/${tasks.length}`);
+    const narration = plan.narrationUnits.find((unit) => unit.sceneId === task.scene.id)?.text || task.scene.narration;
+    let prompt = `${[...new Set(compositionTasks.map((candidate) => candidate.beat.visibleEvidence))].join('. Internal focus areas: ')}. Create one reusable full-frame composition for these related focus changes, matching this narration: “${narration}”. Locked continuity: ${plan.continuityBible || project.styleProfile?.style || 'keep characters and art style consistent'}. No text, captions, logos, UI, borders or graphic violence.`;
+    let asset: AnimationAsset | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2 && !asset; attempt += 1) {
+      try {
+        asset = await generateDirectorAsset({ key: `retry-${task.beat.id}`, name: `Ảnh sửa · ${task.scene.name} · ${task.beatIndex + 1}`, prompt, type: 'background', tags: ['storyboard', 'repaired', `scene-${task.sceneIndex + 1}`, `shot-${task.beatIndex + 1}`], style: project.styleProfile?.style }, input.assetGeneration, project.width, project.height);
+      } catch (error) {
+        lastError = error;
+        if (/UNSAFE_GENERATION|INVALID_ARGUMENT/i.test(error instanceof Error ? error.message : String(error))) {
+          const rewritten = await chat(input.provider, input.model, [{ role: 'system', content: 'Rewrite the supplied image prompt into one family-safe, non-graphic visual metaphor accepted by a general image generator. Preserve the educational meaning, recurring character identity and setting. Remove violence, injury, weapons, sexual content and unsafe wording. Return only the rewritten English prompt.' }, { role: 'user', content: prompt }], undefined, 2048);
+          prompt = rewritten.trim().slice(0, 4000);
+          continue;
+        }
+        if (!/timed out waiting/i.test(error instanceof Error ? error.message : String(error))) break;
+      }
+    }
+    if (!asset) {
+      const detail = lastError instanceof Error ? lastError.message : String(lastError);
+      failures.push(`Câu ${task.sceneIndex + 1}, ảnh ${task.beatIndex + 1}: ${detail}`);
+      if (lastError instanceof FlowSessionError) break;
+      continue;
+    }
+    const layers: SceneLayer[] = compositionTasks.map((candidate) => ({ id: candidate.layerId, name: `Ảnh đã sửa · ${asset.name}`, type: 'image', assetId: asset.id, visible: true, locked: true, zIndex: candidate.beatIndex, width: project.width, height: project.height, transform: { ...defaultTransform(), opacity: candidate.beatIndex ? 0 : 1, position: { x: project.width / 2, y: project.height / 2 } } }));
+    const layerIds = new Set(layers.map((layer) => layer.id));
+    const commands: AnimationCommand[] = compositionTasks.flatMap((candidate) => {
+      const startMs = Math.max(0, Math.min(candidate.scene.durationMs - 1, Math.round(candidate.beat.startMs || 0)));
+      const endMs = Math.max(startMs + 1, Math.min(candidate.scene.durationMs, Math.round(candidate.beat.endMs || candidate.scene.durationMs)));
+      return [
+        ...(candidate.beatIndex ? [{ id: `visual-in-${candidate.sceneIndex}-${candidate.beatIndex}`, type: 'FADE_IN' as const, targetId: candidate.layerId, startMs, durationMs: Math.min(320, endMs - startMs), easing: 'ease-out' as const }] : []),
+        ...(candidate.beatIndex < candidate.beatCount - 1 ? [{ id: `visual-out-${candidate.sceneIndex}-${candidate.beatIndex}`, type: 'FADE_OUT' as const, targetId: candidate.layerId, startMs: endMs - 1, durationMs: 1, easing: 'ease-in-out' as const }] : []),
+      ];
+    });
+    project = { ...project, assets: [...project.assets, asset], scenes: project.scenes.map((item) => item.id !== task.scene.id || item.renderMode !== 'composite' ? item : { ...item, layers: [...item.layers.filter((candidate) => !layerIds.has(candidate.id) && candidate.name !== 'Thiếu hình minh họa'), ...layers].sort((a, b) => a.zIndex - b.zIndex), commands: [...item.commands.filter((command) => !layerIds.has(command.targetId)), ...commands] }), updatedAt: new Date().toISOString() };
+    repaired += compositionTasks.length;
+  }
+  const remaining = tasks.length - repaired;
+  project = { ...project, generationWarnings: [...(project.generationWarnings || []).filter((warning) => !/Không tạo được ảnh minh họa câu|thiếu hình minh họa/i.test(warning)), ...failures, ...(remaining ? [`Còn ${remaining} ảnh minh họa chưa tạo được. Hãy xác minh lại Google Flow rồi bấm tạo lại lần nữa.`] : [])], productionPlan: { ...plan, status: remaining ? 'warning' : 'ready', diagnostics: failures.length ? failures : undefined }, assetManifest: undefined };
+  return { project: withAnimationAssetManifest(project), repaired, remaining };
 }
 
 export async function editAnimationScene(input: { instruction: string; project: AnimationProject; sceneId: string; provider: AIProvider; model: string; mode?: 'edit' | 'animation' | 'visual' }) {

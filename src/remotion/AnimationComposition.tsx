@@ -3,6 +3,7 @@ import { Audio } from '@remotion/media';
 import { AbsoluteFill, Img, OffthreadVideo, Sequence, interpolate, useCurrentFrame, useVideoConfig } from 'remotion';
 import type { AnimationAsset, AnimationCommand, AnimationProject, CompositeScene, EvaluatedLayer } from './types';
 import { evaluateScene } from '../animationStudio/evaluator';
+import { sceneTransition, sceneTransitionStyles } from '../animationStudio/sceneTransitions';
 import { buildRenderTimeline } from './timeline';
 
 export interface AnimationCompositionProps extends Record<string, unknown> {
@@ -84,17 +85,26 @@ function VisualLayer({ layer, assets, scene, timeMs, origin, evaluatedLayers }: 
   return <div style={{ position: 'absolute', left: position.x - layer.width * anchor.x, top: position.y - layer.height * anchor.y, width: layer.width, height: layer.height, opacity: clamp(layer.transform.opacity, 0, 1), transformOrigin: `${anchor.x * 100}% ${anchor.y * 100}%`, transform: `rotate(${layer.transform.rotation}deg) scale(${scale.x * facing}, ${scale.y})`, overflow: layer.type === 'text' ? 'visible' : 'hidden' }}>{layerBody(layer, asset, scene, timeMs, origin)}</div>;
 }
 
-function SceneComposition({ scene, project, origin, showSubtitles, sceneDurationInFrames, transitionInFrames, transitionOutFrames }: { scene: CompositeScene; project: AnimationProject; origin: string; showSubtitles: boolean; sceneDurationInFrames: number; transitionInFrames: number; transitionOutFrames: number }) {
-  const frame = useCurrentFrame(); const { fps } = useVideoConfig();
-  const timeMs = frame / fps * 1000;
+function SceneVisual({ scene, project, origin, showSubtitles, timeMs, style }: { scene: CompositeScene; project: AnimationProject; origin: string; showSubtitles: boolean; timeMs: number; style?: CSSProperties }) {
   const evaluated = evaluateScene(scene, timeMs);
-  const fadeIn = transitionInFrames <= 1 ? 1 : interpolate(frame, [0, transitionInFrames - 1], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
-  const fadeOut = transitionOutFrames <= 1 ? (transitionOutFrames && frame >= sceneDurationInFrames - 1 ? 0 : 1) : interpolate(frame, [sceneDurationInFrames - transitionOutFrames, sceneDurationInFrames - 1], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
   const camera = evaluated.camera;
-  return <AbsoluteFill style={{ backgroundColor: scene.backgroundColor, opacity: Math.min(fadeIn, fadeOut), overflow: 'hidden' }}>
+  return <AbsoluteFill style={{ backgroundColor: scene.backgroundColor, overflow: 'hidden', ...style }}>
     <div style={{ position: 'absolute', inset: 0, transformOrigin: '50% 50%', transform: `translate(${camera.position.x}px, ${camera.position.y}px) rotate(${camera.rotation}deg) scale(${camera.scale.x}, ${camera.scale.y})`, opacity: clamp(camera.opacity, 0, 1) }}>
       {evaluated.layers.filter((layer) => layer.type !== 'audio' && (showSubtitles || !subtitleName(layer.name))).map((layer) => <VisualLayer key={layer.id} layer={layer} assets={project.assets} scene={scene} timeMs={timeMs} origin={origin} evaluatedLayers={evaluated.layers} />)}
     </div>
+  </AbsoluteFill>;
+}
+
+function SceneComposition({ scene, previousScene, project, origin, showSubtitles, transitionInFrames }: { scene: CompositeScene; previousScene?: CompositeScene; project: AnimationProject; origin: string; showSubtitles: boolean; transitionInFrames: number }) {
+  const frame = useCurrentFrame(); const { fps } = useVideoConfig();
+  const timeMs = frame / fps * 1000;
+  const transition = sceneTransition(scene);
+  const transitionActive = Boolean(previousScene && transitionInFrames > 1 && frame < transitionInFrames);
+  const progress = transitionActive ? interpolate(frame, [0, transitionInFrames - 1], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }) : 1;
+  const styles = sceneTransitionStyles(transition.type, progress);
+  return <AbsoluteFill style={{ backgroundColor: '#05080c', overflow: 'hidden' }}>
+    {transitionActive && previousScene && <SceneVisual scene={previousScene} project={project} origin={origin} showSubtitles={false} timeMs={Math.max(0, previousScene.durationMs - 1)} style={styles.outgoing} />}
+    <SceneVisual scene={scene} project={project} origin={origin} showSubtitles={showSubtitles} timeMs={timeMs} style={transitionActive ? styles.incoming : undefined} />
     {scene.layers.filter((layer) => layer.type === 'audio' && layer.visible && layer.assetId).map((layer) => {
       const asset = project.assets.find((item) => item.id === layer.assetId); if (!asset) return null;
       const from = Math.max(0, Math.round((layer.startMs || 0) / 1000 * fps));
@@ -109,10 +119,11 @@ function SceneComposition({ scene, project, origin, showSubtitles, sceneDuration
 
 export function AnimationComposition({ project, showSubtitles, assetOrigin }: AnimationCompositionProps) {
   const timeline = buildRenderTimeline(project);
-  return <AbsoluteFill style={{ backgroundColor: '#090d13' }}>{timeline.map((range) => {
+  return <AbsoluteFill style={{ backgroundColor: '#090d13' }}>{timeline.map((range, index) => {
     if (range.scene.renderMode === 'generated-video' && !range.scene.source?.uri) throw new Error(`Scene ${range.scene.name} has no video source.`);
+    const previous = timeline[index - 1]?.scene;
     return <Sequence key={range.scene.id} from={range.from} durationInFrames={range.durationInFrames} premountFor={Math.min(project.fps, range.from)}>{range.scene.renderMode === 'composite'
-      ? <SceneComposition scene={range.scene} project={project} origin={assetOrigin} showSubtitles={showSubtitles} sceneDurationInFrames={range.durationInFrames} transitionInFrames={range.transitionInFrames} transitionOutFrames={range.transitionOutFrames} />
+      ? <SceneComposition scene={range.scene} previousScene={previous?.renderMode === 'composite' ? previous : undefined} project={project} origin={assetOrigin} showSubtitles={showSubtitles} transitionInFrames={range.transitionInFrames} />
       : <OffthreadVideo src={assetUrl(range.scene.source!.uri, assetOrigin)} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />}</Sequence>;
   })}</AbsoluteFill>;
 }

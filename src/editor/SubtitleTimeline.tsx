@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { SubtitleCue, SubtitleStyle } from "../types";
-import { Maximize2, Minus, Plus, Redo2, Trash2, Type, Undo2 } from "../components/Icons";
+import { ChevronLeft, ChevronRight, Copy, Magnet, Maximize2, Minus, Plus, Redo2, Scissors, Trash2, Type, Undo2 } from "../components/Icons";
 import { formatClock } from "../lib/subtitles";
 import {
   copyCueProperties,
@@ -30,6 +30,8 @@ type Props = {
   onChange: (id: string, patch: Partial<SubtitleCue>) => void;
   onSeek: (timeMs: number) => void;
   onAddText?: (timeMs: number) => void;
+  onSplit?: (timeMs: number) => void;
+  onDuplicate?: (id: string) => void;
   onDelete?: (id: string) => void;
   onDeleteMany?: (ids: string[]) => void;
   baseStyle: SubtitleStyle;
@@ -48,13 +50,16 @@ const MIN_PIXELS_PER_SECOND = 0.02;
 const MAX_PIXELS_PER_SECOND = 220;
 const LANE_HEIGHT = 32;
 const MAX_HISTORY = 150;
+const EMPTY_TRACK_LABELS = ["TEXT", "OCR", "SUB", "SUB"];
 
-export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, selectedCueId, onSelect, onChange, onSeek, onAddText, onDelete, onDeleteMany, baseStyle }: Props) {
+export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, selectedCueId, onSelect, onChange, onSeek, onAddText, onSplit, onDuplicate, onDelete, onDeleteMany, baseStyle }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const draftRef = useRef<(CueRange & { cueId: string }) | undefined>(undefined);
+  const cueElementsRef = useRef(new Map<string, HTMLButtonElement>());
+  const dragFrameRef = useRef<number | undefined>(undefined);
   const [pixelsPerSecond, setPixelsPerSecond] = useState(70);
   const [drag, setDrag] = useState<DragState>();
-  const [draft, setDraft] = useState<(CueRange & { cueId: string })>();
+  const [snapEnabled, setSnapEnabled] = useState(true);
   const [history, setHistory] = useState<{ past: HistoryEntry[]; future: HistoryEntry[] }>({ past: [], future: [] });
   const [propertyClipboard, setPropertyClipboard] = useState<CuePropertyClipboard>();
   const [cueMenu, setCueMenu] = useState<CueMenu>();
@@ -76,12 +81,12 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
   );
   const cueIdentity = useMemo(() => cues.map((cue) => cue.id).join("\u0000"), [cues]);
   const layout = useMemo(() => layoutTimelineCues(cues), [cues]);
-  const trackCount = Math.max(1, layout.laneCount);
+  const trackCount = Math.max(4, layout.laneCount);
   const trackLabels = useMemo(() => Array.from({ length: trackCount }, (_, lane) => {
     const kinds = new Set(layout.items.filter((item) => item.lane === lane).map(({ cue }) =>
       cue.sourceKind !== "onscreen-text" ? "SUB" : cue.textOrigin === "manual" ? "TEXT" : "OCR",
     ));
-    return [...kinds].join("/") || "TEXT";
+    return [...kinds].join("/") || EMPTY_TRACK_LABELS[lane] || "SUB";
   }), [layout.items, trackCount]);
   const laneHeight = trackCount * LANE_HEIGHT;
   const seekAfterEdit = useCallback((cueId: string, nextTimeMs: number) => {
@@ -149,11 +154,17 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
       } else if ((event.ctrlKey || event.metaKey) && key === "y") {
         event.preventDefault();
         redo();
+      } else if ((event.ctrlKey || event.metaKey) && key === "b" && selectedCue) {
+        event.preventDefault();
+        onSplit?.(timeMs);
+      } else if ((event.ctrlKey || event.metaKey) && key === "d" && selectedCue) {
+        event.preventDefault();
+        onDuplicate?.(selectedCue.id);
       }
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [cues, onDelete, onDeleteMany, redo, selectedIds, undo]);
+  }, [cues, onDelete, onDeleteMany, onDuplicate, onSplit, redo, selectedCue, selectedIds, timeMs, undo]);
 
   useEffect(() => {
     if (!cueMenu) return;
@@ -182,8 +193,22 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
 
   useEffect(() => {
     if (!drag) return;
+    const paintDraft = (nextDraft: CueRange & { cueId: string }) => {
+      if (dragFrameRef.current !== undefined) cancelAnimationFrame(dragFrameRef.current);
+      dragFrameRef.current = requestAnimationFrame(() => {
+        dragFrameRef.current = undefined;
+        const element = cueElementsRef.current.get(nextDraft.cueId);
+        if (!element) return;
+        const naturalWidth = ((nextDraft.endMs - nextDraft.startMs) / 1000) * pixelsPerSecond;
+        element.style.left = `${(nextDraft.startMs / 1000) * pixelsPerSecond}px`;
+        element.style.top = `${(nextDraft.timelineLane ?? drag.originLane) * LANE_HEIGHT + 5}px`;
+        element.style.width = `${Math.max(pixelsPerSecond < 8 || naturalWidth < 18 ? 2 : 12, naturalWidth)}px`;
+      });
+    };
     const move = (event: PointerEvent) => {
-      const next = editTimelineCue(drag.startMs, drag.endMs, drag.mode, ((event.clientX - drag.pointerX) / pixelsPerSecond) * 1000);
+      const rawDelta = ((event.clientX - drag.pointerX) / pixelsPerSecond) * 1000;
+      const delta = snapEnabled && !event.shiftKey ? Math.round(rawDelta / 50) * 50 : rawDelta;
+      const next = editTimelineCue(drag.startMs, drag.endMs, drag.mode, delta);
       const nextLane = drag.mode === "move"
         ? Math.max(0, Math.min(trackCount - 1, drag.originLane + Math.round((event.clientY - drag.pointerY) / LANE_HEIGHT)))
         : drag.originLane;
@@ -195,7 +220,7 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
         timelineLane: nextLane === drag.originLane ? drag.timelineLane : nextLane,
       };
       draftRef.current = nextDraft;
-      setDraft(nextDraft);
+      paintDraft(nextDraft);
     };
     const finish = () => {
       const finalDraft = draftRef.current;
@@ -203,7 +228,6 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
         commitEdit(drag.cueId, { startMs: drag.startMs, endMs: drag.endMs, timelineLane: drag.timelineLane }, { startMs: finalDraft.startMs, endMs: finalDraft.endMs, timelineLane: finalDraft.timelineLane });
       }
       draftRef.current = undefined;
-      setDraft(undefined);
       setDrag(undefined);
     };
     window.addEventListener("pointermove", move);
@@ -213,8 +237,10 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
+      if (dragFrameRef.current !== undefined) cancelAnimationFrame(dragFrameRef.current);
+      dragFrameRef.current = undefined;
     };
-  }, [commitEdit, drag, pixelsPerSecond, trackCount]);
+  }, [commitEdit, drag, pixelsPerSecond, snapEnabled, trackCount]);
 
   const beginDrag = useCallback((event: ReactPointerEvent<HTMLElement>, cue: SubtitleCue, mode: TimelineCueEditMode) => {
     if (event.button !== 0) return;
@@ -234,7 +260,6 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
     const currentLane = layout.items.find((item) => item.cue.id === cue.id)?.lane ?? 0;
     const nextDrag = { cueId: cue.id, mode, pointerX: event.clientX, pointerY: event.clientY, originLane: currentLane, startMs: cue.startMs, endMs: cue.endMs, timelineLane: cue.timelineLane };
     draftRef.current = { cueId: cue.id, startMs: cue.startMs, endMs: cue.endMs, timelineLane: cue.timelineLane };
-    setDraft(draftRef.current);
     setDrag(nextDrag);
   }, [layout.items, onSelect]);
 
@@ -242,6 +267,11 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
     const before = { startMs: cue.startMs, endMs: cue.endMs };
     commitEdit(cue.id, before, editTimelineCue(cue.startMs, cue.endMs, "move", deltaMs));
   }, [commitEdit]);
+
+  const nudgeSelection = useCallback((deltaMs: number) => {
+    const ids = selectedIds.size ? selectedIds : new Set(selectedCue ? [selectedCue.id] : []);
+    cues.filter((cue) => ids.has(cue.id)).forEach((cue) => nudgeCue(cue, deltaMs));
+  }, [cues, nudgeCue, selectedCue, selectedIds]);
 
   const fitTimeline = useCallback(() => {
     const availableWidth = Math.max(1, (viewportRef.current?.clientWidth ?? 720) - 2);
@@ -321,10 +351,8 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
 
   // Cue DOM is memoized so playback only moves the playhead instead of rebuilding a long cue list every frame.
   const renderedCues = useMemo(() => layout.items.map(({ cue, lane }) => {
-    const current = draft?.cueId === cue.id ? draft : cue;
-    const currentLane = draft?.cueId === cue.id ? (draft.timelineLane ?? lane) : lane;
-    const left = (current.startMs / 1000) * pixelsPerSecond;
-    const naturalWidth = ((current.endMs - current.startMs) / 1000) * pixelsPerSecond;
+    const left = (cue.startMs / 1000) * pixelsPerSecond;
+    const naturalWidth = ((cue.endMs - cue.startMs) / 1000) * pixelsPerSecond;
     const overview = pixelsPerSecond < 8 || naturalWidth < 18;
     const width = Math.max(overview ? 2 : 12, naturalWidth);
     const kindClass = cue.sourceKind !== "onscreen-text"
@@ -336,10 +364,14 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
       <button
         type="button"
         key={cue.id}
+        ref={(element) => {
+          if (element) cueElementsRef.current.set(cue.id, element);
+          else cueElementsRef.current.delete(cue.id);
+        }}
         className={`timeline-cue ${kindClass} ${overview ? "overview" : ""} ${activeCueId === cue.id ? "active" : ""} ${selectedIds.has(cue.id) ? "selected" : ""} ${drag?.cueId === cue.id ? "dragging" : ""}`}
-        style={{ left: `${left}px`, top: `${currentLane * LANE_HEIGHT + 5}px`, width: `${width}px`, height: `${LANE_HEIGHT - 10}px` }}
-        title={`#${cue.index} · ${formatClock(current.startMs)} → ${formatClock(current.endMs)}\n${cue.originalText}`}
-        aria-label={`Cue ${cue.index}, ${formatClock(current.startMs)} đến ${formatClock(current.endMs)}`}
+        style={{ left: `${left}px`, top: `${lane * LANE_HEIGHT + 5}px`, width: `${width}px`, height: `${LANE_HEIGHT - 10}px` }}
+        title={`#${cue.index} · ${formatClock(cue.startMs)} → ${formatClock(cue.endMs)}\n${cue.originalText}`}
+        aria-label={`Cue ${cue.index}, ${formatClock(cue.startMs)} đến ${formatClock(cue.endMs)}`}
         onClick={(event) => event.stopPropagation()}
         onContextMenu={(event) => {
           event.preventDefault();
@@ -365,24 +397,34 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
         <span className="timeline-cue-handle end" aria-hidden="true" onPointerDown={(event) => beginDrag(event, cue, "resize-end")} />
       </button>
     );
-  }), [activeCueId, beginDrag, draft, drag?.cueId, layout.items, nudgeCue, onSelect, pixelsPerSecond, selectedIds]);
+  }), [activeCueId, beginDrag, drag?.cueId, layout.items, nudgeCue, onSelect, pixelsPerSecond, selectedIds]);
 
   return (
     <div className="timeline-wrap" aria-label="Timeline phụ đề">
       <div className="timeline-heading">
-          <span>EDITOR TIMELINE<i>Track trên ưu tiên hiển thị · kéo ngang để đổi thời gian · kéo dọc để đổi track</i></span>
+        <div className="timeline-title">
+          <span>TIMELINE</span>
+          <b>{formatClock(timeMs)} <i>/</i> {formatClock(timelineDurationMs)}</b>
+          <small>{selectedIds.size ? `${selectedIds.size} đã chọn` : `${cues.length} cue · ${trackCount} track`}</small>
+        </div>
         <div className="timeline-tools">
-          <div className="timeline-legend" aria-label="Màu loại cue"><i className="subtitle" />Phụ đề<i className="ocr" />OCR<i className="manual" />Text</div>
-          <span>{selectedIds.size ? `${selectedIds.size} đã chọn` : `${cues.length} cue · ${trackCount} track`}</span>
-          <button type="button" onClick={() => onAddText?.(timeMs)} aria-label="Thêm văn bản tại đầu phát" title="Thêm văn bản tại vị trí đầu phát"><Type size={13} /></button>
+          <div className="timeline-tool-group primary-actions">
+            <button type="button" className="tool-with-label" onClick={() => onSplit?.(timeMs)} disabled={!onSplit || !selectedCue} title="Tách cue đang chọn tại playhead"><Scissors size={13} /><span>Tách</span></button>
+            <button type="button" className="tool-with-label" onClick={() => selectedCue && onDuplicate?.(selectedCue.id)} disabled={!onDuplicate || !selectedCue} title="Nhân bản cue đang chọn"><Copy size={13} /><span>Nhân bản</span></button>
+            <button type="button" className="tool-with-label" onClick={() => onAddText?.(timeMs)} title="Thêm văn bản tại playhead"><Type size={13} /><span>Văn bản</span></button>
+          </div>
+          <div className="timeline-tool-separator" />
+          <div className="timeline-tool-group">
+            <button type="button" onClick={() => nudgeSelection(-50)} disabled={!selectedCue} aria-label="Dịch cue sang trái 50 mili giây" title="Dịch trái 50 ms"><ChevronLeft size={14} /></button>
+            <button type="button" onClick={() => nudgeSelection(50)} disabled={!selectedCue} aria-label="Dịch cue sang phải 50 mili giây" title="Dịch phải 50 ms"><ChevronRight size={14} /></button>
+            <button type="button" className={snapEnabled ? "active" : ""} onClick={() => setSnapEnabled((value) => !value)} aria-label="Bật hoặc tắt bắt dính timeline" aria-pressed={snapEnabled} title="Bắt dính theo 50 ms; giữ Shift để kéo tự do"><Magnet size={13} /></button>
+          </div>
           <button type="button" onClick={deleteSelection} aria-label="Xóa cue đã chọn" title="Xóa cue đã chọn (Delete)" disabled={!selectedIds.size && !selectedCue}><Trash2 size={13} /></button>
           <button type="button" onClick={undo} aria-label="Hoàn tác" title="Hoàn tác (Ctrl+Z)" disabled={!history.past.length}><Undo2 size={13} /></button>
           <button type="button" onClick={redo} aria-label="Làm lại" title="Làm lại (Ctrl+Shift+Z)" disabled={!history.future.length}><Redo2 size={13} /></button>
           <button type="button" onClick={fitTimeline} aria-label="Thu vừa toàn bộ timeline" title="Hiện toàn bộ timeline"><Maximize2 size={13} /></button>
           <button type="button" className={timelineExpanded ? "active" : ""} onClick={() => setTimelineExpanded((value) => !value)} aria-label={timelineExpanded ? "Thu gọn chiều cao timeline" : "Mở rộng chiều cao timeline"} title={timelineExpanded ? "Thu gọn timeline để xem video" : "Mở rộng timeline"}>↕</button>
-          <button type="button" onClick={() => setPixelsPerSecond((value) => Math.max(MIN_PIXELS_PER_SECOND, value / 1.35))} aria-label="Thu nhỏ timeline" disabled={pixelsPerSecond <= MIN_PIXELS_PER_SECOND}><Minus size={13} /></button>
-          <b>{pixelsPerSecond < 10 ? pixelsPerSecond.toFixed(1) : Math.round(pixelsPerSecond)}px/s</b>
-          <button type="button" onClick={() => setPixelsPerSecond((value) => Math.min(MAX_PIXELS_PER_SECOND, value * 1.35))} aria-label="Phóng to timeline" disabled={pixelsPerSecond >= MAX_PIXELS_PER_SECOND}><Plus size={13} /></button>
+          <div className="timeline-zoom-control"><button type="button" onClick={() => setPixelsPerSecond((value) => Math.max(MIN_PIXELS_PER_SECOND, value / 1.35))} aria-label="Thu nhỏ timeline" disabled={pixelsPerSecond <= MIN_PIXELS_PER_SECOND}><Minus size={13} /></button><b>{pixelsPerSecond < 10 ? pixelsPerSecond.toFixed(1) : Math.round(pixelsPerSecond)}px/s</b><button type="button" onClick={() => setPixelsPerSecond((value) => Math.min(MAX_PIXELS_PER_SECOND, value * 1.35))} aria-label="Phóng to timeline" disabled={pixelsPerSecond >= MAX_PIXELS_PER_SECOND}><Plus size={13} /></button></div>
         </div>
       </div>
       <div className={`timeline-viewport ${timelineExpanded ? "expanded" : "compact"}`} ref={viewportRef}>
@@ -445,6 +487,8 @@ export function SubtitleTimeline({ cues, timeMs, durationMs, activeCueId, select
             <div className="timeline-cue-menu-body">
             {cueMenu.view === "root" ? <>
               {cue.sourceKind === "onscreen-text" && <button type="button" role="menuitem" onClick={() => { onSelect(cue.id); setCueMenu(undefined); }}><b>Chỉnh văn bản</b><small>Nội dung, vị trí và giao diện</small></button>}
+              <button type="button" role="menuitem" disabled={!onSplit} onClick={() => { onSelect(cue.id); onSplit?.(timeMs); setCueMenu(undefined); }}><b>Tách tại playhead</b><small>Ctrl+B · chia cue và bỏ voice cache cũ</small></button>
+              <button type="button" role="menuitem" disabled={!onDuplicate} onClick={() => { onDuplicate?.(cue.id); setCueMenu(undefined); }}><b>Nhân bản cue</b><small>Ctrl+D · tạo một bản kế tiếp để chỉnh</small></button>
               <button type="button" role="menuitem" onClick={() => { setCopyGroups(new Set(COPY_GROUPS.map((group) => group.id))); setCueMenu((current) => current ? { ...current, view: "copy" } : current); }}><b>Sao chép thuộc tính…</b><small>Tích một hoặc nhiều nhóm thuộc tính</small></button>
               <button type="button" role="menuitem" disabled={!propertyClipboard} onClick={() => { if (!propertyClipboard) return; setPasteGroups(new Set(propertyClipboard.groups.filter((group): group is Exclude<CuePropertyGroup, "all"> => group !== "all"))); setCueMenu((current) => current ? { ...current, view: "paste" } : current); }}><b>Dán thuộc tính…</b><small>{propertyClipboard ? propertyClipboard.label : "Chưa có thuộc tính trong bộ nhớ"}</small></button>
               <hr />

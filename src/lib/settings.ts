@@ -65,6 +65,8 @@ export function normalizeSettings(value: Partial<AppSettings> | undefined): AppS
     // Keep the preview and ASS/libass export on the same boolean state.
     bold: rawStyle.bold === true,
     italic: rawStyle.italic === true,
+    underline: rawStyle.underline === true,
+    letterSpacing: Math.max(-4, Math.min(20, Number(rawStyle.letterSpacing ?? defaultSettings.subtitleStyle.letterSpacing) || 0)),
     boxPaddingX: Math.max(0, Math.min(48, Number(rawStyle.boxPaddingX ?? defaultSettings.subtitleStyle.boxPaddingX) || 0)),
     boxPaddingY: Math.max(0, Math.min(32, Number(rawStyle.boxPaddingY ?? defaultSettings.subtitleStyle.boxPaddingY) || 0)),
     boxBorderColor: typeof rawStyle.boxBorderColor === "string" ? rawStyle.boxBorderColor : defaultSettings.subtitleStyle.boxBorderColor,

@@ -13,6 +13,8 @@ export function subtitleTextCss(style: SubtitleStyle, scale: number, minimumFont
     color: style.textColor,
     fontWeight: style.bold === true ? 700 : 400,
     fontStyle: style.italic === true ? 'italic' : 'normal',
+    textDecoration: style.underline === true ? 'underline' : 'none',
+    letterSpacing: `${Math.max(-4, Math.min(20, style.letterSpacing ?? 0)) * scale}px`,
     WebkitTextFillColor: style.textColor,
     WebkitTextStroke: outlineWidth > 0 ? `${Math.max(0.45, outlineWidth)}px ${style.outlineColor}` : '0 transparent',
     textShadow: 'none',

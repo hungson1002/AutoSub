@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type {
   AIProvider,
   AppSettings,
@@ -31,11 +32,13 @@ import {
   FileVideo,
   Image as ImageIcon,
   Languages,
+  LayoutList,
   Plus,
   Scissors,
   Settings2,
   Upload,
   Volume2,
+  X,
 } from "../components/Icons";
 import { RangeInput } from "../components/RangeInput";
 import { VideoPlayer } from "../editor/VideoPlayer";
@@ -167,6 +170,20 @@ export function EditorPage({
   onAssetChange,
   onNotice,
 }: EditorProps) {
+  const editorWorkspaceRef = useRef<HTMLElement>(null);
+  const editorLayout = useMemo(() => {
+    const fallback = { tools: 248, inspector: 340, preview: 430 };
+    try {
+      const saved = JSON.parse(localStorage.getItem("autosub.editor-layout") || "null");
+      return {
+        tools: Number.isFinite(saved?.tools) ? saved.tools : fallback.tools,
+        inspector: Number.isFinite(saved?.inspector) ? saved.inspector : fallback.inspector,
+        preview: Number.isFinite(saved?.preview) ? saved.preview : fallback.preview,
+      };
+    } catch {
+      return fallback;
+    }
+  }, []);
   const [selectedId, setSelectedId] = useState(cues[0]?.id);
   const currentTimeRef = useRef(0);
   const [activeCueId, setActiveCueId] = useState<string>();
@@ -174,7 +191,10 @@ export function EditorPage({
     id: number;
     timeMs: number;
   }>();
-  const [panel, setPanel] = useState<"style" | "audio" | "none">("none");
+  const [panel, setPanel] = useState<"style" | "audio" | "none">("style");
+  const [cueListOpen, setCueListOpen] = useState(false);
+  const cueListTriggerRef = useRef<HTMLButtonElement>(null);
+  const cueListCloseRef = useRef<HTMLButtonElement>(null);
   const [blurOpen, setBlurOpen] = useState(false);
   const [blurEditMode, setBlurEditMode] = useState(false);
   const [logoOpen, setLogoOpen] = useState(false);
@@ -793,6 +813,25 @@ export function EditorPage({
     setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: point });
     onNotice(`Đã tách cue #${target.index} tại ${Math.round(point / 1000)}s. Voice cache của cue này đã được bỏ để tránh đọc sai.`, "success");
   }, [cues, onCuesChange, onNotice, selectedId]);
+  const duplicateCue = useCallback((id: string) => {
+    const target = cues.find((cue) => cue.id === id);
+    if (!target) return;
+    const duration = Math.max(160, target.endMs - target.startMs);
+    const duplicate: SubtitleCue = {
+      ...target,
+      id: crypto.randomUUID(),
+      startMs: target.endMs,
+      endMs: target.endMs + duration,
+      dubbing: undefined,
+    };
+    const next = [...cues, duplicate]
+      .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs)
+      .map((cue, index) => ({ ...cue, index: index + 1 }));
+    onCuesChange(next);
+    setSelectedId(duplicate.id);
+    setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: duplicate.startMs });
+    onNotice(`Đã nhân bản cue #${target.index}.`, "success");
+  }, [cues, onCuesChange, onNotice]);
   const openDubbingWithAudioMode = useCallback((mode: OriginalAudioMode) => {
     setDubbingInitialAudioMode(mode);
     setDubbingOpen(true);
@@ -1540,6 +1579,96 @@ export function EditorPage({
     setLogoPreview(logo);
     setLogoOpen(false);
   };
+  const closeCueList = useCallback(() => {
+    setCueListOpen(false);
+    requestAnimationFrame(() => cueListTriggerRef.current?.focus());
+  }, []);
+
+  const resizeEditorPane = useCallback((kind: "tools" | "inspector" | "preview", event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const workspace = editorWorkspaceRef.current;
+    if (!workspace) return;
+    const bounds = workspace.getBoundingClientRect();
+    const computed = getComputedStyle(workspace);
+    const startTools = Number.parseFloat(computed.getPropertyValue("--editor-tools-width")) || 248;
+    const startInspector = Number.parseFloat(computed.getPropertyValue("--editor-inspector-width")) || 340;
+    const startPreview = Number.parseFloat(computed.getPropertyValue("--editor-preview-height")) || 430;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    document.body.classList.add("editor-resizing", `editor-resizing-${kind === "preview" ? "row" : "column"}`);
+
+    const setValue = (value: number) => {
+      const property = kind === "tools" ? "--editor-tools-width" : kind === "inspector" ? "--editor-inspector-width" : "--editor-preview-height";
+      workspace.style.setProperty(property, `${Math.round(value)}px`);
+    };
+    let pendingValue: number | undefined;
+    let resizeFrame: number | undefined;
+    const queueValue = (value: number) => {
+      pendingValue = value;
+      if (resizeFrame !== undefined) return;
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = undefined;
+        if (pendingValue === undefined) return;
+        setValue(pendingValue);
+        pendingValue = undefined;
+      });
+    };
+    const move = (pointer: PointerEvent) => {
+      if (kind === "tools") {
+        const maximum = Math.min(420, bounds.width - startInspector - 470);
+        queueValue(Math.max(184, Math.min(maximum, startTools + pointer.clientX - startX)));
+      } else if (kind === "inspector") {
+        const maximum = Math.min(520, bounds.width - startTools - 470);
+        queueValue(Math.max(270, Math.min(maximum, startInspector - pointer.clientX + startX)));
+      } else {
+        const maximum = Math.max(250, bounds.height - 205);
+        queueValue(Math.max(220, Math.min(maximum, startPreview + pointer.clientY - startY)));
+      }
+    };
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
+      if (pendingValue !== undefined) setValue(pendingValue);
+      document.body.classList.remove("editor-resizing", "editor-resizing-row", "editor-resizing-column");
+      const next = getComputedStyle(workspace);
+      try {
+        localStorage.setItem("autosub.editor-layout", JSON.stringify({
+          tools: Number.parseFloat(next.getPropertyValue("--editor-tools-width")) || startTools,
+          inspector: Number.parseFloat(next.getPropertyValue("--editor-inspector-width")) || startInspector,
+          preview: Number.parseFloat(next.getPropertyValue("--editor-preview-height")) || startPreview,
+        }));
+      } catch { /* Layout persistence is optional. */ }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  }, []);
+
+  const nudgeEditorPane = useCallback((kind: "tools" | "inspector" | "preview", delta: number) => {
+    const workspace = editorWorkspaceRef.current;
+    if (!workspace) return;
+    const computed = getComputedStyle(workspace);
+    const property = kind === "tools" ? "--editor-tools-width" : kind === "inspector" ? "--editor-inspector-width" : "--editor-preview-height";
+    const current = Number.parseFloat(computed.getPropertyValue(property));
+    const minimum = kind === "tools" ? 184 : kind === "inspector" ? 270 : 220;
+    const maximum = kind === "preview" ? Math.max(250, workspace.clientHeight - 205) : kind === "tools" ? 420 : 520;
+    workspace.style.setProperty(property, `${Math.max(minimum, Math.min(maximum, current + delta))}px`);
+  }, []);
+
+  useEffect(() => {
+    if (!cueListOpen) return;
+    requestAnimationFrame(() => cueListCloseRef.current?.focus());
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeCueList();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [closeCueList, cueListOpen]);
 
   return (
     <div className="page editor-page">
@@ -1629,6 +1758,7 @@ export function EditorPage({
           className={panel === "style" ? "active" : ""}
           onClick={() => {
             if (logoOpen) closeLogoEditor();
+            setCueListOpen(false);
             setPanel(panel === "style" ? "none" : "style");
           }}
         >
@@ -1647,10 +1777,25 @@ export function EditorPage({
           aria-expanded={panel === "audio"}
           onClick={() => {
             if (logoOpen) closeLogoEditor();
+            setCueListOpen(false);
             setPanel(panel === "audio" ? "none" : "audio");
           }}
         >
           <Volume2 size={15} /> Âm thanh
+        </button>
+        <button
+          ref={cueListTriggerRef}
+          type="button"
+          className={cueListOpen ? "active cue-list-trigger" : "cue-list-trigger"}
+          aria-controls="editor-cue-drawer"
+          aria-expanded={cueListOpen}
+          onClick={() => {
+            if (logoOpen) closeLogoEditor();
+            setPanel("none");
+            setCueListOpen((value) => !value);
+          }}
+        >
+          <LayoutList size={15} /> Danh sách cue <b>{cues.length}</b>
         </button>
         <button className="toolbar-export" onClick={() => {
           // The logo editor previews every change immediately. Export the
@@ -1729,7 +1874,97 @@ export function EditorPage({
           <button type="button" className="button small ghost" onClick={() => setBlurEditMode(false)}>Xong</button>
         </div>
       )}
-      <section className="editor-main">
+      <section
+        ref={editorWorkspaceRef}
+        className="editor-main"
+        style={{
+          "--editor-tools-width": `${editorLayout.tools}px`,
+          "--editor-inspector-width": `${editorLayout.inspector}px`,
+          "--editor-preview-height": `${editorLayout.preview}px`,
+        } as CSSProperties}
+      >
+        <aside className="editor-tool-panel" aria-label="Công cụ biên tập">
+          <div className="editor-side-heading">
+            <div>
+              <span>CÔNG CỤ</span>
+              <strong>Biên tập video</strong>
+            </div>
+            <small>{cues.length} cue</small>
+          </div>
+          <div className="editor-file-actions">
+            <label className="editor-side-action file-button">
+              <Upload size={16} />
+              <span><b>{asset ? "Thay video" : "Mở video"}</b><small>Tải video vào project</small></span>
+              <input
+                type="file"
+                accept="video/*"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  selectVideo(file);
+                }}
+              />
+            </label>
+            <button type="button" className="editor-side-action" onClick={() => void importLocalVideo()}>
+              <FileVideo size={16} />
+              <span><b>{pickingLocalVideo ? "Hủy chọn video" : "Mở video lớn"}</b><small>Đọc trực tiếp từ máy</small></span>
+            </button>
+            <label className="editor-side-action file-button">
+              <Captions size={16} />
+              <span><b>Nạp phụ đề</b><small>SRT hoặc VTT</small></span>
+              <input
+                type="file"
+                accept=".srt,.vtt,text/vtt,application/x-subrip"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  void importSubtitle(file);
+                }}
+              />
+            </label>
+          </div>
+          <div className="editor-side-section">
+            <span>XỬ LÝ</span>
+            <button type="button" onClick={() => setTranslationOpen(true)} disabled={translationWorking}><Languages size={16} /><b>Dịch bằng AI</b><small>Dịch toàn bộ cue</small></button>
+            <button type="button" className={blurEditMode ? "active" : ""} onClick={() => { setBlurEditMode(true); setBlurOpen(true); }}><Scissors size={16} /><b>Làm mờ</b><small>Che hoặc tái tạo vùng</small></button>
+            <button type="button" className={logoOpen ? "active" : ""} onClick={() => { if (logoOpen) closeLogoEditor(); else { setPanel("none"); setLogoPreview(logo ? { ...logo } : undefined); setLogoOpen(true); } }}><ImageIcon size={16} /><b>Logo / watermark</b><small>Ảnh hoặc chữ</small></button>
+            <button type="button" onClick={() => { setDubbingInitialAudioMode("mute"); setDubbingOpen(true); }}><AudioLines size={16} /><b>Lồng tiếng</b><small>Tạo giọng theo cue</small></button>
+          </div>
+          <div className="editor-side-section editor-side-library">
+            <span>DỮ LIỆU</span>
+            <button ref={cueListTriggerRef} type="button" className={cueListOpen ? "active" : ""} aria-controls="editor-cue-drawer" aria-expanded={cueListOpen} onClick={() => { if (logoOpen) closeLogoEditor(); setCueListOpen((value) => !value); }}><LayoutList size={16} /><b>Danh sách cue</b><small>Mở bảng nội dung</small></button>
+            <button type="button" onClick={() => setPanel("style")}><Captions size={16} /><b>Kiểu phụ đề</b><small>Font, viền và vị trí</small></button>
+            <button type="button" onClick={() => setPanel(dubAudioUrl ? "audio" : "style")} disabled={!dubAudioUrl}><Volume2 size={16} /><b>Âm thanh</b><small>Trộn bản gốc và dub</small></button>
+          </div>
+          <div className="editor-side-output">
+            <button type="button" className="button ghost" disabled={!cues.length} onClick={() => downloadSubtitle("translated")}><Captions size={15} /> Tải SRT</button>
+            <button type="button" className="button primary" onClick={() => {
+              if (logoOpen && logoPreview) {
+                setLogo(logoPreview);
+                setLogoOpen(false);
+              }
+              setExportOpen(true);
+            }}><Download size={15} /> Xuất video</button>
+          </div>
+          <div className="editor-side-status">
+            <i className="status-dot" />
+            <span>{dubAudioUrl ? "Preview đang dùng bản dub mới nhất" : "Preview đang dùng âm thanh nguồn"}</span>
+          </div>
+        </aside>
+        <div
+          className="editor-splitter editor-column-splitter editor-tools-splitter"
+          role="separator"
+          aria-label="Thay đổi chiều rộng bảng công cụ"
+          aria-orientation="vertical"
+          tabIndex={0}
+          onPointerDown={(event) => resizeEditorPane("tools", event)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              nudgeEditorPane("tools", event.key === "ArrowLeft" ? -16 : 16);
+            }
+          }}
+        />
         <div className="editor-left">
           <VideoPlayer
             asset={asset}
@@ -1752,6 +1987,7 @@ export function EditorPage({
             onDeleteCue={deleteCue}
             onDeleteCues={deleteCues}
             onSplitCueAtTime={splitCueAtTime}
+            onDuplicateCue={duplicateCue}
             onExportStem={exportStemAudio}
             onOpenAudioMix={() => setPanel(dubAudioUrl ? "audio" : "none")}
             onOpenDubbingAudioMode={openDubbingWithAudioMode}
@@ -1773,7 +2009,28 @@ export function EditorPage({
             </small>
           </div>
         </div>
-        <div className="editor-right">
+        <div
+          className="editor-splitter editor-column-splitter editor-inspector-splitter"
+          role="separator"
+          aria-label="Thay đổi chiều rộng bảng thuộc tính"
+          aria-orientation="vertical"
+          tabIndex={0}
+          onPointerDown={(event) => resizeEditorPane("inspector", event)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              nudgeEditorPane("inspector", event.key === "ArrowLeft" ? 16 : -16);
+            }
+          }}
+        />
+        {cueListOpen && <button type="button" className="editor-cue-drawer-backdrop" aria-label="Đóng danh sách cue" onClick={closeCueList} />}
+        <aside
+          id="editor-cue-drawer"
+          className={`editor-right editor-cue-drawer ${cueListOpen ? "open" : ""}`}
+          aria-label="Danh sách cue"
+          aria-hidden={!cueListOpen}
+          inert={!cueListOpen}
+        >
           <div className="editor-metrics">
             <div className="editor-metric">
               <span>TỐC ĐỘ</span>
@@ -1801,13 +2058,10 @@ export function EditorPage({
               <span>NỘI DUNG</span>
               <b>{cues.length}</b>
             </div>
-            <button
-              className="icon-button"
-              onClick={addCue}
-              aria-label="Thêm cue"
-            >
-              <Plus size={16} />
-            </button>
+            <div className="cue-drawer-actions">
+              <button className="icon-button" onClick={addCue} aria-label="Thêm cue"><Plus size={16} /></button>
+              <button ref={cueListCloseRef} className="icon-button" onClick={closeCueList} aria-label="Đóng danh sách cue"><X size={16} /></button>
+            </div>
           </div>
           <SubtitleList
             cues={cues}
@@ -1821,7 +2075,20 @@ export function EditorPage({
             voiceReady={dubbingJob?.status === "completed"}
             slowVideoToMatchSpeech={dubbingJob?.config.slowVideoToMatchSpeech === true}
           />
-        </div>
+        </aside>
+        <aside className="editor-inspector" aria-label="Thuộc tính">
+          <div className="editor-inspector-tabs" role="tablist" aria-label="Nhóm thuộc tính">
+            <button type="button" role="tab" aria-selected={panel === "style"} className={panel === "style" ? "active" : ""} onClick={() => setPanel("style")}><Captions size={15} /> Chữ</button>
+            <button type="button" role="tab" aria-selected={panel === "audio"} className={panel === "audio" ? "active" : ""} disabled={!dubAudioUrl} onClick={() => setPanel("audio")}><Volume2 size={15} /> Âm thanh</button>
+          </div>
+          {panel === "none" && (
+            <div className="editor-inspector-empty">
+              <Settings2 size={22} />
+              <strong>Chọn đối tượng để chỉnh</strong>
+              <small>Chọn phụ đề trên preview hoặc timeline để mở thuộc tính.</small>
+              <button type="button" className="button small ghost" onClick={() => setPanel("style")}>Mở chỉnh chữ</button>
+            </div>
+          )}
         {panel === "style" && (
           <aside className="floating-panel style-floating-panel">
             <div className="floating-head">
@@ -1957,6 +2224,21 @@ export function EditorPage({
             </div>
           </aside>
         )}
+        </aside>
+        <div
+          className="editor-splitter editor-row-splitter"
+          role="separator"
+          aria-label="Thay đổi chiều cao timeline"
+          aria-orientation="horizontal"
+          tabIndex={0}
+          onPointerDown={(event) => resizeEditorPane("preview", event)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+              event.preventDefault();
+              nudgeEditorPane("preview", event.key === "ArrowUp" ? -16 : 16);
+            }
+          }}
+        />
       </section>
       <BlurEditor
         open={blurOpen}
