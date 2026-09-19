@@ -43,6 +43,14 @@ test('rejects missing assets, targets, and commands outside scene duration', () 
   assert(paths.includes('scenes[0].commands[0]'));
 });
 
+test('validates the preferred thumbnail against project assets', () => {
+  const value = project();
+  value.thumbnailAssetId = 'earth';
+  assert.deepEqual(validateAnimationProject(value), []);
+  value.thumbnailAssetId = 'missing-thumbnail';
+  assert.ok(validateAnimationProject(value).some((issue) => issue.path === 'thumbnailAssetId'));
+});
+
 test('allows generated video scenes beside composite scenes', () => {
   const value = project();
   value.scenes.push({

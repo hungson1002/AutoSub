@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Flow Agent",
-  "version": "1.2.29",
+  "version": "1.2.44",
   "description": "Google Flow image and video generation with health, credits, models, history, CLI and MCP support",
   "icons": {
     "16": "icon-off-16.png",
@@ -26,6 +26,8 @@
     "https://flow-content.google/*",
     "http://127.0.0.1:8001/*",
     "http://localhost:8001/*",
+    "http://127.0.0.1:8787/*",
+    "http://localhost:8787/*",
     "https://flow.kodelyx.in/*"
   ],
   "background": {
@@ -81,6 +83,7 @@
   },
   "action": {
     "default_title": "Flow Agent",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icon-off-16.png",
       "48": "icon-off-48.png",

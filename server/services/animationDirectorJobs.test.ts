@@ -34,6 +34,29 @@ test('durable job deduplicates, persists result and never stores provider secret
   await reloaded.initialize();
   assert.equal((await reloaded.result(one.id)).id, value.project.id);
 });
+test('job exposes completed-image progress instead of treating a retry task number as percent done', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'animation-jobs-'));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const store = new AnimationDirectorJobStore(root, async (value, stage) => {
+    await stage('Đang tạo 100 ảnh · Turbo 4/6 luồng');
+    await stage('Ảnh 25/100 · Turbo đang dùng 4/6 luồng');
+    await stage('Đang xử lý ảnh 60/100 · cảnh 20, nhịp 3 · thử lại lần 9');
+    await gate;
+    return value.project;
+  });
+  await store.initialize();
+  const job = await store.start(input());
+  for (let i = 0; i < 100 && (store.get(job.id).progressCurrent || 0) < 25; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  const running = store.get(job.id);
+  assert.equal(running.progressCurrent, 25);
+  assert.equal(running.progressTotal, 100);
+  assert.equal(running.progressLabel, '25/100 ảnh đã xong');
+  assert.ok((running.progressPercent || 0) > 20 && (running.progressPercent || 0) < 60);
+  release();
+  assert.equal((await terminal(store, job.id)).progressPercent, 100);
+});
+
 test('restart marks interrupted instead of automatically resubmitting generation', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'animation-jobs-'));
   const store = new AnimationDirectorJobStore(root, async (value) => value.project);

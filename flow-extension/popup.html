@@ -434,7 +434,7 @@
     .result-meta { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 11px; }
     .result-meta strong { color:var(--text); font-size:11px; }
     .result-open { flex-shrink:0; padding:7px 11px; border-radius:8px; background:var(--accent-bg); color:var(--accent); font-weight:800; text-decoration:none; }
-    .tabs { flex-shrink:0; display:grid; grid-template-columns:repeat(4,1fr); gap:4px; padding:8px 10px; background:#fff; border-bottom:1px solid var(--border); }
+    .tabs { flex-shrink:0; display:grid; grid-template-columns:repeat(5,1fr); gap:4px; padding:8px 10px; background:#fff; border-bottom:1px solid var(--border); }
     .tab { border:0; outline:0; border-radius:9px; padding:8px 6px; background:transparent; color:var(--muted); font:700 10px var(--font); cursor:pointer; }
     .tab:focus-visible { box-shadow:0 0 0 2px rgba(255,55,95,.2); }
     .tab.active { color:var(--accent); background:var(--accent-bg); box-shadow:inset 0 0 0 1px rgba(255,55,95,.12); }
@@ -466,6 +466,25 @@
     .media-copy span { display:block; overflow:hidden; margin-top:2px; color:var(--muted); font-size:8px; white-space:nowrap; text-overflow:ellipsis; }
     .media-view { flex-shrink:0; padding:7px 12px; border-radius:8px; background:var(--accent-bg); color:var(--accent); font-size:10px; font-weight:800; text-decoration:none; }
     .media-empty { grid-column:1/-1; padding:48px 15px; text-align:center; color:var(--muted); }
+    .accounts-panel { padding:14px; }
+    .accounts-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:12px; }
+    .accounts-head strong { display:block; font-size:14px; }
+    .accounts-head small { display:block; margin-top:2px; color:var(--muted); font-size:9px; line-height:1.4; }
+    #add-flow-account { flex-shrink:0; border:0; border-radius:9px; padding:8px 10px; background:linear-gradient(135deg,var(--accent),var(--accent-soft)); color:#fff; font:800 9px var(--font); cursor:pointer; }
+    .accounts-list { display:grid; gap:9px; }
+    .flow-account { padding:11px; border:1px solid var(--border); border-radius:12px; background:#fff; box-shadow:0 6px 20px rgba(15,23,42,.05); }
+    .flow-account-top { display:flex; align-items:center; gap:8px; }
+    .flow-account-dot { width:9px; height:9px; border-radius:50%; background:var(--muted); box-shadow:0 0 0 3px rgba(148,163,184,.12); }
+    .flow-account-dot.ready { background:var(--green); box-shadow:0 0 0 3px rgba(52,199,89,.12); }
+    .flow-account-copy { min-width:0; flex:1; }
+    .flow-account-copy strong { display:block; overflow:hidden; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+    .flow-account-copy span { display:block; margin-top:1px; color:var(--muted); font:700 8px var(--mono); }
+    .flow-account-slots { flex-shrink:0; padding:3px 7px; border-radius:999px; background:#f3f5f8; color:var(--text-dim); font:800 8px var(--font); }
+    .flow-account-actions { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-top:9px; }
+    .flow-account-actions button { border:1px solid var(--border); border-radius:8px; padding:7px 5px; background:#fff; color:var(--text-dim); font:800 8px var(--font); cursor:pointer; }
+    .flow-account-actions .danger { color:var(--red); border-color:rgba(255,59,48,.2); }
+    .accounts-empty { padding:28px 10px; border:1px dashed #d8dde6; border-radius:12px; text-align:center; color:var(--muted); font-size:10px; line-height:1.5; }
+    .accounts-summary { margin-top:10px; padding:9px 10px; border-radius:10px; background:#f8f9fb; color:var(--text-dim); font-size:9px; }
     .monitor { padding:14px; }
     .monitor-card { padding:14px; border:1px solid var(--border); border-radius:14px; background:#fff; box-shadow:0 8px 28px rgba(15,23,42,.06); }
     .monitor-top { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
@@ -487,6 +506,10 @@
     #toast.show { opacity:1; transform:translate(-50%,0); }
     #toast.ok { background:#15803d; }
     #toast.error { background:#dc2626; }
+    /* Opera GX action popover: reserve enough room for tab content. */
+    html, body { min-height: 520px; max-height: 600px; }
+    body { height: 520px; }
+    #content { min-height: 0; }
   </style>
 </head>
 
@@ -502,6 +525,7 @@
 
   <nav class="tabs" aria-label="Flow Agent sections">
     <button class="tab active" data-tab="create">Create</button>
+    <button class="tab" data-tab="accounts">Accounts</button>
     <button class="tab" data-tab="media">Media</button>
     <button class="tab" data-tab="history">Logs</button>
     <button class="tab" data-tab="settings">Settings</button>
@@ -516,6 +540,17 @@
     <input id="setting-client" placeholder="My-Mac">
     <button id="save-settings">Save &amp; reconnect</button>
   </div></section>
+
+  <section class="tab-panel" id="panel-accounts">
+    <div class="accounts-panel">
+      <div class="accounts-head">
+        <div><strong>Linked Flow accounts</strong><small>All accounts stay in this same Opera profile; each ready account contributes up to 2 parallel image slots.</small></div>
+        <button id="add-flow-account" type="button">+ Add</button>
+      </div>
+      <div class="accounts-list" id="accounts-list"><div class="accounts-empty">No linked accounts yet.<br>Add one and finish Google sign-in in the opened Flow tab.</div></div>
+      <div class="accounts-summary" id="accounts-summary">0 ready accounts · 0 parallel slots</div>
+    </div>
+  </section>
 
   <section class="tab-panel" id="panel-media">
     <div class="media-head"><div><strong>Media library</strong><small>Backend and extension generations</small></div><div class="media-actions"><button id="refresh-media">Refresh</button><button id="delete-media" class="danger">Delete all</button></div></div>

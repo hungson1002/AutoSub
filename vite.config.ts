@@ -12,6 +12,7 @@ export default defineConfig({
       interval: 300,
       ignored: ['**/workdir/**', '**/dist/**'],
     },
-    proxy: { '/api': 'http://localhost:8787' },
+    // Backend binds explicitly to IPv4; using 127.0.0.1 avoids Node trying ::1 first and logging noisy ECONNREFUSED/AggregateError during dev startup.
+    proxy: { '/api': 'http://127.0.0.1:8787' },
   },
 });

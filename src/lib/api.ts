@@ -39,7 +39,7 @@ export interface TranslationMemoryItem {
   translation: string;
 }
 type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent'; referenceUploadId?: string; referenceAssetId?: string };
-export interface AnimationDirectorJobStatus { id: string; projectId: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'; stage: string; error?: string; hasResult?: boolean }
+export interface AnimationDirectorJobStatus { id: string; projectId: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'; stage: string; error?: string; hasResult?: boolean; progressPercent?: number; progressLabel?: string; progressCurrent?: number; progressTotal?: number }
 export interface AnimationDirectorInput { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }
 export interface AnimationProjectSummary { id: string; name: string; width: number; height: number; fps: number; sceneCount: number; createdAt: string; updatedAt: string }
 export function buildTranslationMemory(cues: SubtitleCue[], cueId: string, limit = 24): TranslationMemoryItem[] {
@@ -284,6 +284,7 @@ export const api = {
     request<AnimationProject>("/api/animation-studio/direct", { method: "POST", body: JSON.stringify(input) }),
   startAnimationDirectorJob: (input: AnimationDirectorInput, resumeId?: string): Promise<AnimationDirectorJobStatus> => request<AnimationDirectorJobStatus>('/api/animation-studio/director-jobs', { method: 'POST', body: JSON.stringify({ input, resumeId }) }),
   generateAnimationCharacterOptions: (input: { brief: string; provider: AIProvider; model: string; assetGeneration: AnimationAssetGeneration; width?: number; height?: number }, signal?: AbortSignal) => request<AnimationAsset[]>('/api/animation-studio/character-options', { method: 'POST', body: JSON.stringify(input), signal }),
+  generateAnimationThumbnails: (input: { project: AnimationProject; brief?: string; provider: AIProvider; model: string; assetGeneration: AnimationAssetGeneration; count?: number }, signal?: AbortSignal) => request<AnimationAsset[]>('/api/animation-studio/thumbnails', { method: 'POST', body: JSON.stringify(input), signal }),
   animationDirectorJob: (id: string) => request<AnimationDirectorJobStatus>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}`),
   animationDirectorResult: (id: string) => request<AnimationProject>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/result`),
   animationDirectorInput: (id: string) => request<AnimationDirectorInput>(`/api/animation-studio/director-jobs/${encodeURIComponent(id)}/input`),

@@ -19,6 +19,134 @@ let selectedFlowUrl = null;
 let sessionUpdates = Promise.resolve();
 const pendingTabTokens = new Map();
 
+// Multi-account image workers. Each linked Flow tab is exposed to Flow Agent as
+// its own virtual browser client, so AutoSub can target it with X-Client-Id.
+// The legacy selected account above remains the primary client for backwards
+// compatibility; linked accounts never overwrite its token/session.
+let linkedFlowAccounts = [];
+const linkedPollTimers = new Map();
+const linkedPollBusy = new Set();
+const linkedCommandQueues = new Map();
+const linkedTabRepairTasks = new Map();
+let linkedTabHealthSweepRunning = false;
+const MAX_LINKED_COMMANDS_PER_ACCOUNT = 1;
+const FLOW_WORKER_PORT_MIN = 8101;
+const FLOW_WORKER_PORT_MAX = 8199;
+
+function assignLinkedWorkerPort(account) {
+  const current = Number(account?.workerPort);
+  if (Number.isInteger(current) && current >= FLOW_WORKER_PORT_MIN && current <= FLOW_WORKER_PORT_MAX) return current;
+  const used = new Set(linkedFlowAccounts.filter((item) => item !== account).map((item) => Number(item.workerPort)).filter((port) => Number.isInteger(port)));
+  for (let port = FLOW_WORKER_PORT_MIN; port <= FLOW_WORKER_PORT_MAX; port += 1) {
+    if (!used.has(port)) {
+      account.workerPort = port;
+      return port;
+    }
+  }
+  throw new Error('NO_FLOW_WORKER_PORT_AVAILABLE');
+}
+
+function normalizeLinkedWorkerPorts() {
+  const used = new Set();
+  for (const account of linkedFlowAccounts) {
+    let port = Number(account.workerPort);
+    if (!Number.isInteger(port) || port < FLOW_WORKER_PORT_MIN || port > FLOW_WORKER_PORT_MAX || used.has(port)) {
+      port = 0;
+      for (let candidate = FLOW_WORKER_PORT_MIN; candidate <= FLOW_WORKER_PORT_MAX; candidate += 1) {
+        if (!used.has(candidate)) { port = candidate; break; }
+      }
+      account.workerPort = port;
+    }
+    if (port) used.add(port);
+  }
+}
+
+function linkedAccountForTab(tabId) {
+  return linkedFlowAccounts.find((account) => account.tabId === tabId) || null;
+}
+
+function canonicalFlowAccount(value) {
+  return String(value || '').replace(/:default$/i, ':0');
+}
+
+function ensureLinkedAccountForTab(tabId, flowUrl) {
+  const flowAccount = flowAccountFromUrl(flowUrl);
+  if (!tabId || !flowAccount) return null;
+  let account = linkedFlowAccounts.find((item) =>
+    canonicalFlowAccount(item.flowAccount) === canonicalFlowAccount(flowAccount)
+  );
+  if (account) {
+    // Persisted linked accounts must be allowed to re-bind after Opera/extension
+    // restarts even when the primary Flow tab is currently closed.
+    if (tabId === selectedFlowTabId) return null;
+    if (selectedFlowTabId !== null
+      && canonicalFlowAccount(flowAccount) === canonicalFlowAccount(selectedFlowAccount)) return null;
+    account.tabId = tabId;
+    account.flowUrl = flowUrl;
+    account.flowAccount = flowAccount;
+    void persistLinkedAccounts();
+    broadcastStatus();
+    return account;
+  }
+  if (selectedFlowTabId === null) return null;
+  if (canonicalFlowAccount(flowAccount) === canonicalFlowAccount(selectedFlowAccount)) return null;
+  if (!account) {
+    const id = newLinkedAccountId();
+    account = {
+      id,
+      clientId: `account-${id.slice(-12)}`,
+      email: null,
+      flowUrl,
+      flowAccount,
+      tabId,
+      flowKey: null,
+      flowKeySource: null,
+      tokenCapturedAt: null,
+      callbackSecret: null,
+      callbackUrl: null,
+      pollIntervalMs: 1000,
+      httpConnected: false,
+      activeRequests: 0,
+    };
+    linkedFlowAccounts.push(account);
+    assignLinkedWorkerPort(account);
+  }
+  void persistLinkedAccounts();
+  broadcastStatus();
+  return account;
+}
+
+function publicLinkedAccount(account) {
+  return {
+    id: account.id,
+    clientId: account.clientId,
+    email: account.email || null,
+    flowUrl: account.flowUrl || null,
+    tabId: account.tabId ?? null,
+    connected: !!account.httpConnected,
+    tokenReady: !!account.flowKey,
+    tokenAge: account.tokenCapturedAt ? Date.now() - account.tokenCapturedAt : null,
+    activeRequests: account.activeRequests || 0,
+    workerPort: Number(account.workerPort) || null,
+  };
+}
+
+function persistLinkedAccounts() {
+  return chrome.storage.local.set({
+    linkedFlowAccounts: linkedFlowAccounts.map((account) => ({
+      id: account.id,
+      clientId: account.clientId,
+      email: account.email || null,
+      flowUrl: account.flowUrl || null,
+      tabId: account.tabId ?? null,
+      flowAccount: account.flowAccount || null,
+      flowKey: account.flowKey || null,
+      tokenCapturedAt: account.tokenCapturedAt || null,
+      workerPort: Number(account.workerPort) || null,
+    })),
+  });
+}
+
 function persistSessionUpdate(token, capturedMetrics) {
   const account = selectedFlowAccount;
   const url = selectedFlowUrl;
@@ -54,13 +182,17 @@ function flowAccountFromUrl(value) {
 function selectFlowAccount(tab) {
   const account = flowAccountFromUrl(tab.url);
   if (!account || tab.id === captchaTabId || tab.id === accountSyncTabId) return false;
+  const previousAccount = selectedFlowAccount;
   const changed = selectedFlowTabId !== tab.id || selectedFlowAccount !== account;
+  const identityChanged = !!previousAccount
+    && canonicalFlowAccount(previousAccount) !== canonicalFlowAccount(account);
   selectedFlowTabId = tab.id;
   selectedFlowAccount = account;
   selectedFlowUrl = tab.url;
-  if (changed) {
-    // /u/N is a browser account slot, not a stable Google identity.
-    // Never resurrect a token merely because that slot was used previously.
+  if (identityChanged) {
+    // Re-opening the SAME Google account in another tab must not throw away a
+    // perfectly good bearer token. Only a true /u/N account change invalidates
+    // the primary session.
     void invalidateFlowSession().catch((error) =>
       console.error('[Flow Agent] Session invalidation failed:', error)
     );
@@ -80,6 +212,7 @@ let httpPollTimer = null;
 let httpPollIntervalMs = 1000;
 let state = 'off'; // off | idle | running
 let manualDisconnect = false;
+let reconnectTimer = null;
 let extensionClientId = '';
 let connectedServerHost = CONFIG.DEFAULT_SERVER_HOST;
 
@@ -185,6 +318,8 @@ async function init() {
     'selectedFlowAccount',
     'selectedFlowUrl',
     'rejectedFlowToken',
+    'linkedFlowAccounts',
+    'manualDisconnect',
   ]);
   if (data.metrics) Object.assign(metrics, data.metrics);
   if (data.callbackSecret) callbackSecret = data.callbackSecret;
@@ -193,6 +328,25 @@ async function init() {
   if (data.selectedFlowAccount) selectedFlowAccount = data.selectedFlowAccount;
   if (data.selectedFlowUrl) selectedFlowUrl = data.selectedFlowUrl;
   if (typeof data.rejectedFlowToken === 'string') rejectedFlowToken = data.rejectedFlowToken;
+  manualDisconnect = data.manualDisconnect === true;
+  // Same-profile multi-account mode: keep one linked Flow tab per Google
+  // account (/u/N) and bind tokens to the exact tab that produced them. This
+  // keeps one Opera profile while still exposing each signed-in account as an
+  // independent Flow Agent client.
+  if (Array.isArray(data.linkedFlowAccounts)) {
+    linkedFlowAccounts = data.linkedFlowAccounts
+      .filter((account) => account && account.id && account.clientId)
+      .map((account) => ({
+        ...account,
+        httpConnected: false,
+        callbackSecret: null,
+        callbackUrl: null,
+        pollIntervalMs: 1000,
+        activeRequests: 0,
+      }));
+    normalizeLinkedWorkerPorts();
+    await persistLinkedAccounts();
+  }
 
   // Browser sign-in may have changed while the worker was stopped.
   flowKey = null;
@@ -204,9 +358,23 @@ async function init() {
   try {
     if (chrome.tabs?.query) {
       const flowTabs = (await chrome.tabs.query({ url: FLOW_TAB_URLS })).filter((t) => t.id !== captchaTabId);
-      const active = flowTabs.find((t) => t.active) || flowTabs.find((t) => t.id === selectedFlowTabId) || (flowTabs.length === 1 ? flowTabs[0] : null);
-      if (active) {
-        selectFlowAccount(active);
+      const isPersistedLinked = (tab) => !!tab.url && linkedFlowAccounts.some((account) =>
+        canonicalFlowAccount(account.flowAccount) === canonicalFlowAccount(flowAccountFromUrl(tab.url))
+      );
+      const primaryTabs = flowTabs.filter((tab) => !isPersistedLinked(tab));
+      const rememberedPrimary = selectedFlowAccount
+        ? primaryTabs.find((tab) => tab.url
+          && canonicalFlowAccount(flowAccountFromUrl(tab.url)) === canonicalFlowAccount(selectedFlowAccount))
+        : null;
+      const active = rememberedPrimary
+        || primaryTabs.find((t) => t.active)
+        || primaryTabs.find((t) => t.id === selectedFlowTabId)
+        || (primaryTabs.length === 1 ? primaryTabs[0] : null);
+      if (active) selectFlowAccount(active);
+      for (const tab of flowTabs) {
+        if (active && tab.id === active.id || !tab.url) continue;
+        const linked = ensureLinkedAccountForTab(tab.id, tab.url);
+        if (linked) void refreshLinkedAccountIdentity(linked);
       }
     }
   } catch (err) {
@@ -215,6 +383,11 @@ async function init() {
 
   await loadOutbox();
   connectToAgent();
+  setTimeout(() => {
+    restoreLinkedAccountSessions()
+      .then(() => healthCheckLinkedTabs())
+      .catch(() => {});
+  }, 700);
   // 0.5 min is Chrome's minimum alarm period â€” anything lower is silently clamped.
   chrome.alarms.create('keepAlive', { periodInMinutes: 0.5 });
   // Retry any responses left undelivered by a previous worker lifetime.
@@ -252,6 +425,39 @@ function captureBearerToken(value, sourceAccount = null, source = 'network') {
   return true;
 }
 
+function captureLinkedAccountToken(account, value, source = 'network') {
+  const bearerMatch = String(value || '').match(/^Bearer\s+(.+)$/i);
+  if (!account || !bearerMatch) return false;
+  const token = bearerMatch[1].trim();
+  if (token.length < 32 || /\s/.test(token)) return false;
+  account.flowKey = token;
+  account.flowKeySource = source;
+  account.tokenCapturedAt = Date.now();
+  account.flowAccount = flowAccountFromUrl(account.flowUrl) || account.flowAccount || null;
+  void persistLinkedAccounts();
+  // Re-register even when the HTTP poll session already exists: a linked
+  // account can connect tokenless first, then capture its bearer token later.
+  // The second hello updates Flow Agent's per-client token map in-place.
+  void connectLinkedAccount(account, true);
+  broadcastStatus();
+  return true;
+}
+
+async function refreshLinkedAccountIdentity(account) {
+  if (!account?.tabId) return;
+  try {
+    const tab = await chrome.tabs.get(account.tabId);
+    if (!tab?.url || !isFlowUrl(tab.url)) return;
+    account.flowUrl = tab.url;
+    account.flowAccount = flowAccountFromUrl(tab.url);
+    const identity = await readFlowIdentity(account.tabId).catch(() => ({}));
+    const email = normalizeFlowEmail(identity?.email);
+    if (email) account.email = email;
+    await persistLinkedAccounts();
+    broadcastStatus();
+  } catch { /* Tab may be between Google login redirects. */ }
+}
+
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     // Requests made by this worker reuse flowKey. Observing them would make
@@ -275,7 +481,10 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       (h) => h.name?.toLowerCase() === 'authorization',
     );
     const source = details.url.startsWith('https://aisandbox-pa.') ? 'aisandbox' : 'page';
-    if (details.tabId === selectedFlowTabId) {
+    const linked = linkedAccountForTab(details.tabId);
+    if (linked) {
+      captureLinkedAccountToken(linked, authHeader?.value, source);
+    } else if (details.tabId === selectedFlowTabId) {
       captureBearerToken(authHeader?.value, selectedFlowAccount, source);
     } else if (authHeader?.value) {
       // Navigation requests can run before the document_start content script
@@ -292,11 +501,49 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 // pages. content.js relays the same bearer value observed in the page's MAIN
 // world, giving us a browser-compatible fallback.
 chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (msg?.type === 'AUTOSUB_WORKER_ID') {
+    const workerId = String(msg.workerId || '').trim();
+    if (!/^[a-z0-9]{8,32}$/i.test(workerId)) return;
+    const clientId = `flow-worker-${workerId}`;
+    chrome.storage.local.get(['clientId'], async (stored) => {
+      if (stored.clientId === clientId && extensionClientId === clientId) return;
+      await chrome.storage.local.set({ clientId, autosubWorkerId: workerId });
+      extensionClientId = clientId;
+      httpConnected = false;
+      if (httpPollTimer) clearTimeout(httpPollTimer);
+      if (ws) { try { ws.close(); } catch {} }
+      setTimeout(() => connectToAgent(), 100);
+    });
+    return;
+  }
   const senderUrl = sender.url || sender.tab?.url;
   if (!sender.tab || !isFlowUrl(senderUrl)) return;
+  if (sender.tab.id === accountSyncTabId) {
+    if (msg?.type === 'FLOW_TAB_ACTIVE' || msg?.type === 'FLOW_MAIN_READY') {
+      const target = linkedAccountSyncTargetId
+        ? linkedFlowAccounts.find((account) => account.id === linkedAccountSyncTargetId)
+        : null;
+      if (target) {
+        void refreshLinkedAccountSession(target, false).then((result) => {
+          if (!target.flowKey && result?.status !== 'ready') {
+            setTimeout(() => refreshLinkedAccountSession(target, false).catch(() => {}), 1500);
+          }
+        });
+      } else {
+        void refreshSelectedAccountSession(false);
+      }
+    }
+    return;
+  }
   if (msg?.type === 'FLOW_TAB_ACTIVE') {
-    if (sender.tab.id === accountSyncTabId) {
-      void refreshSelectedAccountSession(false);
+    const linked = linkedAccountForTab(sender.tab.id) || ensureLinkedAccountForTab(sender.tab.id, senderUrl);
+    if (linked) {
+      linked.flowUrl = senderUrl;
+      linked.flowAccount = flowAccountFromUrl(senderUrl);
+      const pending = pendingTabTokens.get(sender.tab.id);
+      pendingTabTokens.delete(sender.tab.id);
+      if (pending && Date.now() - pending.at < 30000) captureLinkedAccountToken(linked, pending.authorization, pending.source);
+      void refreshLinkedAccountIdentity(linked);
       return;
     }
     if (msg.visible === false && selectedFlowTabId !== null) return;
@@ -307,6 +554,16 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       captureBearerToken(pending.authorization, selectedFlowAccount, pending.source);
     }
     void refreshSelectedAccountSession(msg.visible === true);
+    return;
+  }
+  const linked = linkedAccountForTab(sender.tab.id);
+  if (linked) {
+    linked.flowUrl = senderUrl;
+    if (msg?.type === 'FLOW_AUTH_TOKEN') {
+      captureLinkedAccountToken(linked, msg.authorization, msg.apiHost === 'aisandbox' ? 'aisandbox' : 'page');
+    } else if (msg?.type === 'FLOW_MAIN_READY') {
+      void refreshLinkedAccountIdentity(linked);
+    }
     return;
   }
   if (selectedFlowTabId === null) {
@@ -558,6 +815,7 @@ async function connectToAgent() {
 
   ws.onopen = async () => {
     console.log('[Flow Agent] Connected to agent: ' + wsUrl);
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     chrome.alarms.clear('reconnect');
     setState('idle');
 
@@ -609,11 +867,66 @@ async function connectToAgent() {
   };
 }
 
+const AUTOSUB_MULTI_PROMPT_PREFIX = '__AUTOSUB_MULTI_PROMPT_V1__:';
+
+function expandAutoSubMultiPrompt(body) {
+  if (!body || !Array.isArray(body.requests) || body.requests.length < 2) return body;
+  const firstText = body.requests[0]?.structuredPrompt?.parts?.[0]?.text;
+  if (typeof firstText !== 'string' || !firstText.startsWith(AUTOSUB_MULTI_PROMPT_PREFIX)) return body;
+  try {
+    const encoded = firstText.slice(AUTOSUB_MULTI_PROMPT_PREFIX.length);
+    const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
+    const prompts = JSON.parse(new TextDecoder().decode(bytes));
+    if (!Array.isArray(prompts) || prompts.length !== body.requests.length || prompts.some((prompt) => typeof prompt !== 'string' || prompt.trim().length < 8)) {
+      throw new Error('invalid prompt batch');
+    }
+    const next = JSON.parse(JSON.stringify(body));
+    next.requests.forEach((request, index) => {
+      request.structuredPrompt = { ...(request.structuredPrompt || {}), parts: [{ text: prompts[index].trim() }] };
+    });
+    return next;
+  } catch (error) {
+    console.error('[Flow Agent] AutoSub multi-prompt decode failed:', error);
+    return body;
+  }
+}
+
+const MAX_API_REQUESTS_PER_SESSION = 2;
+// Browser-side fetches can occasionally remain pending forever even after the
+// AutoSub HTTP caller has already timed out. Bound every Google API proxy call
+// so the two per-account worker slots are always released again.
+const FLOW_API_FETCH_TIMEOUT_MS = 75_000;
+let activeApiRequests = 0;
+const apiRequestQueue = [];
+
+function pumpApiRequests() {
+  while (activeApiRequests < MAX_API_REQUESTS_PER_SESSION && apiRequestQueue.length) {
+    const item = apiRequestQueue.shift();
+    activeApiRequests += 1;
+    Promise.resolve(handleApiRequest(item.msg))
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        activeApiRequests = Math.max(0, activeApiRequests - 1);
+        pumpApiRequests();
+      });
+  }
+}
+
+function enqueueApiRequest(msg) {
+  return new Promise((resolve, reject) => {
+    apiRequestQueue.push({ msg, resolve, reject });
+    pumpApiRequests();
+  });
+}
+
 async function handleAgentCommand(msg) {
   if (!msg || typeof msg !== 'object') return;
   try {
     if (msg.method === 'api_request') {
-      await handleApiRequest(msg);
+      // Allow exactly two Google Flow API calls per linked account tab/client.
+      // This matches AutoSub's two image slots per account while still bounding
+      // concurrency tightly enough to avoid the old unbounded retry storms.
+      await enqueueApiRequest(msg);
     } else if (msg.method === 'get_media_url') {
       await handleGetMediaUrl(msg);
     } else if (msg.method === 'trpc_request') {
@@ -686,6 +999,166 @@ function agentHttpBase() {
   return /^https?:\/\//i.test(host) ? host : `${local ? 'http' : 'https'}://${host}`;
 }
 
+function linkedAgentHttpBase(account) {
+  const port = assignLinkedWorkerPort(account);
+  const base = new URL(agentHttpBase());
+  base.protocol = 'http:';
+  base.hostname = '127.0.0.1';
+  base.port = String(port);
+  return base.origin;
+}
+
+async function ensureLinkedWorkerRuntime(account) {
+  const workerPort = assignLinkedWorkerPort(account);
+  const response = await fetch('http://127.0.0.1:8787/api/ai-video/flow-workers/ensure', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientId: account.clientId, workerPort }),
+  });
+  if (!response.ok) throw new Error(`WORKER_SUPERVISOR_HTTP_${response.status}`);
+  const body = await response.json().catch(() => ({}));
+  const confirmedPort = Number(body?.worker?.port);
+  if (Number.isInteger(confirmedPort) && confirmedPort >= FLOW_WORKER_PORT_MIN && confirmedPort <= FLOW_WORKER_PORT_MAX) account.workerPort = confirmedPort;
+  return linkedAgentHttpBase(account);
+}
+
+function scheduleLinkedPoll(account, delay = account.pollIntervalMs || 1000) {
+  const existing = linkedPollTimers.get(account.id);
+  if (existing) clearTimeout(existing);
+  if (!account.httpConnected || manualDisconnect) return;
+  linkedPollTimers.set(account.id, setTimeout(() => pollLinkedAccount(account.id), delay));
+}
+
+async function connectLinkedAccount(account, force = false) {
+  if (!account || manualDisconnect || (account.httpConnected && !force)) return;
+  try {
+    const workerBase = await ensureLinkedWorkerRuntime(account);
+    const response = await fetch(`${workerBase}/api/ext/hello`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: account.clientId,
+        clientId: account.clientId,
+        flowKey: account.flowKey || '',
+        flowKeyPresent: !!account.flowKey,
+        extension_version: chrome.runtime.getManifest().version,
+        selected_flow_url: account.flowUrl || '',
+        account_session: { status: account.flowKey ? 'ready' : 'connected', email: account.email || null, source: 'linked_flow_tab' },
+      }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    account.callbackSecret = data.secret;
+    account.callbackUrl = new URL(data.callback_url, workerBase).toString();
+    account.pollIntervalMs = Math.max(250, Number(data.poll_interval_ms) || 1000);
+    account.httpConnected = true;
+    scheduleLinkedPoll(account, 0);
+    broadcastStatus();
+  } catch (error) {
+    account.httpConnected = false;
+    console.warn(`[Flow Agent] Linked account ${account.email || account.clientId} unavailable:`, error.message);
+    scheduleLinkedPoll(account, 5000);
+  }
+}
+
+async function sendLinkedResponse(account, msg) {
+  if (!account?.callbackSecret) throw new Error('LINKED_ACCOUNT_NOT_CONNECTED');
+  const response = await fetch(account.callbackUrl || `${linkedAgentHttpBase(account)}/api/ext/callback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${account.callbackSecret}` },
+    body: JSON.stringify({ ...msg, session_id: account.clientId }),
+  });
+  if (!response.ok) throw new Error(`CALLBACK_HTTP_${response.status}`);
+}
+
+function pumpLinkedCommands(account) {
+  const queue = linkedCommandQueues.get(account.id) || [];
+  while ((account.activeRequests || 0) < MAX_LINKED_COMMANDS_PER_ACCOUNT && queue.length) {
+    const command = queue.shift();
+    account.activeRequests = (account.activeRequests || 0) + 1;
+    Promise.resolve(handleLinkedAccountCommand(account, command)).catch((error) => {
+      console.error('[Flow Agent] Linked account command failed:', error);
+    }).finally(() => {
+      account.activeRequests = Math.max(0, (account.activeRequests || 1) - 1);
+      pumpLinkedCommands(account);
+      broadcastStatus();
+    });
+  }
+  linkedCommandQueues.set(account.id, queue);
+}
+
+async function pollLinkedAccount(accountId) {
+  const account = linkedFlowAccounts.find((item) => item.id === accountId);
+  if (!account || !account.httpConnected || manualDisconnect || linkedPollBusy.has(accountId)) return;
+  linkedPollBusy.add(accountId);
+  try {
+    const response = await fetch(`${linkedAgentHttpBase(account)}/api/ext/poll?session_id=${encodeURIComponent(account.clientId)}`, {
+      headers: { Authorization: `Bearer ${account.callbackSecret}` },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const queue = linkedCommandQueues.get(account.id) || [];
+    queue.push(...(data.commands || []));
+    linkedCommandQueues.set(account.id, queue);
+    pumpLinkedCommands(account);
+  } catch (error) {
+    account.httpConnected = false;
+    console.warn(`[Flow Agent] Linked account ${account.email || account.clientId} polling stopped:`, error.message);
+    setTimeout(() => connectLinkedAccount(account), 3000);
+  } finally {
+    linkedPollBusy.delete(accountId);
+    if (account.httpConnected) scheduleLinkedPoll(account);
+  }
+}
+
+async function waitForLinkedAccountToken(account, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (account.flowKey) return true;
+    await sleep(500);
+  }
+  return !!account.flowKey;
+}
+
+async function restoreLinkedAccountSessions() {
+  // Labs has one cookie session in this Opera profile, so token bootstrap must
+  // be sequential. Once captured, each bearer token stays bound to its own
+  // linked account/client and the generation requests can run in parallel.
+  for (const [index, account] of linkedFlowAccounts.entries()) {
+    try {
+      if (index) await sleep(450);
+      const tab = await ensureLinkedFlowAccountTab(account, false);
+      if (!tab?.id) continue;
+      await refreshLinkedAccountIdentity(account);
+      await connectLinkedAccount(account);
+
+      if (!account.flowKey) {
+        await chrome.tabs.reload(tab.id, { bypassCache: false }).catch(() => {});
+        await waitForTabComplete(tab.id, 20000).catch(() => {});
+        await sleep(1200);
+      }
+
+      if (!account.flowKey) {
+        const sync = await refreshLinkedAccountSession(account, true);
+        if (sync?.status === 'sign_in_started') {
+          const ready = await waitForLinkedAccountToken(account, 30000);
+          if (!ready) await cancelLinkedAccountSync(account.id);
+        }
+      }
+
+      // Force hello again after token capture so Flow Agent updates the same
+      // client from connected/tokenless -> ready without creating a new client.
+      await connectLinkedAccount(account, true);
+    } catch (error) {
+      console.warn('[Flow Agent] Linked account restore failed:', account.email || account.clientId, error?.message || error);
+    }
+  }
+}
+
+async function connectAllLinkedAccounts() {
+  await Promise.all(linkedFlowAccounts.map((account) => connectLinkedAccount(account)));
+}
+
 async function connectHttpAgent() {
   if (manualDisconnect || httpConnected) return;
   const storage = await chrome.storage.local.get(['clientId']);
@@ -717,6 +1190,8 @@ async function connectHttpAgent() {
     callbackUrl = new URL(data.callback_url, agentHttpBase()).toString();
     httpPollIntervalMs = Math.max(250, Number(data.poll_interval_ms) || 1000);
     httpConnected = true;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    chrome.alarms.clear('reconnect');
     await chrome.storage.local.set({ callbackSecret, callbackUrl });
     setState('idle');
     scheduleHttpPoll(0);
@@ -758,7 +1233,39 @@ async function pollHttpCommands() {
 }
 
 function scheduleReconnect() {
+  if (manualDisconnect) return;
+  if (!reconnectTimer) {
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectToAgent();
+      void connectAllLinkedAccounts();
+    }, 1500);
+  }
+  // Alarm is the durable fallback if MV3 suspends the service worker before
+  // the short timer fires. Chrome clamps alarms below 30 seconds.
   chrome.alarms.create('reconnect', { delayInMinutes: 0.5 });
+}
+
+async function healthCheckLinkedTabs() {
+  if (linkedTabHealthSweepRunning || manualDisconnect) return;
+  linkedTabHealthSweepRunning = true;
+  try {
+    for (const account of linkedFlowAccounts) {
+      if (!account || account.activeRequests > 0 || !account.flowKey) continue;
+      if (account.tabHealthyAt && Date.now() - account.tabHealthyAt < 20_000) continue;
+      if (account.tabRepairFailedAt && Date.now() - account.tabRepairFailedAt < 15_000) continue;
+      try {
+        await ensureHealthyLinkedFlowTab(account, false);
+      } catch (error) {
+        console.warn('[Flow Agent] Linked tab watchdog repair failed:', account.clientId, error?.message || error);
+      }
+      // Stagger scripting/navigation work so seven idle tabs never stampede the
+      // MV3 service worker after Opera wakes from sleep.
+      await sleep(180);
+    }
+  } finally {
+    linkedTabHealthSweepRunning = false;
+  }
 }
 
 function keepAlive() {
@@ -769,6 +1276,8 @@ function keepAlive() {
   } else {
     connectToAgent();
   }
+  void connectAllLinkedAccounts();
+  void healthCheckLinkedTabs();
 }
 
 function sendToAgent(msg) {
@@ -917,6 +1426,136 @@ async function solveCaptcha(requestId, captchaAction) {
   }
 }
 
+function linkedFlowRecoveryUrl(account) {
+  if (account?.flowUrl && isFlowUrl(account.flowUrl)) return account.flowUrl;
+  const match = String(account?.flowAccount || '').match(/:(default|\d+)$/i);
+  if (match?.[1] && match[1] !== 'default') return `https://flow.google.com/u/${match[1]}/`;
+  return 'https://flow.google.com/';
+}
+
+async function ensureLinkedFlowAccountTab(account, active = false) {
+  if (!account) return null;
+  if (account.tabId) {
+    try {
+      const tab = await chrome.tabs.get(account.tabId);
+      if (tab?.url && isFlowUrl(tab.url)) return tab;
+    } catch {}
+    account.tabId = null;
+  }
+  const tab = await chrome.tabs.create({ url: linkedFlowRecoveryUrl(account), active });
+  account.tabId = tab.id;
+  account.flowUrl = tab.url && isFlowUrl(tab.url) ? tab.url : linkedFlowRecoveryUrl(account);
+  await persistLinkedAccounts();
+  return tab;
+}
+
+async function pingLinkedFlowTab(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab?.id || !tab.url || !isFlowUrl(tab.url)) throw new Error(`FLOW_TAB_NOT_READY:${tab?.url || 'missing'}`);
+  if (tab.status !== 'complete') await waitForTabComplete(tab.id, 20000).catch(() => {});
+  const latest = await chrome.tabs.get(tab.id).catch(() => null);
+  if (!latest?.url || !isFlowUrl(latest.url)) throw new Error(`FLOW_TAB_NAVIGATED:${latest?.url || 'missing'}`);
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['injected.js'], world: 'MAIN' });
+  await sleep(120);
+  const pong = await chrome.tabs.sendMessage(tab.id, { type: 'PING_FLOW_BRIDGE' });
+  if (!pong?.ok) throw new Error('FLOW_BRIDGE_PING_FAILED');
+  return latest;
+}
+
+async function ensureHealthyLinkedFlowTab(account, forceRepair = false) {
+  if (!account) throw new Error('NO_LINKED_ACCOUNT');
+  const existing = linkedTabRepairTasks.get(account.id);
+  if (existing) return existing;
+
+  const task = (async () => {
+    let tab = await ensureLinkedFlowAccountTab(account, false);
+    if (!tab?.id) throw new Error('NO_FLOW_TAB');
+    if (!forceRepair) {
+      try {
+        const healthy = await pingLinkedFlowTab(tab.id);
+        account.tabId = healthy.id;
+        account.flowUrl = healthy.url;
+        account.tabHealthyAt = Date.now();
+        return healthy;
+      } catch {}
+    }
+
+    try { if (tab.id) await chrome.tabs.remove(tab.id); } catch {}
+    account.tabId = null;
+    const recoveryUrl = linkedFlowRecoveryUrl(account);
+    tab = await chrome.tabs.create({ url: recoveryUrl, active: false });
+    account.tabId = tab.id;
+    account.flowUrl = recoveryUrl;
+    await persistLinkedAccounts();
+    await waitForTabComplete(tab.id, 20000).catch(() => {});
+    await sleep(500);
+    const healthy = await pingLinkedFlowTab(tab.id);
+    account.tabId = healthy.id;
+    account.flowUrl = healthy.url;
+    account.tabHealthyAt = Date.now();
+    account.tabRepairFailedAt = null;
+    await persistLinkedAccounts();
+    return healthy;
+  })().catch((error) => {
+    account.tabRepairFailedAt = Date.now();
+    throw error;
+  }).finally(() => linkedTabRepairTasks.delete(account.id));
+
+  linkedTabRepairTasks.set(account.id, task);
+  return task;
+}
+
+function captchaResultError(result) {
+  if (result?.token) return null;
+  return result?.error || 'NO_CAPTCHA_TOKEN';
+}
+
+async function requestLinkedCaptcha(account, requestId, captchaAction, forceRepair = false) {
+  const tab = await ensureHealthyLinkedFlowTab(account, forceRepair);
+  const result = await Promise.race([
+    requestCaptchaFromTab(tab.id, requestId, captchaAction),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('CAPTCHA_TIMEOUT')), 50000)),
+  ]);
+  const error = captchaResultError(result);
+  if (error) throw new Error(error);
+  account.tabHealthyAt = Date.now();
+  return result;
+}
+
+async function solveCaptchaForLinkedAccount(account, requestId, captchaAction) {
+  let firstError = null;
+  try {
+    return await requestLinkedCaptcha(account, requestId, captchaAction, false);
+  } catch (error) {
+    firstError = error;
+  }
+
+  // Repair exactly this linked tab and retry once. The per-account repair lock
+  // prevents concurrent requests from opening duplicate tabs for one account.
+  try {
+    return await requestLinkedCaptcha(account, `${requestId}-repair`, captchaAction, true);
+  } catch (repairError) {
+    const detail = `${firstError?.message || firstError || ''} | ${repairError?.message || repairError || ''}`;
+    console.warn('[Flow Agent] Linked CAPTCHA tab repair failed:', account.clientId, detail);
+  }
+
+  // reCAPTCHA tokens are bound to the Flow site/action, while API auth remains
+  // the linked account's own bearer token. A healthy shared Flow tab is a safe
+  // last-resort CAPTCHA source and keeps one broken account tab from dropping a
+  // whole seven-worker wave.
+  try {
+    const fallback = await solveCaptcha(`${requestId}-shared`, captchaAction);
+    if (fallback?.token) {
+      account.tabRepairFailedAt = Date.now();
+      return fallback;
+    }
+    return { error: `LINKED_AND_SHARED_CAPTCHA_FAILED: ${fallback?.error || 'NO_TOKEN'}` };
+  } catch (fallbackError) {
+    return { error: `LINKED_AND_SHARED_CAPTCHA_FAILED: ${fallbackError?.message || fallbackError || 'CAPTCHA_FAILED'}` };
+  }
+}
+
 async function handleSolveCaptcha(msg) {
   const { id, params } = msg;
   const result = await solveCaptcha(id, params?.captchaAction || 'VIDEO_GENERATION');
@@ -1030,6 +1669,154 @@ async function handleUploadVideo(msg) {
   }
 }
 
+async function handleLinkedApiRequest(account, msg) {
+  const { id, params } = msg;
+  const { url, method, headers, body, captchaAction } = params || {};
+  if (!url) return sendLinkedResponse(account, { id, error: 'MISSING_URL' });
+  if (!url.startsWith('https://aisandbox-pa.googleapis.com/')) return sendLinkedResponse(account, { id, error: 'INVALID_URL' });
+  if (!account.flowKey) return sendLinkedResponse(account, { id, status: 503, error: 'NO_FLOW_KEY' });
+
+  setState('running');
+  const hasCaptcha = !!captchaAction;
+  if (hasCaptcha) metrics.requestCount++;
+  const logId = `${account.clientId}:${id}`;
+  const logType = _classifyApiUrl(url);
+  if (_VISIBLE_TYPES.has(logType)) {
+    const payloadSummary = body ? JSON.stringify(body).slice(0, 200) : null;
+    addRequestLog({ id: logId, type: logType, time: new Date().toISOString(), status: 'processing', error: null, outputUrl: null, url, payloadSummary });
+  }
+
+  try {
+    let captchaToken = null;
+    if (captchaAction) {
+      const captchaResult = await solveCaptchaForLinkedAccount(account, id, captchaAction);
+      captchaToken = captchaResult?.token || null;
+      if (!captchaToken) {
+        const err = captchaResult?.error || 'CAPTCHA_FAILED';
+        if (hasCaptcha) { metrics.failedCount++; metrics.lastError = `CAPTCHA_FAILED: ${err}`; }
+        updateRequestLog(logId, { status: 'failed', error: `CAPTCHA_FAILED: ${err}` });
+        await chrome.storage.local.set({ metrics });
+        return sendLinkedResponse(account, { id, status: 403, error: `CAPTCHA_FAILED: ${err}` });
+      }
+    }
+
+    let finalBody = body;
+    if (captchaToken && finalBody) {
+      finalBody = JSON.parse(JSON.stringify(finalBody));
+      if (finalBody.clientContext?.recaptchaContext) finalBody.clientContext.recaptchaContext.token = captchaToken;
+      if (Array.isArray(finalBody.requests)) {
+        for (const req of finalBody.requests) {
+          if (req.clientContext?.recaptchaContext) req.clientContext.recaptchaContext.token = captchaToken;
+        }
+      }
+    }
+
+    const activeFlowKey = account.flowKey;
+    if (!activeFlowKey) return sendLinkedResponse(account, { id, status: 503, error: 'NO_FLOW_KEY' });
+    const fetchHeaders = { ...(headers || {}), authorization: `Bearer ${activeFlowKey}` };
+    const response = await fetch(url, {
+      method: method || 'POST',
+      headers: fetchHeaders,
+      // Linked accounts share one Opera cookie jar. Mixing that shared jar with
+      // a different account's bearer token causes cross-account affinity bugs
+      // and makes concurrent uploads behave as if only one session is valid.
+      // aisandbox is already authenticated by the captured bearer token.
+      credentials: 'omit',
+      body: method === 'GET' ? undefined : JSON.stringify(finalBody),
+      signal: AbortSignal.timeout(FLOW_API_FETCH_TIMEOUT_MS),
+    });
+    const responseText = await response.text();
+    let responseData;
+    try { responseData = JSON.parse(responseText); } catch { responseData = responseText; }
+
+    if (response.status === 401) {
+      account.flowKey = null;
+      account.tokenCapturedAt = null;
+      account.httpConnected = false;
+      await persistLinkedAccounts();
+    }
+    await sendLinkedResponse(account, { id, status: response.status, data: responseData });
+    const responseSummary = responseText ? responseText.slice(0, 300) : null;
+    if (response.ok) {
+      if (hasCaptcha) { metrics.successCount++; metrics.lastError = null; }
+      updateRequestLog(logId, { status: 'success', httpStatus: response.status, responseSummary });
+    } else {
+      if (hasCaptcha) { metrics.failedCount++; metrics.lastError = `API_${response.status}`; }
+      updateRequestLog(logId, { status: 'failed', error: `API_${response.status}`, httpStatus: response.status, responseSummary });
+    }
+  } catch (error) {
+    if (hasCaptcha) { metrics.failedCount++; metrics.lastError = error.message || 'API_REQUEST_FAILED'; }
+    updateRequestLog(logId, { status: 'failed', error: error.message || 'API_REQUEST_FAILED' });
+    await sendLinkedResponse(account, { id, status: 500, error: error.message || 'API_REQUEST_FAILED' }).catch(() => {});
+  } finally {
+    await chrome.storage.local.set({ metrics });
+    setState('idle');
+  }
+}
+
+async function handleLinkedAccountCommand(account, msg) {
+  if (!account || !msg || typeof msg !== 'object') return;
+  if (msg.method === 'api_request') return handleLinkedApiRequest(account, msg);
+  if (msg.method === 'solve_captcha') {
+    const result = await solveCaptchaForLinkedAccount(account, msg.id, msg.params?.captchaAction || 'VIDEO_GENERATION');
+    return sendLinkedResponse(account, { id: msg.id, result });
+  }
+  if (msg.method === 'get_status') {
+    return sendLinkedResponse(account, { id: msg.id, result: {
+      state: (account.activeRequests || 0) ? 'running' : 'idle',
+      flowKeyPresent: !!account.flowKey,
+      tokenAge: account.tokenCapturedAt ? Date.now() - account.tokenCapturedAt : null,
+      account: account.email || account.flowAccount || account.clientId,
+    } });
+  }
+  if (msg.method === 'open_flow_tab') {
+    if (account.tabId) await chrome.tabs.update(account.tabId, { active: true }).catch(() => {});
+    return sendLinkedResponse(account, { id: msg.id, result: { ok: true } });
+  }
+  if (msg.method === 'refresh_flow_tab' || msg.method === 'force_refresh') {
+    account.flowKey = null;
+    account.flowKeySource = null;
+    account.tokenCapturedAt = null;
+    await persistLinkedAccounts();
+    const tab = await ensureLinkedFlowAccountTab(account, false);
+    if (tab?.id) {
+      await chrome.tabs.reload(tab.id, { bypassCache: true }).catch(() => {});
+      await waitForTabComplete(tab.id, 20000).catch(() => {});
+      await refreshLinkedAccountIdentity(account);
+    }
+    await connectLinkedAccount(account, true);
+    const sync = await refreshLinkedAccountSession(account, true);
+    if (sync?.status === 'sign_in_started') {
+      const ready = await waitForLinkedAccountToken(account, 30000);
+      if (!ready) await cancelLinkedAccountSync(account.id);
+    }
+    await connectLinkedAccount(account, true);
+    return sendLinkedResponse(account, { id: msg.id, result: { queued: !account.flowKey, ready: !!account.flowKey, status: sync?.status || null } });
+  }
+  if (msg.method === 'trpc_request') {
+    const { id, params = {} } = msg;
+    const { url, method = 'POST', headers = {}, body } = params;
+    if (!url || (!url.startsWith('https://flow.google.com/') && !url.startsWith('https://labs.google/'))) {
+      return sendLinkedResponse(account, { id, error: 'INVALID_TRPC_URL' });
+    }
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...headers, ...(account.flowKey ? { authorization: `Bearer ${account.flowKey}` } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+        credentials: 'include',
+      });
+      const text = await response.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = text; }
+      return sendLinkedResponse(account, { id, status: response.status, data });
+    } catch (error) {
+      return sendLinkedResponse(account, { id, error: error.message || 'TRPC_FETCH_FAILED' });
+    }
+  }
+  return sendLinkedResponse(account, { id: msg.id, error: `UNSUPPORTED_LINKED_METHOD:${msg.method || 'unknown'}` });
+}
+
 async function handleApiRequest(msg) {
   const { id, params } = msg;
   const { url, method, headers, body, captchaAction } = params;
@@ -1126,6 +1913,7 @@ async function handleApiRequest(msg) {
       headers: fetchHeaders,
       credentials: 'include',
       body: method === 'GET' ? undefined : JSON.stringify(finalBody),
+      signal: AbortSignal.timeout(FLOW_API_FETCH_TIMEOUT_MS),
     });
 
     let responseData;
@@ -1218,6 +2006,102 @@ function broadcastStatus() {
   chrome.runtime.sendMessage({ type: 'STATUS_PUSH' }).catch(() => { });
 }
 
+function newLinkedAccountId() {
+  const suffix = typeof crypto?.randomUUID === 'function'
+    ? crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+    : Math.random().toString(36).slice(2, 14);
+  return `flowacct-${suffix}`;
+}
+
+async function addLinkedFlowAccount() {
+  const id = newLinkedAccountId();
+  const clientId = `account-${id.slice(-12)}`;
+  const continueUrl = encodeURIComponent('https://flow.google.com/');
+  const tab = await chrome.tabs.create({
+    url: `https://accounts.google.com/AccountChooser?continue=${continueUrl}`,
+    active: true,
+  });
+  const account = {
+    id,
+    clientId,
+    email: null,
+    flowUrl: null,
+    flowAccount: null,
+    tabId: tab.id,
+    flowKey: null,
+    flowKeySource: null,
+    tokenCapturedAt: null,
+    callbackSecret: null,
+    callbackUrl: null,
+    pollIntervalMs: 1000,
+    httpConnected: false,
+    activeRequests: 0,
+  };
+  linkedFlowAccounts.push(account);
+  assignLinkedWorkerPort(account);
+  await persistLinkedAccounts();
+  await ensureLinkedWorkerRuntime(account).catch((error) => console.warn('[Flow Agent] Could not prestart linked worker:', error.message));
+  broadcastStatus();
+  return publicLinkedAccount(account);
+}
+
+async function focusLinkedFlowAccount(account) {
+  if (!account) throw new Error('FLOW_ACCOUNT_NOT_FOUND');
+  const tab = await ensureLinkedFlowAccountTab(account, true);
+  if (!tab?.id) throw new Error('FLOW_ACCOUNT_TAB_UNAVAILABLE');
+  await chrome.tabs.update(tab.id, { active: true });
+}
+
+async function refreshLinkedFlowAccount(account) {
+  if (!account) throw new Error('FLOW_ACCOUNT_NOT_FOUND');
+  const tab = await ensureLinkedFlowAccountTab(account, true);
+  if (!tab?.id) throw new Error('FLOW_ACCOUNT_TAB_UNAVAILABLE');
+  account.flowKey = null;
+  account.flowKeySource = null;
+  account.tokenCapturedAt = null;
+  const timer = linkedPollTimers.get(account.id);
+  if (timer) clearTimeout(timer);
+  linkedPollTimers.delete(account.id);
+  await persistLinkedAccounts();
+  await chrome.tabs.reload(tab.id, { bypassCache: true }).catch(() => {});
+  await waitForTabComplete(tab.id, 20000).catch(() => {});
+  await refreshLinkedAccountIdentity(account);
+  await connectLinkedAccount(account, true);
+  const sync = await refreshLinkedAccountSession(account, true);
+  if (sync?.status === 'sign_in_started') {
+    const ready = await waitForLinkedAccountToken(account, 30000);
+    if (!ready) await cancelLinkedAccountSync(account.id);
+  }
+  await connectLinkedAccount(account, true);
+  broadcastStatus();
+  return { ready: !!account.flowKey, status: sync?.status || null };
+}
+
+async function removeLinkedFlowAccount(account) {
+  if (!account) throw new Error('FLOW_ACCOUNT_NOT_FOUND');
+  const timer = linkedPollTimers.get(account.id);
+  if (timer) clearTimeout(timer);
+  linkedPollTimers.delete(account.id);
+  linkedCommandQueues.delete(account.id);
+  linkedPollBusy.delete(account.id);
+  linkedFlowAccounts = linkedFlowAccounts.filter((item) => item.id !== account.id);
+  if (account.tabId) await chrome.tabs.remove(account.tabId).catch(() => {});
+  await persistLinkedAccounts();
+  broadcastStatus();
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  const account = linkedAccountForTab(tabId);
+  if (!account) return;
+  account.tabId = null;
+  account.httpConnected = false;
+  const timer = linkedPollTimers.get(account.id);
+  if (timer) clearTimeout(timer);
+  linkedPollTimers.delete(account.id);
+  void persistLinkedAccounts();
+  broadcastStatus();
+});
+
 chrome.runtime.onMessage.addListener((msg, _, reply) => {
   if (msg.type === 'SETTINGS_UPDATED') {
     if (ws) {
@@ -1229,9 +2113,11 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   }
 
   if (msg.type === 'STATUS') {
+    const agentConnected = httpConnected || ws?.readyState === WebSocket.OPEN;
     reply({
-      connected: httpConnected || ws?.readyState === WebSocket.OPEN,
-      agentConnected: httpConnected || ws?.readyState === WebSocket.OPEN,
+      connected: agentConnected,
+      agentConnected,
+      enabled: !manualDisconnect,
       httpConnected,
       transport: httpConnected ? 'http' : (ws?.readyState === WebSocket.OPEN ? 'ws' : 'none'),
       flowKeyPresent: !!flowKey,
@@ -1240,21 +2126,100 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
       metrics: { ...metrics },
       state,
       clientId: extensionClientId,
+      readyLinkedAccounts: linkedFlowAccounts.filter((account) => account.httpConnected && account.flowKey).length,
     });
+  }
+
+  if (msg.type === 'LIST_FLOW_ACCOUNTS') {
+    const agentConnected = httpConnected || ws?.readyState === WebSocket.OPEN;
+    reply({
+      enabled: !manualDisconnect,
+      accounts: [{
+        id: 'primary',
+        clientId: extensionClientId || 'primary',
+        email: flowSessionStatus?.email || null,
+        flowUrl: selectedFlowUrl || null,
+        tabId: selectedFlowTabId,
+        connected: !!agentConnected,
+        tokenReady: !!flowKey,
+        tokenAge: metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
+        activeRequests: activeApiRequests,
+        primary: true,
+      }, ...linkedFlowAccounts.map((account) => ({ ...publicLinkedAccount(account), primary: false }))],
+    });
+    return true;
+  }
+
+  if (msg.type === 'ADD_FLOW_ACCOUNT') {
+    addLinkedFlowAccount()
+      .then((account) => reply({ ok: true, account }))
+      .catch((error) => reply({ error: error.message || String(error) }));
+    return true;
+  }
+
+  if (msg.type === 'FOCUS_FLOW_ACCOUNT') {
+    if (msg.accountId === 'primary') {
+      captureTokenFromFlowTab(true)
+        .then(() => reply({ ok: true }))
+        .catch((error) => reply({ error: error.message || String(error) }));
+      return true;
+    }
+    const account = linkedFlowAccounts.find((item) => item.id === msg.accountId);
+    focusLinkedFlowAccount(account)
+      .then(() => reply({ ok: true }))
+      .catch((error) => reply({ error: error.message || String(error) }));
+    return true;
+  }
+
+  if (msg.type === 'REFRESH_FLOW_ACCOUNT') {
+    if (msg.accountId === 'primary') {
+      refreshSelectedAccountSession(true)
+        .then(() => reply({ ok: true }))
+        .catch((error) => reply({ error: error.message || String(error) }));
+      return true;
+    }
+    const account = linkedFlowAccounts.find((item) => item.id === msg.accountId);
+    refreshLinkedFlowAccount(account)
+      .then(() => reply({ ok: true }))
+      .catch((error) => reply({ error: error.message || String(error) }));
+    return true;
+  }
+
+  if (msg.type === 'REMOVE_FLOW_ACCOUNT') {
+    if (msg.accountId === 'primary') {
+      reply({ error: 'PRIMARY_FLOW_ACCOUNT_CANNOT_BE_REMOVED' });
+      return true;
+    }
+    const account = linkedFlowAccounts.find((item) => item.id === msg.accountId);
+    removeLinkedFlowAccount(account)
+      .then(() => reply({ ok: true }))
+      .catch((error) => reply({ error: error.message || String(error) }));
+    return true;
   }
 
   if (msg.type === 'DISCONNECT') {
     manualDisconnect = true;
+    void chrome.storage.local.set({ manualDisconnect: true });
     httpConnected = false;
     if (httpPollTimer) clearTimeout(httpPollTimer);
     if (ws) ws.close();
+    for (const account of linkedFlowAccounts) {
+      account.httpConnected = false;
+      const timer = linkedPollTimers.get(account.id);
+      if (timer) clearTimeout(timer);
+    }
+    linkedPollTimers.clear();
+    broadcastStatus();
     reply({ ok: true });
     return true;
   }
 
   if (msg.type === 'RECONNECT') {
     manualDisconnect = false;
+    void chrome.storage.local.set({ manualDisconnect: false });
     connectToAgent();
+    void connectAllLinkedAccounts();
+    broadcastStatus();
     reply({ ok: true });
     return true;
   }

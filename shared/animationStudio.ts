@@ -195,10 +195,22 @@ export interface AnimationProject {
   updatedAt: string;
   assets: AnimationAsset[];
   scenes: AnimationScene[];
+  /** Default visual transition applied to every scene boundary unless a scene explicitly overrides it. */
+  transitionPreset?: SceneTransition;
   productionPlan?: AnimationProductionPlan;
   /** Optional, derived inventory for asset preflight and resumable generation. */
   assetManifest?: AnimationAssetManifest;
-  styleProfile?: { name: string; style: string; palette?: string[]; subtitlePreset?: string; pacing?: 'slow' | 'balanced' | 'fast' };
+  /** Preferred generated/uploaded thumbnail asset for the finished video. */
+  thumbnailAssetId?: string;
+  styleProfile?: {
+    name: string;
+    style: string;
+    palette?: string[];
+    subtitlePreset?: string;
+    pacing?: 'slow' | 'balanced' | 'fast';
+    /** Storytelling tone is separate from visual art style so humor does not accidentally change the rendering language. */
+    tone?: 'balanced' | 'humorous' | 'curious' | 'energetic' | 'serious';
+  };
   templateId?: string;
   generationWarnings?: string[];
 }
@@ -269,6 +281,13 @@ export function validateAnimationProject(value: unknown): ValidationIssue[] {
   if (!isFiniteNumber(value.width) || value.width < 1) issues.push({ path: 'width', message: 'Width must be positive.' });
   if (!isFiniteNumber(value.height) || value.height < 1) issues.push({ path: 'height', message: 'Height must be positive.' });
   if (!isFiniteNumber(value.fps) || value.fps < 1 || value.fps > 120) issues.push({ path: 'fps', message: 'FPS must be between 1 and 120.' });
+  if (value.transitionPreset !== undefined) {
+    if (!isRecord(value.transitionPreset)) issues.push({ path: 'transitionPreset', message: 'Project transition preset must be an object.' });
+    else {
+      if (!isNonEmptyString(value.transitionPreset.type) || !sceneTransitionTypes.has(value.transitionPreset.type as SceneTransitionType)) issues.push({ path: 'transitionPreset.type', message: 'Unknown project transition preset.' });
+      if (!isFiniteNumber(value.transitionPreset.durationMs) || value.transitionPreset.durationMs < 0 || value.transitionPreset.durationMs > 2000) issues.push({ path: 'transitionPreset.durationMs', message: 'Project transition duration must be between 0 and 2000 ms.' });
+    }
+  }
 
   const assetIds = new Set<string>();
   if (!Array.isArray(value.assets)) issues.push({ path: 'assets', message: 'Assets must be an array.' });
@@ -287,6 +306,7 @@ export function validateAnimationProject(value: unknown): ValidationIssue[] {
       if (!isRecord(raw.sprite) || !isFiniteNumber(raw.sprite.frameWidth) || raw.sprite.frameWidth < 1 || !isFiniteNumber(raw.sprite.frameHeight) || raw.sprite.frameHeight < 1 || !isFiniteNumber(raw.sprite.columns) || raw.sprite.columns < 1 || !isFiniteNumber(raw.sprite.frameCount) || raw.sprite.frameCount < 1 || !isRecord(raw.sprite.clips)) issues.push({ path: `${path}.sprite`, message: 'Sprite metadata must define positive frame dimensions, columns, frameCount and clips.' });
     }
   });
+  if (value.thumbnailAssetId !== undefined && (!isNonEmptyString(value.thumbnailAssetId) || !assetIds.has(value.thumbnailAssetId))) issues.push({ path: 'thumbnailAssetId', message: 'Thumbnail asset does not exist in the project.' });
   const sceneIds = new Set<string>();
   const characterAssets = new Map<string, string>();
   if (!Array.isArray(value.scenes)) issues.push({ path: 'scenes', message: 'Scenes must be an array.' });

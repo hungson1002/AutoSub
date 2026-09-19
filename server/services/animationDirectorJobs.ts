@@ -1,17 +1,42 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { AnimationProject } from '../../shared/animationStudio';
 import { directAnimationProject, type DirectAnimationInput } from './animationDirector';
 import { animationCheckpointKey } from './animationCheckpoint';
 import { workdir } from './ffmpeg';
+import { writeJsonFileResilient } from './resilientFileWrite';
 
 export interface AnimationDirectorJob {
   id: string; projectId: string; fingerprint: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled';
   stage: string; createdAt: string; updatedAt: string; error?: string; hasResult?: boolean;
+  /** Coarse end-to-end progress. Image progress is based on completed assets, not the task currently retrying. */
+  progressPercent?: number;
+  progressLabel?: string;
+  progressCurrent?: number;
+  progressTotal?: number;
 }
 type Runner = (input: DirectAnimationInput, onStage: (stage: string) => Promise<void>) => Promise<AnimationProject>;
+
+function progressFromStage(stage: string, previous: AnimationDirectorJob) {
+  const doneImages = /^Ảnh\s+(\d+)\/(\d+)\b/iu.exec(stage);
+  if (doneImages) {
+    const current = Math.max(0, Number(doneImages[1]) || 0);
+    const total = Math.max(1, Number(doneImages[2]) || 1);
+    return { progressPercent: Math.min(94, Math.max(20, Math.round(20 + 74 * current / total))), progressLabel: `${current}/${total} ảnh đã xong`, progressCurrent: current, progressTotal: total };
+  }
+  const imageStart = /Đang tạo\s+(\d+)\s+ảnh/iu.exec(stage);
+  if (imageStart) {
+    const total = Math.max(1, Number(imageStart[1]) || 1);
+    return { progressPercent: Math.max(previous.progressPercent || 0, 20), progressLabel: `0/${total} ảnh đã xong`, progressCurrent: 0, progressTotal: total };
+  }
+  if (/Đang viết storyboard/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 8), progressLabel: 'Đang viết storyboard' };
+  if (/Đang căn kịch bản|Lời đọc còn ngắn|Đã khóa kịch bản/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 15), progressLabel: 'Đang khóa lời đọc theo thời lượng' };
+  if (/Lời đọc Turbo|Đã tạo \d+\/\d+ câu lời đọc|tạo lời đọc/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 96), progressLabel: 'Đang tạo voiceover' };
+  if (/Đang hoàn tất project/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 99), progressLabel: 'Đang hoàn tất project' };
+  return {};
+}
 const activeStates = new Set(['queued', 'running']);
 const validId = (id: string) => /^[a-f0-9-]{36}$/i.test(id);
 function fingerprint(input: DirectAnimationInput) {
@@ -32,10 +57,7 @@ export class AnimationDirectorJobStore {
     return path.join(this.directory, id, name);
   }
   private async atomic(file: string, value: unknown) {
-    await mkdir(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${randomUUID()}.tmp`;
-    try { await writeFile(temporary, JSON.stringify(value), 'utf8'); await rename(temporary, file); }
-    catch (error) { await rm(temporary, { force: true }); throw error; }
+    await writeJsonFileResilient(file, value);
   }
   private patch(id: string, changes: Partial<AnimationDirectorJob>) {
     const next = this.writes.then(async () => {
@@ -88,7 +110,7 @@ export class AnimationDirectorJobStore {
       if (job.status === 'completed') return job;
     } else {
       const now = new Date().toISOString();
-      job = { id: randomUUID(), projectId: input.project.id, fingerprint: key, status: 'queued', stage: 'Đang xếp tác vụ', createdAt: now, updatedAt: now };
+      job = { id: randomUUID(), projectId: input.project.id, fingerprint: key, status: 'queued', stage: 'Đang xếp tác vụ', createdAt: now, updatedAt: now, progressPercent: 1, progressLabel: 'Đang xếp tác vụ' };
       // Reserve synchronously before the first await to collapse double-clicks.
       this.jobs.set(job.id, job);
     }
@@ -108,13 +130,23 @@ export class AnimationDirectorJobStore {
   }
   private async execute(id: string, input: DirectAnimationInput) {
     try {
-      await this.patch(id, { status: 'running', stage: 'Đang lập kế hoạch' });
+      await this.patch(id, { status: 'running', stage: 'Đang lập kế hoạch', progressPercent: 3, progressLabel: 'Đang lập kế hoạch' });
       const result = await this.runner(input, async (stage) => {
         if (this.cancelled.has(id)) { const error = new Error('Đã dừng scheduling; giữ tài nguyên đã tạo.'); error.name = 'AbortError'; throw error; }
-        await this.patch(id, { stage });
+        const current = this.jobs.get(id)!;
+        await this.patch(id, { stage, ...progressFromStage(stage, current) });
       });
       await this.atomic(this.file(id, 'result.json'), result);
-      await this.patch(id, { status: this.cancelled.has(id) ? 'cancelled' : 'completed', stage: this.cancelled.has(id) ? 'Đã dừng; kết quả vừa nhận được vẫn được giữ' : 'Đã dựng project; xem cảnh báo chất lượng trước khi xuất', hasResult: true });
+      const beforeComplete = this.jobs.get(id)!;
+      const imageTotal = beforeComplete.progressTotal;
+      await this.patch(id, {
+        status: this.cancelled.has(id) ? 'cancelled' : 'completed',
+        stage: this.cancelled.has(id) ? 'Đã dừng; kết quả vừa nhận được vẫn được giữ' : 'Đã dựng project; xem cảnh báo chất lượng trước khi xuất',
+        hasResult: true,
+        progressPercent: 100,
+        progressLabel: this.cancelled.has(id) ? 'Đã dừng' : imageTotal ? `${imageTotal}/${imageTotal} ảnh đã xong` : 'Hoàn tất',
+        ...(imageTotal ? { progressCurrent: imageTotal, progressTotal: imageTotal } : {}),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       try { await this.patch(id, { status: this.cancelled.has(id) ? 'cancelled' : 'failed', stage: 'Đã dừng, giữ checkpoint và tài nguyên', error: message }); }

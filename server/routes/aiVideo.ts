@@ -2,10 +2,11 @@ import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { acceptAiVideoClipCandidate, approveAiVideoJob, cancelAiVideoJob, createAiVideoJob, getAiVideoClip, getAiVideoDesignAsset, getAiVideoJob, getAiVideoResult, regenerateAiVideoDesign, regenerateAiVideoShot, resumeAiVideoJob, updateAiVideoPreproduction, type CreateAiVideoInput } from '../services/aiVideoJobs';
 import { flowAgentStatus, refreshGoogleFlowSession } from '../services/googleFlow';
-import { openFlowBrowser } from '../services/flowBrowser';
+import { addFlowWorkerAccount, listFlowWorkerAccounts, openFlowBrowser, openFlowWorkerAccount, refreshFlowWorkerAccount, removeFlowWorkerAccount } from '../services/flowBrowser';
 import { composeExistingAiVideoJob } from '../services/aiVideoJobs';
 import { listFilmVideoAdapters } from '../services/filmVideoAdapter';
 import { configureFilmReviewer, type FilmReviewer } from '../services/filmContentReview';
+import { ensureIsolatedFlowWorker, listIsolatedFlowWorkers, restartIsolatedFlowWorker } from '../services/flowWorkerSupervisor';
 export async function aiVideoRoutes(app: FastifyInstance) {
   app.post('/api/ai-video/jobs/:id/reviewer', async (request, reply) => {
     const id = String((request.params as { id: string }).id);
@@ -19,6 +20,19 @@ export async function aiVideoRoutes(app: FastifyInstance) {
   app.get('/api/ai-video/flow-agent/status', async () => flowAgentStatus());
   app.post('/api/ai-video/flow-agent/refresh', async (_request, reply) => { try { return await refreshGoogleFlowSession(); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không thể đồng bộ lại tài khoản Google Flow.' }); } });
   app.post('/api/ai-video/flow-agent/open', async (_request, reply) => { try { const opened = await openFlowBrowser(); return { ...await flowAgentStatus(), openedUrl: opened.url }; } catch (error) { return reply.code(500).send({ error: error instanceof Error ? error.message : 'Không thể mở Google Flow cùng extension Flow Agent.' }); } });
+  app.get('/api/ai-video/flow-workers', async (_request, reply) => { try { return { workers: await listIsolatedFlowWorkers() }; } catch (error) { return reply.code(500).send({ error: error instanceof Error ? error.message : 'Không thể đọc Flow worker pool.' }); } });
+  app.post('/api/ai-video/flow-workers/ensure', async (request, reply) => {
+    try {
+      const body = request.body as { clientId?: string; workerPort?: number };
+      return { worker: await ensureIsolatedFlowWorker(String(body?.clientId || ''), Number(body?.workerPort) || undefined) };
+    } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không thể tạo Flow worker.' }); }
+  });
+  app.post('/api/ai-video/flow-workers/:clientId/restart', async (request, reply) => { try { return { worker: await restartIsolatedFlowWorker(String((request.params as { clientId?: string }).clientId || '')) }; } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không thể khởi động lại Flow worker.' }); } });
+  app.get('/api/ai-video/flow-accounts', async (_request, reply) => { try { return { accounts: await listFlowWorkerAccounts() }; } catch (error) { return reply.code(500).send({ error: error instanceof Error ? error.message : 'Không thể đọc Flow account pool.' }); } });
+  app.post('/api/ai-video/flow-accounts', async (_request, reply) => { try { return reply.code(201).send({ account: await addFlowWorkerAccount() }); } catch (error) { return reply.code(500).send({ error: error instanceof Error ? error.message : 'Không thể mở Flow account mới.' }); } });
+  app.post('/api/ai-video/flow-accounts/:id/open', async (request, reply) => { try { return { account: await openFlowWorkerAccount(String((request.params as { id?: string }).id || '')) }; } catch (error) { return reply.code(404).send({ error: error instanceof Error ? error.message : 'Không tìm thấy Flow account.' }); } });
+  app.post('/api/ai-video/flow-accounts/:id/refresh', async (request, reply) => { try { return { account: await refreshFlowWorkerAccount(String((request.params as { id?: string }).id || '')) }; } catch (error) { return reply.code(404).send({ error: error instanceof Error ? error.message : 'Không thể làm mới Flow account.' }); } });
+  app.delete('/api/ai-video/flow-accounts/:id', async (request, reply) => { try { return await removeFlowWorkerAccount(String((request.params as { id?: string }).id || '')); } catch (error) { return reply.code(500).send({ error: error instanceof Error ? error.message : 'Không thể xóa Flow account.' }); } });
   app.post('/api/ai-video/jobs', async (request, reply) => { try { return reply.code(202).send(await createAiVideoJob(request.body as CreateAiVideoInput)); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không thể tạo AI video job.' }); } });
   app.get('/api/ai-video/jobs/:id', async (request, reply) => { try { return await getAiVideoJob(String((request.params as { id?: string }).id || '')); } catch { return reply.code(404).send({ error: 'Không tìm thấy AI video job.' }); } });
   app.post('/api/ai-video/jobs/:id/cancel', async (request, reply) => { try { return await cancelAiVideoJob(String((request.params as { id?: string }).id || '')); } catch { return reply.code(404).send({ error: 'Không tìm thấy AI video job.' }); } });

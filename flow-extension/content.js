@@ -6,6 +6,13 @@
 if (!globalThis.__FLOW_AGENT_CONTENT_LOADED__) {
 globalThis.__FLOW_AGENT_CONTENT_LOADED__ = true;
 
+try {
+  const workerId = new URL(location.href).searchParams.get('autosub_worker');
+  if (workerId && /^[a-z0-9]{8,32}$/i.test(workerId)) {
+    chrome.runtime.sendMessage({ type: 'AUTOSUB_WORKER_ID', workerId }).catch(() => {});
+  }
+} catch {}
+
 let lastReportedFlowUrl = '';
 function reportActiveFlowTab(force = false) {
   if (force || document.visibilityState === 'visible' || !lastReportedFlowUrl) {
@@ -44,6 +51,10 @@ window.addEventListener('message', (event) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _, reply) => {
+  if (msg.type === 'PING_FLOW_BRIDGE') {
+    reply({ ok: true, url: location.href, readyState: document.readyState });
+    return;
+  }
   if (msg.type !== 'GET_CAPTCHA') return;
 
   const { requestId, pageAction } = msg;

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, buildVisualDensityPlan, directorRepairRule, jsonFromDirectorReply, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets } from './animationDirector';
+import { allocateLockedSceneDurations, animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, buildVisualDensityPlan, characterReferenceDirective, chooseStoryboardTextBeatIndexes, directorRepairRule, durationSecondsFromBrief, jsonFromDirectorReply, narrationFitWordTargets, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets, visualTextDirective, visualTextLanguage } from './animationDirector';
 import { animationAssetCacheKey, wavDurationMs } from './animationAssets';
 import { animationCraftRules } from './directorKnowledge';
 import { animationPerformancePlanIssues } from './animationDirector';
 import { evaluateScene } from '../../src/animationStudio/evaluator';
 import { defaultTransform } from '../../shared/animationStudio';
 
-test('visual density stays at an understandable 20-24 changes per minute and reuses compositions', () => {
+test('visual density stays at an understandable 20-24 changes per minute while narration scenes group atomic shots', () => {
   const targets = [
     { seconds: 60, min: 22, max: 28 },
     { seconds: 300, min: 100, max: 120 },
@@ -19,7 +19,7 @@ test('visual density stays at an understandable 20-24 changes per minute and reu
     assert.ok(plan.visualCount >= target.min && plan.visualCount <= target.max);
     assert.equal(plan.visualsPerScene.reduce((sum, count) => sum + count, 0), plan.visualCount);
     assert.ok(plan.visualCount / (target.seconds / 60) >= 20 && plan.visualCount / (target.seconds / 60) <= 24);
-    assert.ok(plan.visualsPerScene.every((count) => count >= 1 && count <= 2));
+    assert.ok(plan.visualsPerScene.every((count) => count >= 1 && count <= 3));
     assert.ok(plan.sceneCount < plan.visualCount);
     assert.ok(plan.visualDurationsSeconds.slice(0, plan.openingVisualCount).every((duration) => duration >= 2 && duration <= 2.5));
     assert.ok(plan.visualDurationsSeconds.slice(plan.openingVisualCount).every((duration) => duration >= 2.5 && duration <= 3.5));
@@ -28,6 +28,66 @@ test('visual density stays at an understandable 20-24 changes per minute and reu
   const firstMinute = buildVisualDensityPlan(60);
   assert.ok(15 / firstMinute.openingVisualCount >= 2 && 15 / firstMinute.openingVisualCount <= 2.5);
   assert.ok(firstMinute.visualCount <= 25);
+  assert.ok(firstMinute.sceneCount <= Math.ceil(firstMinute.visualCount / 3));
+});
+
+test('character reference directive makes the attached image authoritative over storyboard/style drift', () => {
+  const rule = characterReferenceDirective(true);
+  assert.match(rule, /single source of truth/i);
+  assert.match(rule, /Ignore any conflicting appearance words/i);
+  assert.match(rule, /hoodie\/shirt\/jacket/i);
+  assert.match(rule, /chibi\/anime/i);
+});
+
+test('storyboard text policy keeps normal frames visual-first like the references', () => {
+  const rule = visualTextDirective('Vietnamese');
+  assert.match(rule, /AT MOST 20%/i);
+  assert.match(rule, /Default to ZERO text/i);
+  assert.match(rule, /at most ONE prominent text element/i);
+  assert.match(rule, /maximum 4 whitespace-separated words/i);
+  assert.match(rule, /maximum 24 visible characters/i);
+  assert.match(rule, /Never render a complete sentence/i);
+  assert.match(rule, /Never render narration/i);
+  assert.match(rule, /Never make text carry the explanation/i);
+  assert.match(rule, /MUST be Vietnamese/i);
+  assert.match(rule, /If the image works without words, use no words/i);
+});
+
+test('visual text language follows the video language', () => {
+  assert.equal(visualTextLanguage('Tại sao mua 2 tặng 1 khiến bạn tiêu nhiều tiền hơn?'), 'Vietnamese');
+  assert.equal(visualTextLanguage('Why buy two get one free makes you spend more money'), 'English');
+  assert.match(visualTextDirective('English'), /MUST be English/i);
+});
+
+test('hard text budget selects no more than one fifth of storyboard beats and avoids adjacent text shots', () => {
+  const beats = Array.from({ length: 23 }, (_, index) => ({
+    visual: index % 2 === 0 ? `Price sign ${index} with ${index + 10}% discount` : `Mascot walking through aisle ${index}`,
+    narrationCue: index % 3 === 0 ? `Giảm giá ${index + 10}%` : 'Nhân vật tiếp tục đi',
+  }));
+  const selected = [...chooseStoryboardTextBeatIndexes(beats)].sort((a, b) => a - b);
+  assert.ok(selected.length <= Math.floor(beats.length * .2));
+  assert.ok(selected.every((index, position) => position === 0 || index - selected[position - 1]! > 1));
+});
+
+test('explicit duration written in a brief overrides prompt length when auto mode is used', () => {
+  assert.equal(durationSecondsFromBrief('Tạo video dài khoảng 90 giây về kinh tế.'), 90);
+  assert.equal(durationSecondsFromBrief('Make this a 2 minute explainer.'), 120);
+  assert.equal(durationSecondsFromBrief('Video khoảng 60-90 giây, nhịp nhanh.'), 75);
+  assert.equal(durationSecondsFromBrief('Không ghi thời lượng, chỉ có chủ đề.'), undefined);
+});
+
+test('locked duration distributes only small proportional breathing room after measured narration', () => {
+  const durations = allocateLockedSceneDurations([7_800, 8_100, 7_900, 8_000, 7_700, 8_200, 7_900, 2_900], 60_000);
+  assert.equal(durations.reduce((sum, value) => sum + value, 0), 60_000);
+  durations.forEach((duration, index) => assert.ok(duration >= [7_800, 8_100, 7_900, 8_000, 7_700, 8_200, 7_900, 2_900][index]));
+  assert.throws(() => allocateLockedSceneDurations([31_000, 31_000], 60_000), /dài hơn timeline/);
+});
+
+test('narration word targets respond to real measured TTS instead of a fixed words-per-second guess', () => {
+  const targets = narrationFitWordTargets([{ narration: 'một hai ba bốn năm sáu bảy tám chín mười' }], [4_000], [8_000]);
+  assert.equal(targets[0], 20);
+  const shorter = narrationFitWordTargets([{ narration: 'một hai ba bốn năm sáu bảy tám chín mười' }], [10_000], [5_000]);
+  assert.equal(shorter[0], 6);
 });
 
 test('cue timing cannot leave the first storyboard image visible past three seconds', () => {
@@ -177,6 +237,13 @@ test('diagram-only beats survive and duplicate still prompts are removed', () =>
   const [segment] = normalizeLongAnimationSegments({ segments: [{ narration: 'Giải thích', visualBeats: [{ visual: 'Forest' }, { visual: ' forest ' }, { diagram: { steps: ['Nguyên nhân', 'Kết quả'] } }] }] }, 1);
   assert.equal(segment.visualBeats.length, 2);
   assert.equal(segment.visualBeats[1].diagram?.steps.length, 2);
+});
+
+test('auto storyboard stills default to static holds instead of invented Ken Burns motion', () => {
+  const [segment] = normalizeLongAnimationSegments({ segments: [{ narration: 'Một cảnh tĩnh rõ ràng.', visual: 'Wide supermarket aisle', visualBeats: [{ purpose: 'explain', visual: 'Milk at the back of the store' }] }] }, 1);
+  assert.ok(segment.visualBeats.length >= 1);
+  assert.ok(segment.visualBeats.every((beat) => beat.motion === 'locked'));
+  assert.ok(segment.visualBeats.every((beat) => beat.transition === 'cut'));
 });
 
 test('visual beats create short transitions and independent camera movement', () => {

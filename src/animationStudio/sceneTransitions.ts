@@ -6,7 +6,7 @@ export const DEFAULT_SCENE_TRANSITION: SceneTransition = { type: 'crossfade', du
 export const SCENE_TRANSITION_OPTIONS: Array<{ value: SceneTransitionType; label: string }> = [
   { value: 'cut', label: 'Cắt thẳng' },
   { value: 'crossfade', label: 'Hòa tan' },
-  { value: 'fade-black', label: 'Mờ qua đen' },
+  { value: 'fade-black', label: 'Mờ qua đen (cố ý)' },
   { value: 'slide-left', label: 'Trượt trái' },
   { value: 'slide-right', label: 'Trượt phải' },
   { value: 'slide-up', label: 'Trượt lên' },
@@ -23,10 +23,14 @@ export function sceneTransitionStyles(type: SceneTransitionType, rawProgress: nu
   const progress = Math.max(0, Math.min(1, rawProgress));
   const base: CSSProperties = { willChange: 'transform, opacity, clip-path' };
   if (type === 'fade-black') return { outgoing: { ...base, opacity: Math.max(0, 1 - progress * 2) }, incoming: { ...base, opacity: Math.max(0, progress * 2 - 1) } };
-  if (type === 'slide-left') return { outgoing: { ...base, transform: `translate3d(${-18 * progress}%,0,0)` }, incoming: { ...base, transform: `translate3d(${100 * (1 - progress)}%,0,0)` } };
-  if (type === 'slide-right') return { outgoing: { ...base, transform: `translate3d(${18 * progress}%,0,0)` }, incoming: { ...base, transform: `translate3d(${-100 * (1 - progress)}%,0,0)` } };
-  if (type === 'slide-up') return { outgoing: { ...base, transform: `translate3d(0,${-14 * progress}%,0)` }, incoming: { ...base, transform: `translate3d(0,${100 * (1 - progress)}%,0)` } };
-  if (type === 'zoom') return { outgoing: { ...base, opacity: 1 - progress * .45, transform: `scale(${1 - progress * .04})` }, incoming: { ...base, opacity: progress, transform: `scale(${1.08 - progress * .08})` } };
+  // Sliding surfaces must meet edge-to-edge for the whole transition. Partial
+  // outgoing travel leaves the dark stage visible as a moving black seam.
+  if (type === 'slide-left') return { outgoing: { ...base, transform: `translate3d(${-100 * progress}%,0,0)` }, incoming: { ...base, transform: `translate3d(${100 * (1 - progress)}%,0,0)` } };
+  if (type === 'slide-right') return { outgoing: { ...base, transform: `translate3d(${100 * progress}%,0,0)` }, incoming: { ...base, transform: `translate3d(${-100 * (1 - progress)}%,0,0)` } };
+  if (type === 'slide-up') return { outgoing: { ...base, transform: `translate3d(0,${-100 * progress}%,0)` }, incoming: { ...base, transform: `translate3d(0,${100 * (1 - progress)}%,0)` } };
+  // Never shrink the outgoing full-frame surface below 1x: doing so exposes
+  // the stage background around the edges while the incoming shot is faint.
+  if (type === 'zoom') return { outgoing: { ...base, opacity: 1 - progress * .3, transform: `scale(${1 + progress * .04})` }, incoming: { ...base, opacity: progress, transform: `scale(${1.06 - progress * .06})` } };
   if (type === 'wipe-left') return { outgoing: base, incoming: { ...base, clipPath: `inset(0 ${100 * (1 - progress)}% 0 0)` } };
   if (type === 'crossfade') return { outgoing: { ...base, opacity: 1 - progress }, incoming: { ...base, opacity: progress } };
   return { outgoing: base, incoming: base };

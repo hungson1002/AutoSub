@@ -3,7 +3,7 @@
  * Also intercepts TRPC fetch responses to capture fresh signed media URLs.
  */
 (() => {
-const BRIDGE_VERSION = '1.2.29';
+const BRIDGE_VERSION = '1.2.44';
 if (window.__FLOW_AGENT_MAIN_INJECTED__ === BRIDGE_VERSION) return;
 window.__FLOW_AGENT_MAIN_INJECTED__ = BRIDGE_VERSION;
 

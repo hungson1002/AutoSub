@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import {
   ANIMATION_PROJECT_VERSION,
@@ -8,6 +8,7 @@ import {
 } from '../../shared/animationStudio';
 import { workdir } from './ffmpeg';
 import { buildAnimationAssetManifest } from './animationManifest';
+import { writeJsonFileResilient } from './resilientFileWrite';
 
 const projectsRoot = path.join(workdir, 'animation-projects');
 const safeId = (value: string) => /^[a-f0-9-]{36}$/i.test(value) ? value : '';
@@ -15,14 +16,7 @@ const projectFile = (id: string) => path.join(projectsRoot, safeId(id), 'project
 const versionsDir = (id: string) => path.join(projectsRoot, safeId(id), 'versions');
 
 async function writeJsonAtomic(file: string, value: unknown) {
-  await mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temporary, JSON.stringify(value, null, 2), 'utf8');
-  try { await rename(temporary, file); }
-  catch (error) {
-    await rm(temporary, { force: true });
-    throw error;
-  }
+  await writeJsonFileResilient(file, value, true);
 }
 
 export function createEmptyAnimationProject(input: { name?: string; width?: number; height?: number; fps?: number } = {}): AnimationProject {

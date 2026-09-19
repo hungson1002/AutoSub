@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -10,6 +10,7 @@ import { synthesize } from '../adapters';
 import type { AnimationProject } from '../../shared/animationStudio';
 import { generateGoogleFlowImage, generateGoogleFlowImages } from './googleFlow';
 import { resolveUpload } from './uploads';
+import { writeJsonFileResilient } from './resilientFileWrite';
 import { allocateNarrationTimings, createSentenceTimeMapper, splitNarrationUnits } from './animationTiming';
 
 const file = path.join(workdir, 'animation-assets', 'library.json');
@@ -26,9 +27,7 @@ async function readLibrary(): Promise<AnimationAsset[]> {
 }
 
 async function writeLibrary(assets: AnimationAsset[]) {
-  await mkdir(path.dirname(file), { recursive: true }); const temporary = `${file}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(assets, null, 2), 'utf8');
-  try { await rename(temporary, file); } catch (error) { await rm(temporary, { force: true }); throw error; }
+  await writeJsonFileResilient(file, assets, true);
 }
 
 const words = (value: string) => value.toLocaleLowerCase('vi').normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
@@ -62,6 +61,19 @@ export async function updateAnimationAsset(id: string, change: Partial<Pick<Anim
   });
 }
 
+export async function deleteAnimationAssets(ids: string[]) {
+  const idSet = new Set(ids.filter((id) => /^[a-f0-9-]{36}$/i.test(String(id || ''))));
+  if (!idSet.size) return [] as string[];
+  const removed = await mutateLibrary(async () => {
+    const assets = await readLibrary();
+    const matched = assets.filter((asset) => idSet.has(asset.id)).map((asset) => asset.id);
+    if (matched.length) await writeLibrary(assets.filter((asset) => !idSet.has(asset.id)));
+    return matched;
+  });
+  await Promise.all(removed.flatMap((id) => assetFileFormats.map((format) => rm(path.join(workdir, 'animation-assets', 'files', `${id}.${format.extension}`), { force: true }).catch(() => undefined))));
+  return removed;
+}
+
 export async function resolveAnimationAssets(query: string, limit = 8) {
   const terms = words(query); const assets = await readLibrary();
   return assets.map((asset) => { const name = words(asset.name); const tags = words(asset.tags.join(' ')); const style = words(asset.style || ''); const matches = terms.filter((term) => name.includes(term) || tags.includes(term) || style.includes(term)); const score = matches.reduce((total, term) => total + (name.includes(term) ? 4 : 0) + (tags.includes(term) ? 2 : 0) + (style.includes(term) ? 1 : 0), 0); return { asset, score, reason: matches.length ? `Khớp: ${matches.join(', ')}` : 'Không khớp metadata' }; }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score).slice(0, Math.max(1, Math.min(30, limit)));
@@ -86,6 +98,12 @@ export async function getAnimationAssetFile(id: string) {
 }
 
 export type AnimationAssetGenerationInput = { prompt: string; name?: string; type?: AnimationAsset['type']; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number; referenceUploadId?: string; referenceAssetId?: string };
+
+export async function resolveAnimationGenerationReferencePath(input: Pick<AnimationAssetGenerationInput, 'referenceUploadId' | 'referenceAssetId'>) {
+  if (input.referenceUploadId) return (await resolveUpload(input.referenceUploadId)).absolutePath;
+  if (input.referenceAssetId) return (await getAnimationAssetFile(input.referenceAssetId)).path;
+  return undefined;
+}
 
 export function animationAssetCacheKey(input: AnimationAssetGenerationInput) {
   const prompt = String(input.prompt || '').trim().slice(0, 4000);
@@ -113,9 +131,11 @@ async function generateAnimationAssetUncached(input: AnimationAssetGenerationInp
   const prompt = String(input.prompt || '').trim().slice(0, 4000); if (prompt.length < 8) throw new Error('Mô tả asset cần ít nhất 8 ký tự.');
   const id = randomUUID(); await mkdir(path.dirname(generatedFile(id)), { recursive: true });
   if (input.generator === 'flow-agent') {
-    const referenceImagePath = input.referenceUploadId
-      ? (await resolveUpload(input.referenceUploadId)).absolutePath
-      : input.referenceAssetId ? (await getAnimationAssetFile(input.referenceAssetId)).path : undefined;
+    const referenceImagePath = await resolveAnimationGenerationReferencePath(input);
+    // Use a fresh top-level idempotency key for every explicit retry. googleFlow.ts
+    // still reuses that key for transport replays inside the same attempt, but a
+    // previously wedged Flow Agent request can no longer poison all later retries
+    // merely because the visual cache key is identical.
     await generateGoogleFlowImage(prompt, generatedFile(id), { model: input.model || 'narwhal', size: `${input.width || 1024}x${input.height || 1024}`, referenceImagePath });
   } else {
     if (input.referenceUploadId || input.referenceAssetId) throw new Error('Provider tạo ảnh này chưa hỗ trợ ảnh tham chiếu. Hãy chọn Nano Banana 2 để giữ nhân vật nhất quán.');
@@ -144,9 +164,14 @@ export async function generateAnimationAsset(input: AnimationAssetGenerationInpu
   finally { if (generationLocks.get(cacheKey) === pending) generationLocks.delete(cacheKey); }
 }
 
-export async function generateFlowAnimationAssetBatch(inputs: AnimationAssetGenerationInput[], batchPrompt: string, signal?: AbortSignal) {
-  if (!inputs.length || inputs.length > 4) throw new Error('Batch nhân vật cần từ 1 đến 4 ảnh.');
-  if (inputs.some((input) => input.generator !== 'flow-agent' || input.referenceUploadId || input.referenceAssetId)) return Promise.all(inputs.map(generateAnimationAsset));
+export async function generateFlowAnimationAssetBatch(inputs: AnimationAssetGenerationInput[], batchPrompt: string | string[], signal?: AbortSignal) {
+  if (!inputs.length || inputs.length > 4) throw new Error('Batch Flow cần từ 1 đến 4 ảnh.');
+  if (Array.isArray(batchPrompt) && batchPrompt.length !== inputs.length) throw new Error('Số prompt batch phải bằng số ảnh cần tạo.');
+  if (inputs.some((input) => input.generator !== 'flow-agent')) return Promise.all(inputs.map(generateAnimationAsset));
+  const firstReferenceUploadId = inputs[0]?.referenceUploadId || '';
+  const firstReferenceAssetId = inputs[0]?.referenceAssetId || '';
+  const sharedReference = inputs.every((input) => (input.referenceUploadId || '') === firstReferenceUploadId && (input.referenceAssetId || '') === firstReferenceAssetId);
+  if (!sharedReference) return Promise.all(inputs.map(generateAnimationAsset));
   const cacheKeys = inputs.map(animationAssetCacheKey);
   const resolved = await Promise.all(cacheKeys.map(findCachedAnimationAsset));
   const missingIndexes = resolved.map((asset, index) => asset ? -1 : index).filter((index) => index >= 0);
@@ -155,7 +180,11 @@ export async function generateFlowAnimationAssetBatch(inputs: AnimationAssetGene
   const outputFiles = ids.map(generatedFile);
   await mkdir(path.dirname(outputFiles[0]), { recursive: true });
   const first = inputs[missingIndexes[0]];
-  await generateGoogleFlowImages(batchPrompt.trim().slice(0, 4000), outputFiles, { model: first.model || 'narwhal', size: `${first.width || 1024}x${first.height || 1024}`, signal });
+  const referenceImagePath = await resolveAnimationGenerationReferencePath(first);
+  const flowPrompts = Array.isArray(batchPrompt)
+    ? batchPrompt.map((prompt) => String(prompt || '').trim().slice(0, 4000))
+    : String(batchPrompt || '').trim().slice(0, 4000);
+  await generateGoogleFlowImages(flowPrompts, outputFiles, { model: first.model || 'narwhal', size: `${first.width || 1024}x${first.height || 1024}`, referenceImagePath, signal });
   const created = await Promise.all(missingIndexes.map((inputIndex, batchIndex) => normalizeAndRegisterGeneratedAsset(ids[batchIndex], inputs[inputIndex], cacheKeys[inputIndex])));
   missingIndexes.forEach((inputIndex, batchIndex) => { resolved[inputIndex] = created[batchIndex]; });
   return resolved as AnimationAsset[];
@@ -188,39 +217,121 @@ export async function audioDurationMs(audio: Buffer, extension = 'media') {
   }
 }
 
-export async function generateAnimationNarration(input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number; preservePlannedDuration?: boolean }, onStage: (stage: string) => Promise<void> = async () => {}) {
+async function mapConcurrentOrdered<T, R>(items: T[], limit: number, task: (item: T, index: number) => Promise<R>) {
+  const results = Array<R>(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await task(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), Math.max(1, items.length)) }, worker));
+  return results;
+}
+
+export async function generateAnimationNarration(input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number; preservePlannedDuration?: boolean; strictSceneDurations?: boolean }, onStage: (stage: string) => Promise<void> = async () => {}) {
   let project = input.project;
   const speed = Math.max(.5, Math.min(2, Number(input.speed) || 1));
-  for (const scene of input.project.scenes) {
-    if (scene.renderMode !== 'composite' || !scene.narration.trim()) continue;
-    const sentences = splitNarrationUnits(scene.narration);
+  const sentenceTasks = input.project.scenes.flatMap((scene) => scene.renderMode !== 'composite' || !scene.narration.trim()
+    ? []
+    : splitNarrationUnits(scene.narration).map((text, sentenceIndex) => ({ sceneId: scene.id, sceneName: scene.name, text, sentenceIndex })));
+  if (!sentenceTasks.length) return project;
+
+  const configuredConcurrency = Number(process.env.AUTOSUB_ANIMATION_TTS_CONCURRENCY);
+  const requestedConcurrency = Math.max(1, Math.min(8, Number.isFinite(configuredConcurrency) && configuredConcurrency > 0 ? Math.round(configuredConcurrency) : 6));
+  const ttsConcurrency = input.provider.providerType === 'capcut-tts' || input.provider.baseUrl.trim().toLowerCase() === 'local://capcut-tts'
+    ? 1
+    : input.provider.providerType === 'vieneu-local' ? Math.min(2, requestedConcurrency) : requestedConcurrency;
+  const prepareSentence = async (task: typeof sentenceTasks[number], renderSpeed: number) => {
+    const normalizedSpeed = Math.max(.5, Math.min(2, Number(renderSpeed) || 1));
+    const cacheKey = createHash('sha256').update(JSON.stringify({ version: 1, kind: 'narration', text: task.text, provider: input.provider.id, model: input.model, voice: input.voice, speed: normalizedSpeed })).digest('hex');
+    let asset = await findCachedAnimationAsset(cacheKey);
+    let audio: Buffer | undefined;
+    if (asset) audio = await readFile((await getAnimationAssetFile(asset.id)).path);
+    else {
+      const localVieNeu = input.provider.providerType === 'vieneu-local';
+      const maxAttempts = localVieNeu ? 4 : 2;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          audio = await synthesize(input.provider, input.model, input.voice, task.text, { speed: normalizedSpeed, format: 'wav' });
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+          const status = Number((error as { status?: unknown })?.status);
+          if (error instanceof Error && error.name === 'AbortError') throw error;
+          const retryable = localVieNeu
+            ? !Number.isFinite(status) || status >= 500 || status === 429
+            : !Number.isFinite(status) || status >= 500 || status === 429;
+          if (!retryable || attempt >= maxAttempts) break;
+          const delayMs = Math.min(2500, 400 * Math.pow(2, attempt - 1));
+          await onStage(`${localVieNeu ? 'VieNeu Local' : 'TTS'} lỗi tạm thời ở cảnh “${task.sceneName}”, câu ${task.sentenceIndex + 1} · tự thử lại ${attempt + 1}/${maxAttempts}`);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+      if (!audio) {
+        const detail = String((lastError as { detail?: unknown })?.detail || (lastError instanceof Error ? lastError.message : lastError || 'Không rõ lỗi')).replace(/\s+/g, ' ').trim().slice(0, 300);
+        throw new Error(`${localVieNeu ? 'VieNeu Local' : 'TTS'} không tạo được cảnh “${task.sceneName}”, câu ${task.sentenceIndex + 1} sau ${maxAttempts} lần thử.${detail ? ` Chi tiết: ${detail}` : ''}`);
+      }
+    }
+    const measuredMs = await audioDurationMs(audio);
+    if (!(measuredMs > 0)) throw new Error(`Không đo được audio câu ${task.sentenceIndex + 1} của cảnh “${task.sceneName}”. Đã giữ các tài nguyên tạo trước đó.`);
+    const durationMs = Math.ceil(measuredMs * project.fps / 1000) * 1000 / project.fps;
+    if (!asset) {
+      const id = randomUUID();
+      const extension = wavDurationMs(audio) > 0 ? 'wav' : 'mp3';
+      const target = path.join(workdir, 'animation-assets', 'files', `${id}.${extension}`);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, audio);
+      asset = await registerAnimationAsset({ id, type: 'audio', name: `Voiceover · ${task.sceneName} · ${task.sentenceIndex + 1}`, uri: `/api/animation-studio/assets/${id}/file`, tags: ['voiceover', 'narration'], createdAt: new Date().toISOString(), source: 'generated', cacheKey, generationPrompt: task.text });
+    }
+    return { ...task, asset, durationMs, speed: normalizedSpeed };
+  };
+  await onStage(`Lời đọc Turbo: ${sentenceTasks.length} câu · tối đa ${Math.min(ttsConcurrency, sentenceTasks.length)} câu song song`);
+  const prepared = await mapConcurrentOrdered(sentenceTasks, ttsConcurrency, (task) => prepareSentence(task, speed));
+  await onStage(`Đã tạo ${prepared.length}/${sentenceTasks.length} câu lời đọc · đang ráp timeline`);
+
+  const preparedByScene = new Map<string, typeof prepared>();
+  for (const item of prepared) preparedByScene.set(item.sceneId, [...(preparedByScene.get(item.sceneId) || []), item]);
+  if (input.strictSceneDurations) {
+    const frameMs = 1000 / Math.max(1, project.fps);
+    for (const sourceScene of input.project.scenes) {
+      if (sourceScene.renderMode !== 'composite' || !sourceScene.narration.trim()) continue;
+      let units = (preparedByScene.get(sourceScene.id) || []).sort((a, b) => a.sentenceIndex - b.sentenceIndex);
+      let measured = units.reduce((total, item) => total + item.durationMs, 0);
+      if (measured <= sourceScene.durationMs + frameMs) continue;
+      let fitSpeed = Math.min(1.2, Math.max(speed, speed * measured / Math.max(1, sourceScene.durationMs) * 1.03));
+      await onStage(`Cảnh “${sourceScene.name}” có lời đọc dài hơn timeline · tự căn TTS nhẹ ${fitSpeed.toFixed(2)}×`);
+      units = await mapConcurrentOrdered(units, ttsConcurrency, (item) => prepareSentence(item, fitSpeed));
+      measured = units.reduce((total, item) => total + item.durationMs, 0);
+      if (measured > sourceScene.durationMs + frameMs && fitSpeed < 1.3) {
+        fitSpeed = Math.min(1.3, fitSpeed * measured / Math.max(1, sourceScene.durationMs) * 1.02);
+        await onStage(`Cảnh “${sourceScene.name}” vẫn dài · căn TTS lần cuối ${fitSpeed.toFixed(2)}×`);
+        units = await mapConcurrentOrdered(units, ttsConcurrency, (item) => prepareSentence(item, fitSpeed));
+        measured = units.reduce((total, item) => total + item.durationMs, 0);
+      }
+      if (measured > sourceScene.durationMs + frameMs) throw new Error(`Lời đọc cảnh “${sourceScene.name}” vẫn vượt thời lượng đã khóa dù đã căn tốc độ tối đa hợp lý. Hãy rút gọn narration thay vì kéo dài video.`);
+      preparedByScene.set(sourceScene.id, units);
+    }
+  }
+
+  for (const sourceScene of input.project.scenes) {
+    if (sourceScene.renderMode !== 'composite' || !sourceScene.narration.trim()) continue;
+    const scene = project.scenes.find((item) => item.id === sourceScene.id);
+    if (!scene || scene.renderMode !== 'composite') continue;
+    const units = (preparedByScene.get(scene.id) || []).sort((a, b) => a.sentenceIndex - b.sentenceIndex);
     const captions: NonNullable<SceneLayer['captionTimings']> = [];
     const audioLayers: SceneLayer[] = [];
     const newAssets: AnimationAsset[] = [];
     let cursor = 0;
-    for (const [index, text] of sentences.entries()) {
-      await onStage(`Lời đọc: ${scene.name}, câu ${index + 1}/${sentences.length}`);
-      const cacheKey = createHash('sha256').update(JSON.stringify({ version: 1, kind: 'narration', text, provider: input.provider.id, model: input.model, voice: input.voice, speed })).digest('hex');
-      let asset = await findCachedAnimationAsset(cacheKey);
-      let audio: Buffer;
-      if (asset) audio = await readFile((await getAnimationAssetFile(asset.id)).path);
-      else audio = await synthesize(input.provider, input.model, input.voice, text, { speed, format: 'wav' });
-      const measuredMs = await audioDurationMs(audio);
-      if (!(measuredMs > 0)) throw new Error(`Không đo được audio câu ${index + 1} của cảnh “${scene.name}”. Đã giữ các tài nguyên tạo trước đó.`);
-      // Ceil each audio unit to a frame, so the last samples are never trimmed.
-      const durationMs = Math.ceil(measuredMs * project.fps / 1000) * 1000 / project.fps;
-      if (!asset) {
-        const id = randomUUID();
-        const extension = wavDurationMs(audio) > 0 ? 'wav' : 'mp3';
-        const target = path.join(workdir, 'animation-assets', 'files', `${id}.${extension}`);
-        await mkdir(path.dirname(target), { recursive: true });
-        await writeFile(target, audio);
-        asset = await registerAnimationAsset({ id, type: 'audio', name: `Voiceover · ${scene.name} · ${index + 1}`, uri: `/api/animation-studio/assets/${id}/file`, tags: ['voiceover', 'narration'], createdAt: new Date().toISOString(), source: 'generated', cacheKey, generationPrompt: text });
-      }
-      newAssets.push(asset);
-      captions.push({ id: `sentence-${scene.id}-${index + 1}`, text, startMs: cursor, endMs: cursor + durationMs, source: 'measured-sentence' });
-      audioLayers.push({ id: `voiceover-${scene.id}-${index}`, type: 'audio', name: `Voiceover · ${scene.name}`, assetId: asset.id, visible: true, locked: true, zIndex: 999, width: 1, height: 1, startMs: cursor, durationMs, volume: 1, transform: defaultTransform() });
-      cursor += durationMs;
+    for (const item of units) {
+      newAssets.push(item.asset);
+      captions.push({ id: `sentence-${scene.id}-${item.sentenceIndex + 1}`, text: item.text, startMs: cursor, endMs: cursor + item.durationMs, source: 'measured-sentence' });
+      audioLayers.push({ id: `voiceover-${scene.id}-${item.sentenceIndex}`, type: 'audio', name: `Voiceover · ${scene.name}`, assetId: item.asset.id, visible: true, locked: true, zIndex: 999, width: 1, height: 1, startMs: cursor, durationMs: item.durationMs, volume: 1, transform: defaultTransform() });
+      cursor += item.durationMs;
     }
     const measuredDurationMs = cursor;
     const durationMs = input.preservePlannedDuration ? Math.max(scene.durationMs, measuredDurationMs) : measuredDurationMs;
@@ -233,7 +344,8 @@ export async function generateAnimationNarration(input: { project: AnimationProj
       const endMs = retime(command.startMs + command.durationMs);
       return { ...command, startMs, durationMs: Math.max(0, endMs - startMs) };
     };
-    const subtitleFill = project.styleProfile?.name === 'Whiteboard explainer' ? '#263238' : '#ffffff';
+    const whiteboardStyle = /whiteboard|doodle/i.test(`${project.styleProfile?.name || ''} ${project.styleProfile?.style || ''}`);
+    const subtitleFill = whiteboardStyle ? '#263238' : '#ffffff';
     const subtitle: SceneLayer = { id: `subtitle-${scene.id}`, name: 'Voiceover · Subtitle', type: 'text', text: scene.narration, captionTimings: captions, visible: true, locked: false, zIndex: 1000, width: Math.round(project.width * .78), height: Math.round(Math.min(project.width, project.height) * .16), fill: subtitleFill, fontSize: Math.max(24, Math.round(Math.min(project.width, project.height) * .032)), transform: { ...defaultTransform(), position: { x: project.width / 2, y: project.height * .84 } } };
     const replacement: typeof scene = { ...scene, durationMs, layers: [...scene.layers.filter((layer) => !((layer.type === 'audio' || layer.type === 'text') && layer.name.startsWith('Voiceover ·'))).map((layer) => layer.type !== 'audio' ? layer : { ...layer, startMs: retime(layer.startMs || 0), durationMs: layer.durationMs === undefined ? undefined : Math.min(layer.durationMs, durationMs - retime(layer.startMs || 0)) }), ...audioLayers, subtitle], commands: scene.commands.filter((command) => !command.parameters?.autoVoiceover).map(retimeCommand), camera: { ...scene.camera, commands: scene.camera.commands.map(retimeCommand) } };
     const productionPlan = project.productionPlan ? {

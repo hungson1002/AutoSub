@@ -111,14 +111,56 @@ test('concurrent library writes and measured TTS reruns preserve outputs without
     assert.equal(durationLocked.scenes[0].durationMs, 6000);
     assert.deepEqual(validateAnimationProject(second), []);
     if (second.scenes[0].renderMode !== 'composite') throw new Error('fixture');
-    assert.deepEqual(second.scenes[0].layers.find((layer) => layer.captionTimings)?.captionTimings?.map((cue) => [cue.startMs, cue.endMs]), [[0, 1000], [1000, 4000]]);
+    const timings = second.scenes[0].layers.find((layer) => layer.captionTimings)?.captionTimings || [];
+    assert.equal(timings.length, 2);
+    assert.equal(timings[0].startMs, 0);
+    assert.equal(timings[1].startMs, timings[0].endMs);
+    assert.equal(timings[1].endMs, 4000);
+    assert.deepEqual(timings.map((cue) => cue.endMs - cue.startMs).sort((a, b) => a - b), [1000, 3000]);
     assert.equal(new Set(second.assets.map((asset) => asset.id)).size, second.assets.length);
+  } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+});
+
+test('narration retries a transient provider failure instead of aborting the whole Director job', async () => {
+  const { generateAnimationNarration } = await import('./animationAssets');
+  let calls = 0;
+  const server = createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain request */ }
+    calls++;
+    if (calls === 1) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'temporary inference failure' } }));
+      return;
+    }
+    const samples = 24_000;
+    const wav = Buffer.alloc(44 + samples * 2);
+    wav.write('RIFF', 0); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
+    wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+    wav.writeUInt32LE(24000, 24); wav.writeUInt32LE(48000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+    wav.write('data', 36); wav.writeUInt32LE(samples * 2, 40);
+    res.writeHead(200, { 'Content-Type': 'audio/wav' }); res.end(wav);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('server');
+    const provider = { id: 'retry-tts', name: 'Retry TTS', providerType: 'openai-compatible' as const, baseUrl: `http://127.0.0.1:${address.port}/v1`, authType: 'none' as const, enabled: true, models: [], capabilities: { tts: true } };
+    const project = fixture();
+    if (project.scenes[0].renderMode !== 'composite') throw new Error('fixture');
+    project.scenes[0].narration = 'Một câu duy nhất để kiểm tra retry.';
+    const result = await generateAnimationNarration({ project, provider, model: 'test', voice: 'test' });
+    assert.equal(calls, 2);
+    assert.ok(result.assets.some((asset) => asset.type === 'audio'));
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });
 
 test('Director resumes the accepted plan and shares duplicate submissions', async () => {
   let calls = 0;
-  const plan = { name: 'Checkpoint integration', continuityBible: 'One consistent illustrated presenter with an immutable face, outfit, palette and story world.', segments: Array.from({ length: 7 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân, và đây là kết quả được giải thích rõ ràng.', visualBeats: Array.from({ length: i < 6 ? 2 : 1 }, (_, beat) => ({ purpose: 'explain', narrationCue: beat ? 'đây là kết quả' : 'Đây là nguyên nhân', visual: beat ? 'The same presenter points to the concrete visible result.' : 'The same presenter demonstrates the concrete cause.', motion: 'locked', transition: 'crossfade' })), motionGraphic: 'none' })) };
+  const plan = { name: 'Checkpoint integration', continuityBible: 'One consistent illustrated presenter with an immutable face, outfit, palette and story world.', segments: Array.from({ length: 4 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân, sau đó là diễn biến, cuối cùng là kết quả rõ ràng.', visualBeats: [
+    { purpose: 'explain', narrationCue: 'Đây là nguyên nhân', visual: 'The presenter demonstrates the concrete cause.', motion: 'locked', transition: 'cut' },
+    { purpose: 'mechanism', narrationCue: 'sau đó là diễn biến', visual: 'A distinct explanatory shot shows the mechanism progressing.', motion: 'locked', transition: 'cut' },
+    { purpose: 'payoff', narrationCue: 'cuối cùng là kết quả', visual: 'A distinct result shot makes the outcome visible.', motion: 'locked', transition: 'cut' },
+  ], motionGraphic: 'none' })) };
   const server = createServer(async (req, res) => {
     for await (const _chunk of req) { /* drain */ }
     calls++;

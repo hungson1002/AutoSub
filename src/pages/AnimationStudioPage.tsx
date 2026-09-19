@@ -15,6 +15,44 @@ import './AnimationStudioPage.css';
 const now = () => new Date().toISOString();
 const makeId = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 
+const VISUAL_STYLE_PRESETS = [
+  {
+    id: 'stick-explainer',
+    label: 'Người que explainer',
+    prompt: 'clean minimalist stick-figure explainer illustrations, bald round-headed stick characters, thin black limbs, simple expressive faces, flat vector design, bold clean outlines, off-white background, yellow accent color for the main mascot, simple economics and everyday-life icons, highly readable compositions, modern editorial educational style, consistent character design, minimal shading, clear comparisons and diagrams, professional YouTube explainer aesthetic',
+  },
+  {
+    id: 'modern-editorial',
+    label: 'Editorial hiện đại',
+    prompt: 'premium modern editorial explainer illustration, clean shapes, expressive simplified characters, polished digital painting with subtle texture, strong visual hierarchy, warm accent colors, readable diagrams and object illustrations, consistent art direction, dynamic but not overly cinematic, designed for fast-paced educational YouTube videos',
+  },
+  {
+    id: 'flat-infographic',
+    label: 'Flat vector / infographic',
+    prompt: 'clean flat vector infographic illustration, geometric shapes, minimal shading, bold readable silhouettes, simple characters and objects, clear charts diagrams and comparisons, restrained color palette, uncluttered backgrounds, high information clarity, consistent educational explainer design',
+  },
+  {
+    id: 'whiteboard-doodle',
+    label: 'Whiteboard / doodle',
+    prompt: 'hand-drawn whiteboard explainer style, simple black marker line art, sparse accent colors, playful doodles, clean white background, highly legible diagrams, expressive minimal characters, intentionally simple educational visual storytelling, consistent line weight and character design',
+  },
+  {
+    id: 'paper-cutout',
+    label: 'Paper cutout',
+    prompt: 'layered paper-cutout educational illustration, simple tactile paper shapes, soft shallow shadows, clean silhouettes, restrained color palette, readable compositions, playful but professional explainer design, consistent characters and objects, clear diagrams and comparisons',
+  },
+] as const;
+
+const STORY_TONE_OPTIONS = [
+  { value: 'balanced', label: 'Tự nhiên / cân bằng' },
+  { value: 'humorous', label: 'Hài hước thông minh' },
+  { value: 'curious', label: 'Tò mò / khám phá' },
+  { value: 'energetic', label: 'Nhanh, nhiều năng lượng' },
+  { value: 'serious', label: 'Nghiêm túc / chính xác' },
+] as const;
+
+const visualStylePresetId = (style: string | undefined) => VISUAL_STYLE_PRESETS.find((preset) => preset.prompt === String(style || '').trim())?.id || 'custom';
+
 function srtTimestamp(milliseconds: number) {
   const value = Math.max(0, Math.round(milliseconds));
   const hours = Math.floor(value / 3_600_000);
@@ -42,11 +80,13 @@ function storyboardProject(): AnimationProject {
     createdAt,
     updatedAt: createdAt,
     assets: [],
+    transitionPreset: { type: 'cut', durationMs: 0 },
     styleProfile: {
       name: 'AI Storyboard',
-      style: 'story-matched illustrations with consistent recurring characters',
+      style: VISUAL_STYLE_PRESETS[0].prompt,
       palette: [],
       pacing: 'balanced',
+      tone: 'balanced',
     },
     scenes: [{
       id: 'scene-001',
@@ -95,7 +135,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const autoOpenDirector = useRef(false);
   const [directorPollRevision, setDirectorPollRevision] = useState(0);
   const [targetMinutes, setTargetMinutes] = useState('1');
-  const [durationMode, setDurationMode] = useState<'auto' | 'fixed'>('auto');
+  const [durationMode, setDurationMode] = useState<'auto' | 'fixed'>('fixed');
   const [characterReference, setCharacterReference] = useState<{ uploadId: string; name: string }>();
   const [characterOptions, setCharacterOptions] = useState<AnimationAsset[]>([]);
   const [selectedCharacterAssetId, setSelectedCharacterAssetId] = useState('');
@@ -139,6 +179,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [imageProviderId, setImageProviderId] = useState('flow-agent');
   const [flowAgent, setFlowAgent] = useState<Awaited<ReturnType<typeof api.flowAgentStatus>>>();
   const [generatingAsset, setGeneratingAsset] = useState(false);
+  const [generatingThumbnails, setGeneratingThumbnails] = useState(false);
   const [autoGenerateAssets, setAutoGenerateAssets] = useState(true);
   const [editInstruction, setEditInstruction] = useState('');
   const [editingWithAi, setEditingWithAi] = useState(false);
@@ -170,6 +211,8 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const subtitleFontSize = subtitleLayer?.fontSize || Math.max(24, Math.round(Math.min(project.width, project.height) * .032));
   const selectedAsset = selectedLayer?.assetId ? project.assets.find((asset) => asset.id === selectedLayer.assetId) : undefined;
   const selectedCharacter = characterOptions.find((asset) => asset.id === selectedCharacterAssetId);
+  const thumbnailAssets = project.assets.filter((asset) => asset.tags?.includes('youtube-thumbnail'));
+  const videoHasNarration = project.scenes.some((item) => item.renderMode === 'composite' && Boolean(String(item.narration || '').trim()));
   const selectedCommand = scene?.commands.find((command) => command.id === selectedCommandId);
   const directorAssignment = capabilityAssignments(settings, 'translation')[0];
   const directorProvider = providers.find((item) => item.id === directorAssignment?.providerId);
@@ -282,8 +325,21 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     if (!nextScene) return;
     setProject((current) => ({ ...current, scenes: current.scenes.map((item) => item.id === nextScene.id && item.renderMode === 'composite' ? { ...item, transition } : item), updatedAt: now() }));
   };
+  const applyProjectTransition = (type: SceneTransitionType, durationMs?: number) => {
+    setProject((current) => {
+      const duration = type === 'cut' ? 0 : Math.max(80, Math.min(2000, Number(durationMs ?? current.transitionPreset?.durationMs ?? 220) || 220));
+      const transitionPreset = { type, durationMs: duration };
+      const firstOrder = current.scenes.length ? Math.min(...current.scenes.map((item) => item.order)) : 0;
+      return {
+        ...current,
+        transitionPreset,
+        scenes: current.scenes.map((item) => ({ ...item, transition: item.order === firstOrder ? { type: 'cut', durationMs: 0 } : transitionPreset })),
+        updatedAt: now(),
+      };
+    });
+  };
   const updateLayer = (layerId: string, change: Partial<SceneLayer>) => updateScene((current) => ({ ...current, layers: current.layers.map((layer) => layer.id === layerId ? { ...layer, ...change } : layer) }));
-  const addScene = () => { const id = makeId('scene'); const next: CompositeScene = { id, name: `Cảnh ${project.scenes.length + 1}`, order: project.scenes.length, durationMs: 5000, narration: '', transition: { type: 'crossfade', durationMs: 320 }, renderMode: 'composite', backgroundColor: '#07111f', layers: [], commands: [], camera: { transform: defaultTransform(), commands: [] } }; setProject((current) => ({ ...current, scenes: [...current.scenes, next], updatedAt: now() })); setSceneId(id); setSelectedLayerId(''); setTimeMs(0); };
+  const addScene = () => { const id = makeId('scene'); const preset = project.transitionPreset || { type: 'cut' as const, durationMs: 0 }; const next: CompositeScene = { id, name: `Cảnh ${project.scenes.length + 1}`, order: project.scenes.length, durationMs: 5000, narration: '', transition: preset.type === 'cut' ? { type: 'cut', durationMs: 0 } : preset, renderMode: 'composite', backgroundColor: '#07111f', layers: [], commands: [], camera: { transform: defaultTransform(), commands: [] } }; setProject((current) => ({ ...current, scenes: [...current.scenes, next], updatedAt: now() })); setSceneId(id); setSelectedLayerId(''); setTimeMs(0); };
   const addCommand = (type: AnimationCommandType) => {
     if (!selectedLayer || !scene) return; const durationMs = Math.min(1000, Math.max(0, scene.durationMs - timeMs));
     const base = { id: makeId('command'), type, targetId: selectedLayer.id, startMs: Math.round(timeMs), durationMs: Math.round(durationMs), easing: 'ease-in-out' as const };
@@ -396,6 +452,30 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     finally { if (characterGenerationRef.current === controller) { characterGenerationRef.current = null; setPreparingCharacters(false); } }
   };
   const cancelCharacterOptions = () => { characterGenerationRef.current?.abort(); characterGenerationRef.current = null; setPreparingCharacters(false); setDirectorError('Đã dừng lượt tạo nhân vật.'); };
+  const generateThumbnails = async () => {
+    if (!directorProvider || !directorAssignment?.model) { setDirectorError('Hãy cấu hình provider/model AI trước khi tạo thumbnail.'); return; }
+    const generation = selectedAssetGeneration();
+    if (!generation) { setDirectorError('Hãy chọn provider tạo ảnh trước khi tạo thumbnail.'); return; }
+    if (usingFlowAgentAssets && !flowAgent?.connected) { setDirectorError('Nano Banana 2 chưa sẵn sàng. Hãy mở Google Flow rồi thử lại.'); return; }
+    if (!videoHasNarration) { setDirectorError('Hãy dựng video có narration trước để AI hiểu toàn bộ nội dung và tạo thumbnail.'); return; }
+    setGeneratingThumbnails(true); setDirectorError('');
+    try {
+      const oldThumbnailIds = new Set(thumbnailAssets.map((asset) => asset.id));
+      const assets = await api.generateAnimationThumbnails({ project, brief, provider: directorProvider, model: directorAssignment.model, assetGeneration: generation, count: 3 });
+      setLibraryAssets((current) => [
+        ...assets,
+        ...current.filter((item) => !oldThumbnailIds.has(item.id) && !assets.some((asset) => asset.id === item.id)),
+      ]);
+      setProject((current) => {
+        const kept = current.assets.filter((asset) => !asset.tags?.includes('youtube-thumbnail'));
+        return { ...current, assets: [...kept, ...assets], thumbnailAssetId: assets[0]?.id, updatedAt: now() };
+      });
+      setSetupOpen(true);
+      window.requestAnimationFrame(() => document.getElementById('animation-thumbnail-tool')?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+      onNotice(`Đã tạo ${assets.length} phương án thumbnail từ toàn bộ nội dung video.`);
+    } catch (error) { setDirectorError(friendlyErrorMessage(error, 'Không thể tạo thumbnail.')); }
+    finally { setGeneratingThumbnails(false); }
+  };
   const generateAsset = async () => {
     const generation = selectedAssetGeneration();
     if (!generation) { onNotice('Hãy chọn provider tạo ảnh trước.', 'error'); return; }
@@ -646,6 +726,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         <button className="button quiet" type="button" onClick={exportJson}>JSON</button>
         <button className="button quiet" type="button" onClick={exportSrt}><Download size={14} aria-hidden="true" /> SRT</button>
         </div></details>
+        <button className="button animation-toolbar-thumbnail" type="button" title={videoHasNarration ? 'Tạo 3 phương án thumbnail từ toàn bộ nội dung video' : 'Dựng video có lời đọc trước để tạo thumbnail'} disabled={generatingThumbnails || directing || !videoHasNarration || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void generateThumbnails()}><Image size={15} aria-hidden="true" /> {generatingThumbnails ? 'Đang tạo thumbnail…' : thumbnailAssets.length ? `Thumbnail (${thumbnailAssets.length})` : 'Tạo thumbnail'}</button>
         <button className="button" type="button" onClick={startPresentation}><Maximize size={15} aria-hidden="true" /> Trình chiếu</button>
         <button className="button" type="button" onClick={() => void renderMp4()} disabled={rendering}><Download size={15} aria-hidden="true" /> {rendering ? 'Đang xuất toàn bộ…' : 'Xuất video hoàn chỉnh'}</button>
         <button className="button primary" type="button" onClick={() => void save()} disabled={saving}><Save size={15} aria-hidden="true" /> {saving ? 'Đang lưu' : 'Lưu'}</button>
@@ -671,13 +752,14 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       <div className="animation-director-heading"><span><Sparkles size={16} aria-hidden="true" /> AI Director</span><small>{directorProvider ? `${directorProvider.name} · ${directorAssignment?.model || ''}` : 'Chưa cấu hình AI Director'}</small></div>
       <label className="animation-director-prompt"><span className="sr-only">Ý tưởng hoặc toàn bộ kịch bản</span><textarea value={brief} onChange={(event) => { setBrief(event.target.value); setCharacterOptions([]); setSelectedCharacterAssetId(''); }} placeholder="Nhập toàn bộ nội dung, hoặc một ý tưởng ngắn như: Mèo xâm chiếm ngoài hành tinh…" /></label>
       <div className="animation-director-options">
-        <fieldset className="animation-duration-mode"><legend>Thời lượng</legend><label><input type="radio" checked={durationMode === 'auto'} onChange={() => setDurationMode('auto')} /> Tự động theo nội dung</label><label><input type="radio" checked={durationMode === 'fixed'} onChange={() => setDurationMode('fixed')} /> Tự chọn</label></fieldset>
-        {durationMode === 'fixed' && <label className="animation-duration"><span>Thời lượng video</span><input aria-label="Thời lượng video tính bằng phút" type="number" min="0.1" step="0.5" value={targetMinutes} onChange={(event) => setTargetMinutes(event.target.value)} /><span>phút</span></label>}
+        <fieldset className="animation-duration-mode"><legend>Thời lượng</legend><label className={durationMode === 'fixed' ? 'selected' : ''}><input type="radio" checked={durationMode === 'fixed'} onChange={() => setDurationMode('fixed')} /><span className="animation-duration-choice-copy"><strong>Khóa theo thời lượng</strong><small>Bám sát mốc bạn chọn</small></span></label><label className={durationMode === 'auto' ? 'selected' : ''}><input type="radio" checked={durationMode === 'auto'} onChange={() => setDurationMode('auto')} /><span className="animation-duration-choice-copy"><strong>Tự động theo nội dung</strong><small>AI tự suy ra độ dài phù hợp</small></span></label></fieldset>
+        {durationMode === 'fixed' && <label className="animation-duration"><span>Thời lượng video</span><input aria-label="Thời lượng video tính bằng phút" type="number" min="0.1" step="0.25" value={targetMinutes} onChange={(event) => setTargetMinutes(event.target.value)} /><span>phút</span><small>Director sẽ tạo TTS thử, đo thời lượng thật và tự viết lại narration trước khi tạo ảnh cho tới khi lời đọc gần đầy timeline đã chọn.</small></label>}
+        {durationMode === 'auto' && <small className="animation-reference-note">Tự động sẽ suy ra độ dài từ nội dung. Nếu prompt có ghi rõ “60 giây”, “90 seconds”, “2 phút”… Director sẽ ưu tiên mốc đó thay vì tính theo độ dài prompt.</small>}
         <label className="animation-director-voice"><span>Giọng đọc</span>{ttsVoices.length ? <select aria-label="Chọn giọng đọc" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} title={ttsProvider?.name}>{ttsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name || voice.id}{voice.language ? ` · ${voice.language}` : ''}</option>)}</select> : <input aria-label="Voice ID" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} placeholder={ttsProvider ? 'Nhập Voice ID' : 'Chưa cấu hình TTS'} disabled={!ttsProvider} />}</label>
         <label className="animation-subtitle-toggle"><input type="checkbox" checked={showSubtitles} onChange={(event) => setShowSubtitles(event.target.checked)} /><span>Phụ đề</span></label>
         {showSubtitles && <label className="animation-subtitle-size"><span>Cỡ chữ</span><input aria-label="Cỡ chữ phụ đề" type="number" min="16" max="120" value={subtitleFontSize} onChange={(event) => updateSubtitleFontSize(Math.max(16, Math.min(120, Number(event.target.value) || 16)))} /></label>}
         {showSubtitles && subtitleLayer && <button className="button quiet animation-edit-subtitle" type="button" onClick={() => setSelectedLayerId(subtitleLayer.id)}>Sửa câu hiện tại</button>}
-        <label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tạo composition theo từng ý, đổi focus bằng chuyển động</span></label>
+        <label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tạo ảnh theo từng nhịp giải thích</span></label>
         {autoGenerateAssets && <><select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => { const value = event.target.value; setImageProviderId(value); setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1'); setCharacterOptions([]); setSelectedCharacterAssetId(''); }}><option value="flow-agent">Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : ' · chưa kết nối'}</option>{providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{!usingFlowAgentAssets && <small className="animation-reference-note">Ảnh tham chiếu nhân vật hiện cần Nano Banana 2.</small>}</>}
         {autoGenerateAssets && <div className="animation-character-picker">
           <div className="animation-character-picker-head"><span>Nhân vật và phong cách</span>{(characterReference || selectedCharacterAssetId) && <button type="button" onClick={() => { setCharacterReference(undefined); setSelectedCharacterAssetId(''); }}>Đổi lựa chọn</button>}</div>
@@ -685,13 +767,15 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
           {!characterReference && characterOptions.length === 0 && <button className="button quiet" type="button" disabled={!preparingCharacters && (brief.trim().length < 10 || (usingFlowAgentAssets && !flowAgent?.connected))} onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng tạo 4 nhân vật' : 'Không có ảnh? Tạo 4 nhân vật để chọn'}</button>}
           {!characterReference && characterOptions.length > 0 && <><div className="animation-character-options" role="radiogroup" aria-label="Chọn nhân vật">{characterOptions.map((asset) => <article className={selectedCharacterAssetId === asset.id ? 'selected' : ''} key={asset.id}><button className="animation-character-thumb" type="button" aria-label={`Xem lớn ${asset.name}`} onClick={() => setCharacterPreview({ id: asset.id, name: asset.name, uri: asset.uri })}><img src={asset.uri} alt="" /><span>{asset.name}</span></button><button className="animation-character-select" type="button" role="radio" aria-checked={selectedCharacterAssetId === asset.id} onClick={() => setSelectedCharacterAssetId(asset.id)}>{selectedCharacterAssetId === asset.id ? 'Đã chọn' : 'Chọn'}</button></article>)}</div><button className="animation-character-regenerate" type="button" onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng lượt tạo mới' : 'Tạo lại 4 phương án'}</button></>}
         </div>}
-        <button className="button primary" type="button" disabled={directing || preparingCharacters || brief.trim().length < 10 || (autoGenerateAssets && (!usingFlowAgentAssets || !flowAgent?.connected)) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang viết kịch bản, tạo ảnh và lồng tiếng…' : autoGenerateAssets && !characterReference && !selectedCharacterAssetId ? 'Chuẩn bị nhân vật' : 'Bắt đầu tạo video'}</button>
       </div>
       {directorJob && <div className="animation-director-job">
         <p role="status" aria-live="polite">{directorJob.stage}</p>
+        <div className="animation-director-progress" aria-label={`Tiến trình ${Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%`}>
+          <div className="animation-director-progress-head"><span>{directorJob.status === 'completed' && directorJob.progressTotal ? `${directorJob.progressTotal}/${directorJob.progressTotal} ảnh đã xong` : directorJob.progressLabel || (directorJob.progressTotal !== undefined && directorJob.progressCurrent !== undefined ? `${directorJob.progressCurrent}/${directorJob.progressTotal} ảnh đã xong` : 'Đang xử lý')}</span><strong>{Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%</strong></div>
+          <div className="animation-director-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0, Math.min(100, directorJob.progressPercent || 0))}><span style={{ width: `${Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%` }} /></div>
+        </div>
         {directing && <button className="button quiet" type="button" onClick={() => void cancelDirector()}>Dừng dựng animation</button>}
         {['failed', 'interrupted', 'cancelled'].includes(directorJob.status) && <button className="button quiet" type="button" onClick={() => void resumeDirector()}>Tiếp tục job đã lưu</button>}
-        {directorJob.hasResult && <button className="button quiet" type="button" onClick={() => void restoreDirectorResult()}>Mở kết quả đã lưu</button>}
       </div>}
       {directorError && <div className="animation-director-error" role="alert"><details><summary>Lỗi hoặc gián đoạn kết nối. Xem chi tiết</summary><p>{directorError}</p></details><button type="button" aria-label="Đóng thông báo lỗi" onClick={() => setDirectorError('')}><X size={14} aria-hidden="true" /></button></div>}
       {directorWarning && <div className="animation-director-error warning" role="status"><details><summary>{directorWarningTitle}</summary><p>{directorWarning}</p></details>{/thiếu hình|không tạo được ảnh|ảnh minh họa/i.test(directorWarning) && <button className="button primary animation-retry-missing" type="button" disabled={retryingMissingImages || !flowAgent?.connected} onClick={() => void retryMissingImages()}><RefreshCw size={14} aria-hidden="true" />{retryingMissingImages ? 'Đang tạo lại…' : 'Tạo lại ảnh lỗi'}</button>}<button type="button" aria-label="Đóng cảnh báo" onClick={() => setDirectorWarning('')}><X size={14} aria-hidden="true" /></button></div>}
@@ -703,7 +787,57 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       {qualityIssues.length > 0 && <span className={`animation-quality-badge ${qualityIssues.some((item) => item.severity === 'error') ? 'has-error' : ''}`}>{qualityIssues.length} cảnh báo</span>}
     </div>
     </details>
-    <div className="animation-project-settings" aria-label="Thiết lập project"><label>Phong cách hình ảnh<input className="animation-style-profile" value={project.styleProfile?.style || ''} onChange={(event) => setProject((current) => ({ ...current, styleProfile: { name: current.styleProfile?.name || 'Kênh mặc định', style: event.target.value, pacing: current.styleProfile?.pacing || 'balanced' }, updatedAt: now() }))} placeholder="Ví dụ: pixel, doodle…" /></label><span>Tỷ lệ khung hình</span><div className="animation-ratio-buttons">{([[1080, 1920, '9:16'], [1920, 1080, '16:9'], [1080, 1080, '1:1']] as const).map(([width, height, label]) => <button key={label} type="button" aria-pressed={project.width === width && project.height === height} onClick={() => relayout(width, height)}>{label}</button>)}</div><div className="animation-voiceover"><button type="button" disabled={creatingVoiceover} onClick={() => void createVoiceover()}>{creatingVoiceover ? 'Đang tạo…' : 'Tạo lại voiceover'}</button></div></div>
+    <div className="animation-project-settings" aria-label="Thiết lập project">
+      <label>Phong cách hình ảnh<select aria-label="Chọn phong cách hình ảnh" value={visualStylePresetId(project.styleProfile?.style)} onChange={(event) => {
+        const id = event.target.value;
+        const preset = VISUAL_STYLE_PRESETS.find((item) => item.id === id);
+        setProject((current) => ({
+          ...current,
+          styleProfile: {
+            ...(current.styleProfile || { name: 'AI Storyboard', style: '', pacing: 'balanced' as const }),
+            name: preset?.label || 'Tùy chỉnh',
+            style: preset?.prompt || '',
+          },
+          updatedAt: now(),
+        }));
+      }}>{VISUAL_STYLE_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}<option value="custom">Nhập prompt riêng…</option></select></label>
+      {visualStylePresetId(project.styleProfile?.style) === 'custom' && <label>Prompt phong cách tùy chỉnh<input className="animation-style-profile" value={project.styleProfile?.style || ''} onChange={(event) => setProject((current) => ({
+        ...current,
+        styleProfile: {
+          ...(current.styleProfile || { name: 'Tùy chỉnh', style: '', pacing: 'balanced' as const }),
+          name: 'Tùy chỉnh',
+          style: event.target.value,
+        },
+        updatedAt: now(),
+      }))} placeholder="Mô tả art direction, nhân vật, màu sắc, nét vẽ…" /></label>}
+      <label>Giọng kể<select aria-label="Chọn giọng kể" value={project.styleProfile?.tone || 'balanced'} onChange={(event) => setProject((current) => ({
+        ...current,
+        styleProfile: {
+          ...(current.styleProfile || { name: 'AI Storyboard', style: VISUAL_STYLE_PRESETS[0].prompt, pacing: 'balanced' as const }),
+          tone: event.target.value as NonNullable<AnimationProject['styleProfile']>['tone'],
+        },
+        updatedAt: now(),
+      }))}>{STORY_TONE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+      <small className="animation-reference-note">“Hài hước thông minh” thêm ví dụ dí dỏm và visual gag vừa phải để đỡ nhàm chán, nhưng không được bẻ cong dữ kiện hay nhét trò đùa vào chủ đề nghiêm trọng.</small>
+      <label>Chuyển cảnh toàn video<select aria-label="Chuyển cảnh mặc định cho toàn video" value={project.transitionPreset?.type || 'cut'} onChange={(event) => applyProjectTransition(event.target.value as SceneTransitionType)}>{SCENE_TRANSITION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+      {(project.transitionPreset?.type || 'cut') !== 'cut' && <label>Độ mượt toàn video<input aria-label="Thời lượng chuyển cảnh toàn video tính bằng mili giây" type="number" min="80" max="1200" step="20" value={project.transitionPreset?.durationMs || 220} onChange={(event) => applyProjectTransition(project.transitionPreset?.type || 'crossfade', Number(event.target.value) || 220)} /> ms</label>}
+      <small className="animation-reference-note">Đổi lựa chọn ở đây sẽ áp dụng ngay từ cảnh đầu đến cảnh cuối. Cắt thẳng là mặc định an toàn cho video explainer.</small>
+      <span>Tỷ lệ khung hình</span><div className="animation-ratio-buttons">{([[1080, 1920, '9:16'], [1920, 1080, '16:9'], [1080, 1080, '1:1']] as const).map(([width, height, label]) => <button key={label} type="button" aria-pressed={project.width === width && project.height === height} onClick={() => relayout(width, height)}>{label}</button>)}</div>
+      <div className="animation-voiceover"><button type="button" disabled={creatingVoiceover} onClick={() => void createVoiceover()}>{creatingVoiceover ? 'Đang tạo…' : 'Tạo lại voiceover'}</button></div>
+    </div>
+    <div className="animation-director-actions-bottom" aria-label="Hành động tạo video">
+      <button className="button primary" type="button" disabled={directing || preparingCharacters || brief.trim().length < 10 || (autoGenerateAssets && (!usingFlowAgentAssets || !flowAgent?.connected)) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang viết kịch bản, tạo ảnh và lồng tiếng…' : autoGenerateAssets && !characterReference && !selectedCharacterAssetId ? 'Chuẩn bị nhân vật' : 'Bắt đầu tạo video'}</button>
+      {directorJob?.hasResult && <button className="button quiet animation-open-saved-result" type="button" onClick={() => void restoreDirectorResult()}>Mở kết quả đã lưu</button>}
+      {(videoHasNarration || thumbnailAssets.length > 0) && <div id="animation-thumbnail-tool" className="animation-thumbnail-tool">
+        <div className="animation-thumbnail-head"><span><Image size={15} aria-hidden="true" /> Thumbnail video</span><button className="button quiet" type="button" disabled={generatingThumbnails || directing || !videoHasNarration || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void generateThumbnails()}>{generatingThumbnails ? 'Đang tạo 3 thumbnail…' : thumbnailAssets.length ? 'Tạo lại 3 phương án' : 'Tạo 3 phương án'}</button></div>
+        <small>AI dùng toàn bộ narration, các cảnh và phong cách hiện tại để nghĩ thumbnail 16:9; có thể dùng chữ ngắn, giá hoặc số khi hữu ích.</small>
+        {thumbnailAssets.length > 0 && <div className="animation-thumbnail-grid">{thumbnailAssets.map((asset, index) => <article className={project.thumbnailAssetId === asset.id ? 'selected' : ''} key={asset.id}>
+          <button className="animation-thumbnail-preview" type="button" onClick={() => setCharacterPreview({ id: asset.id, name: asset.name, uri: asset.uri })} aria-label={`Xem lớn ${asset.name}`}><img src={asset.uri} alt="" /></button>
+          <small className="animation-thumbnail-score">{(asset.tags.find((tag) => tag.startsWith('thumbnail-angle:')) || 'thumbnail-angle:concept').replace('thumbnail-angle:', '')} · {(asset.tags.find((tag) => tag.startsWith('thumbnail-score:')) || 'thumbnail-score:0').replace('thumbnail-score:', '')}/10</small>
+          <div><button type="button" className="animation-thumbnail-select" onClick={() => setProject((current) => ({ ...current, thumbnailAssetId: asset.id, updatedAt: now() }))}>{project.thumbnailAssetId === asset.id ? 'Đã chọn' : `Chọn ${index + 1}`}</button><a href={asset.uri} download={`${project.name.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'video'}-thumbnail-${index + 1}.png`}>Tải PNG</a></div>
+        </article>)}</div>}
+      </div>}
+    </div>
     </aside>
     {historyOpen && <div className="animation-history">{versions.length ? versions.map((version) => <button type="button" key={version.id} onClick={() => void restoreVersion(version.id)}><strong>{new Date(version.createdAt).toLocaleString('vi-VN')}</strong><small>{version.sceneCount} scene · {version.name}</small></button>) : <span>Chưa có version trước.</span>}</div>}
     <div className={`animation-workspace${selectedLayer ? ' has-selection' : ''}`}>

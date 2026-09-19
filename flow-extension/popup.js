@@ -137,6 +137,85 @@ function selectTab(name) {
   document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.toggle('active', panel.id === `panel-${name}`));
   if (name === 'media') loadMedia();
+  if (name === 'accounts') loadFlowAccounts();
+}
+
+const AUTOSUB_BACKEND = 'http://127.0.0.1:8787';
+async function autosubApiJson(path, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  const body = options.body ?? (['POST', 'PUT', 'PATCH'].includes(method) ? '{}' : undefined);
+  const hasBody = body !== undefined && body !== null;
+  const response = await fetch(`${AUTOSUB_BACKEND}${path}`, {
+    ...options,
+    method,
+    ...(hasBody ? { body } : {}),
+    headers: {
+      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  const text = await response.text();
+  let data;
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
+  if (!response.ok) throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  return data;
+}
+
+async function loadFlowAccounts() {
+  const list = document.getElementById('accounts-list');
+  const summary = document.getElementById('accounts-summary');
+  if (!list || !summary) return;
+  try {
+    const data = await runtimeMessage({ type: 'LIST_FLOW_ACCOUNTS' });
+    const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+    const ready = accounts.filter((account) => account.connected && account.tokenReady);
+    summary.textContent = `${ready.length} ready account${ready.length === 1 ? '' : 's'} · ${ready.length * 2} parallel slots`;
+    if (!accounts.length) {
+      list.innerHTML = '<div class="accounts-empty">No linked Flow accounts yet.<br>Press + Add and choose another Google account in this same Opera profile.</div>';
+      return;
+    }
+    list.innerHTML = accounts.map((account, index) => {
+      const name = escHtml(account.email || (account.primary ? 'Primary Flow account' : `Flow account ${index + 1}`));
+      const client = escHtml(account.clientId || '—');
+      const readyState = account.connected && account.tokenReady;
+      const status = readyState ? 'Ready' : account.tokenReady ? 'Token ready · reconnecting' : account.email ? 'Waiting for Flow token' : 'Choose/sign in to Google';
+      const active = Math.max(0, Math.min(2, Number(account.activeRequests) || 0));
+      return `<article class="flow-account" data-account-id="${escHtml(account.id)}">
+        <div class="flow-account-top">
+          <span class="flow-account-dot ${readyState ? 'ready' : ''}"></span>
+          <div class="flow-account-copy"><strong>${name}</strong><span>${client} · ${escHtml(status)}</span></div>
+          <span class="flow-account-slots">${readyState ? `${active}/2` : '—'}</span>
+        </div>
+        <div class="flow-account-actions">
+          <button type="button" data-account-action="open">Open tab</button>
+          <button type="button" data-account-action="refresh">Refresh</button>
+          ${account.primary ? '' : '<button type="button" class="danger" data-account-action="remove">Remove</button>'}
+        </div>
+      </article>`;
+    }).join('');
+    list.querySelectorAll('[data-account-action]').forEach((button) => button.addEventListener('click', async () => {
+      const card = button.closest('.flow-account');
+      const accountId = card?.dataset.accountId;
+      if (!accountId) return;
+      const action = button.dataset.accountAction;
+      button.disabled = true;
+      try {
+        if (action === 'open') await runtimeMessage({ type: 'FOCUS_FLOW_ACCOUNT', accountId });
+        else if (action === 'refresh') await runtimeMessage({ type: 'REFRESH_FLOW_ACCOUNT', accountId });
+        else if (action === 'remove') await runtimeMessage({ type: 'REMOVE_FLOW_ACCOUNT', accountId });
+        if (action === 'remove') showToast('Flow account removed');
+        else showToast(action === 'open' ? 'Opened linked Flow tab' : 'Refreshing linked Flow tab');
+      } catch (error) {
+        showToast(error.message, 'error');
+      } finally {
+        button.disabled = false;
+        setTimeout(loadFlowAccounts, action === 'refresh' ? 1200 : 300);
+      }
+    }));
+  } catch (error) {
+    list.innerHTML = `<div class="accounts-empty">Could not load linked Flow accounts: ${escHtml(error.message)}</div>`;
+    summary.textContent = 'Account pool unavailable';
+  }
 }
 
 async function loadMedia() {
@@ -190,7 +269,7 @@ function showToast(message, kind = 'ok') {
 async function refreshMonitor() {
   try {
     const status = await runtimeMessage({ type: 'STATUS' });
-    monitorEnabled = status.state !== 'off';
+    monitorEnabled = status.enabled !== false && status.manualDisconnect !== true;
     const connected = !!status.agentConnected;
     const mark = document.getElementById('extension-mark');
     if (mark) {
@@ -199,7 +278,11 @@ async function refreshMonitor() {
       mark.classList.toggle('offline', !connected);
     }
     document.getElementById('monitor-dot').classList.toggle('on', connected);
-    document.getElementById('monitor-state').textContent = !connected ? 'Disconnected' : status.state === 'running' ? 'Generating...' : 'Ready';
+    document.getElementById('monitor-state').textContent = !monitorEnabled
+      ? 'Paused by you'
+      : !connected
+        ? 'Reconnecting…'
+        : status.state === 'running' ? 'Generating...' : 'Ready';
     const toggle = document.getElementById('agent-toggle');
     toggle.textContent = monitorEnabled ? 'ON' : 'OFF';
     toggle.classList.toggle('on', monitorEnabled);
@@ -225,6 +308,19 @@ async function refreshMonitor() {
 }
 
 document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => selectTab(tab.dataset.tab)));
+document.getElementById('add-flow-account')?.addEventListener('click', async () => {
+  const button = document.getElementById('add-flow-account');
+  button.disabled = true;
+  try {
+    await runtimeMessage({ type: 'ADD_FLOW_ACCOUNT' });
+    showToast('Choose another Google account in this same Opera profile.');
+    setTimeout(loadFlowAccounts, 700);
+  } catch (error) {
+    showToast(`Could not add account: ${error.message}`, 'error');
+  } finally {
+    button.disabled = false;
+  }
+});
 document.getElementById('agent-toggle').addEventListener('click', async () => {
   await runtimeMessage({ type: monitorEnabled ? 'DISCONNECT' : 'RECONNECT' });
   setTimeout(refreshMonitor, 350);
@@ -470,3 +566,6 @@ document.getElementById('quick-generate').addEventListener('click', async () => 
 updateQuickFields();
 refreshMonitor();
 setInterval(refreshMonitor, 3000);
+setInterval(() => {
+  if (document.querySelector('.tab[data-tab="accounts"]')?.classList.contains('active')) loadFlowAccounts();
+}, 2500);

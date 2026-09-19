@@ -68,7 +68,8 @@ test('missing captcha script preserves the session and does not retry generation
   globalThis.fetch = async (input) => {
     const url = String(input);
     if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
-    assert.ok(url.endsWith('/v1/images/generations'), 'Must not refresh tokens or probe credits for a script error');
+    if (url.endsWith('/v1/credits')) return Response.json({ clients: [{ ok: true }] });
+    assert.ok(url.endsWith('/v1/images/generations'), 'Must not refresh tokens for a script error');
     generations++;
     return Response.json({ detail: 'CAPTCHA_FAILED: grecaptcha not available' }, { status: 400 });
   };
@@ -97,6 +98,26 @@ test('Flow Agent status does not mistake an unreliable credits probe for session
   };
   try {
     assert.equal((await flowAgentStatus()).connected, true);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('Flow Agent status accepts ready linked accounts when legacy primary has no token', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    if (String(input).endsWith('/health')) return Response.json({
+      status: 'unauthorized_or_disconnected', extension_connected: true, has_flow_key: false,
+      clients: [
+        { client_id: 'account-one', state: 'idle', has_flow_key: true },
+        { client_id: 'legacy-primary', state: 'idle', has_flow_key: false },
+      ],
+    });
+    throw new Error(`Unexpected request: ${String(input)}`);
+  };
+  try {
+    const status = await flowAgentStatus();
+    assert.equal(status.connected, true);
+    assert.equal(status.hasFlowKey, true);
+    await validateGoogleFlowSession();
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -136,16 +157,89 @@ test('Flow Agent image generation stores returned base64 image', async () => {
   const output = path.join(directory, 'asset.png');
   let requestCount = 0;
   globalThis.fetch = async (_input, init) => {
-    if (String(_input).endsWith('/v1/credits')) return new Response(JSON.stringify({ clients: [{ ok: true }] }));
+    const url = String(_input);
+    if (url.endsWith('/v1/credits')) return new Response(JSON.stringify({ clients: [{ ok: true }] }));
+    if (url.endsWith('/health')) return new Response(JSON.stringify({ status: 'healthy', extension_connected: true, has_flow_key: true }), { status: 200 });
     requestCount += 1;
-    if (requestCount === 1) return new Response(JSON.stringify({ status: 'healthy', extension_connected: true, has_flow_key: true }), { status: 200 });
     const body = JSON.parse(String(init?.body || '{}')) as { model?: string; response_format?: string };
     assert.equal(body.model, 'narwhal');
-    assert.equal(body.response_format, 'b64_json');
+    assert.equal(body.response_format, 'remote_url');
     return new Response(JSON.stringify({ data: [{ b64_json: Buffer.alloc(128, 7).toString('base64') }] }), { status: 200 });
   };
   try {
     await generateGoogleFlowImage('A clean product background', output);
+    assert.equal((await readFile(output)).length, 128);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Flow image generation uploads a recurring reference only once and reuses its media id', async () => {
+  const originalFetch = globalThis.fetch;
+  const directory = await mkdtemp(path.join(tmpdir(), 'autosub-flow-reference-cache-'));
+  const reference = path.join(directory, 'character.png');
+  const first = path.join(directory, 'first.png');
+  const second = path.join(directory, 'second.png');
+  await writeFile(reference, Buffer.alloc(257, 23));
+  let uploads = 0;
+  let generations = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
+    if (url.endsWith('/v1/credits')) return Response.json({ clients: [{ ok: true }] });
+    if (url.endsWith('/v1/upload')) { uploads += 1; return Response.json({ media_id: 'cached-character-media' }); }
+    if (url.endsWith('/v1/images/generations')) {
+      generations += 1;
+      const body = JSON.parse(String(init?.body || '{}')) as { ref_media_ids?: string[]; image_base64?: string };
+      assert.deepEqual(body.ref_media_ids, ['cached-character-media']);
+      assert.equal(body.image_base64, undefined);
+      return Response.json({ data: [{ b64_json: Buffer.alloc(128, generations).toString('base64') }] });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  try {
+    await generateGoogleFlowImage('First shot', first, { referenceImagePath: reference });
+    await generateGoogleFlowImage('Second shot', second, { referenceImagePath: reference });
+    assert.equal(uploads, 1);
+    assert.equal(generations, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('stale cached Flow reference is re-uploaded and repaired inside the same image attempt', async () => {
+  const originalFetch = globalThis.fetch;
+  const directory = await mkdtemp(path.join(tmpdir(), 'autosub-flow-reference-repair-'));
+  const reference = path.join(directory, 'character.png');
+  const output = path.join(directory, 'shot.png');
+  await writeFile(reference, Buffer.alloc(263, 31));
+  let uploads = 0;
+  let generations = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
+    if (url.endsWith('/v1/credits')) return Response.json({ clients: [{ ok: true }] });
+    if (url.endsWith('/v1/upload')) {
+      uploads += 1;
+      return Response.json({ media_id: uploads === 1 ? 'stale-media' : 'fresh-media' });
+    }
+    if (url.endsWith('/v1/images/generations')) {
+      generations += 1;
+      const body = JSON.parse(String(init?.body || '{}')) as { ref_media_ids?: string[] };
+      if (body.ref_media_ids?.[0] === 'stale-media') {
+        return Response.json({ detail: "Media not found in history.json (media_id='stale-media'). Upload or generate it again, then retry." }, { status: 404 });
+      }
+      assert.deepEqual(body.ref_media_ids, ['fresh-media']);
+      return Response.json({ data: [{ b64_json: Buffer.alloc(128, 9).toString('base64') }] });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  try {
+    await generateGoogleFlowImage('Recovered reference shot', output, { referenceImagePath: reference });
+    assert.equal(uploads, 2);
+    assert.equal(generations, 2);
     assert.equal((await readFile(output)).length, 128);
   } finally {
     globalThis.fetch = originalFetch;
@@ -161,6 +255,7 @@ test('Flow Agent batches four image alternatives into one generation request', a
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
+    if (url.endsWith('/v1/credits')) return Response.json({ clients: [{ ok: true }] });
     generationRequests += 1;
     const body = JSON.parse(String(init?.body || '{}')) as { n?: number };
     assert.equal(body.n, 4);
@@ -170,6 +265,91 @@ test('Flow Agent batches four image alternatives into one generation request', a
     await generateGoogleFlowImages('Four distinct character alternatives', outputs);
     assert.equal(generationRequests, 1);
     for (let index = 0; index < outputs.length; index += 1) assert.equal((await readFile(outputs[index]))[0], index + 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('primary plus same-profile linked Flow account contribute four targeted slots', async () => {
+  const originalFetch = globalThis.fetch;
+  const directory = await mkdtemp(path.join(tmpdir(), 'autosub-flow-account-pool-'));
+  const active = new Map<string, number>();
+  const peak = new Map<string, number>();
+  const seen: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true, clients: [
+      { client_id: 'legacy-primary', state: 'idle', has_flow_key: true },
+      { client_id: 'account-aaaaaaaaaaaa', state: 'idle', has_flow_key: true },
+    ] });
+    if (url.endsWith('/v1/images/generations')) {
+      const clientId = String((init?.headers as Record<string, string>)?.['X-Client-Id'] || '');
+      assert.ok(clientId === 'legacy-primary' || clientId === 'account-aaaaaaaaaaaa');
+      seen.push(clientId);
+      const now = (active.get(clientId) || 0) + 1;
+      active.set(clientId, now);
+      peak.set(clientId, Math.max(peak.get(clientId) || 0, now));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      active.set(clientId, Math.max(0, (active.get(clientId) || 1) - 1));
+      return Response.json({ data: [{ b64_json: Buffer.alloc(128, 5).toString('base64') }] });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  try {
+    await Promise.all(Array.from({ length: 4 }, (_, index) => generateGoogleFlowImage(
+      `Parallel account shot ${index + 1}`,
+      path.join(directory, `shot-${index + 1}.png`),
+    )));
+    assert.equal(seen.length, 4);
+    assert.equal(seen.filter((id) => id === 'legacy-primary').length, 2);
+    assert.equal(seen.filter((id) => id === 'account-aaaaaaaaaaaa').length, 2);
+    assert.ok((peak.get('legacy-primary') || 0) <= 2);
+    assert.ok((peak.get('account-aaaaaaaaaaaa') || 0) <= 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('linked Flow accounts upload and reuse account-scoped reference media ids', async () => {
+  const originalFetch = globalThis.fetch;
+  const directory = await mkdtemp(path.join(tmpdir(), 'autosub-flow-linked-reference-scope-'));
+  const reference = path.join(directory, 'reference.png');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  await writeFile(reference, png);
+  const uploads = new Map<string, number>();
+  const generationRefs = new Map<string, string>();
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true, clients: [
+      { client_id: 'account-one', state: 'idle', has_flow_key: true },
+      { client_id: 'account-two', state: 'idle', has_flow_key: true },
+    ] });
+    const clientId = String((init?.headers as Record<string, string>)?.['X-Client-Id'] || '');
+    if (url.endsWith('/v1/upload')) {
+      assert.ok(clientId === 'account-one' || clientId === 'account-two');
+      uploads.set(clientId, (uploads.get(clientId) || 0) + 1);
+      return Response.json({ media_id: `media-${clientId}` });
+    }
+    if (url.endsWith('/v1/images/generations')) {
+      const body = JSON.parse(String(init?.body || '{}')) as { ref_media_ids?: string[] };
+      assert.ok(clientId === 'account-one' || clientId === 'account-two');
+      assert.deepEqual(body.ref_media_ids, [`media-${clientId}`]);
+      generationRefs.set(clientId, body.ref_media_ids![0]);
+      return Response.json({ data: [{ b64_json: Buffer.alloc(128, generationRefs.size).toString('base64') }] });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  try {
+    await Promise.all([
+      generateGoogleFlowImage('Same reference one', path.join(directory, 'one.png'), { referenceImagePath: reference }),
+      generateGoogleFlowImage('Same reference two', path.join(directory, 'two.png'), { referenceImagePath: reference }),
+    ]);
+    assert.equal(uploads.get('account-one'), 1);
+    assert.equal(uploads.get('account-two'), 1);
+    assert.equal(generationRefs.size, 2);
+    assert.notEqual(generationRefs.get('account-one'), generationRefs.get('account-two'));
   } finally {
     globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });

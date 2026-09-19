@@ -77,6 +77,6 @@ void Promise.allSettled([ensureCapCutTtsRuntime(), ensureVieneuRuntime(), ensure
   results.forEach((result, index) => {
     const name = ['CapCut TTS', 'VieNeu', 'Flow Agent'][index];
     if (result.status === 'fulfilled') app.log.info(`${name} runtime sẵn sàng.`);
-    else app.log.warn(`${name} chưa tự cài được: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+    else app.log.warn(`${name} chưa sẵn sàng lúc khởi động: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
   });
 });

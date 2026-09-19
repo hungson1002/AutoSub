@@ -2,6 +2,7 @@
 // Never equate a /u/N browser slot with the identity of a Labs session.
 let accountSyncPending = null;
 let accountSyncTabId = null;
+let linkedAccountSyncTargetId = null;
 let lastAccountSignIn = { email: null, at: 0 };
 let flowSessionStatus = { status: 'unverified', email: null };
 
@@ -38,7 +39,7 @@ async function fetchLabsSession() {
   return response.json();
 }
 
-async function openMatchingLabsSignIn(email, flowUrl) {
+async function openMatchingLabsSignIn(email, flowUrl, active = true) {
   // One normal OAuth navigation, not a retry loop or automated consent.
   if (accountSyncTabId !== null) {
     try { await chrome.tabs.get(accountSyncTabId); return; }
@@ -69,7 +70,66 @@ async function openMatchingLabsSignIn(email, flowUrl) {
   // Allocate before navigating, so the callback tab cannot steal selection.
   const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
   accountSyncTabId = tab.id;
-  await chrome.tabs.update(tab.id, { url: destination.href, active: true });
+  await chrome.tabs.update(tab.id, { url: destination.href, active });
+}
+
+async function closeLinkedAccountSyncTab(accountId) {
+  if (linkedAccountSyncTargetId !== accountId || accountSyncTabId === null) return;
+  const syncId = accountSyncTabId;
+  accountSyncTabId = null;
+  linkedAccountSyncTargetId = null;
+  await chrome.tabs.remove(syncId).catch(() => {});
+}
+
+async function cancelLinkedAccountSync(accountId) {
+  if (linkedAccountSyncTargetId !== accountId) return;
+  await closeLinkedAccountSyncTab(accountId);
+  lastAccountSignIn = { email: null, at: 0 };
+}
+
+async function refreshLinkedAccountSession(account, allowSignIn = false) {
+  if (!account?.tabId) return { status: 'missing_tab' };
+  try {
+    const identity = await readFlowIdentity(account.tabId);
+    const identityAccount = flowAccountFromUrl(identity.url);
+    if (account.flowAccount && identityAccount
+        && canonicalFlowAccount(identityAccount) !== canonicalFlowAccount(account.flowAccount)) {
+      return { status: 'account_changed' };
+    }
+    const email = normalizeFlowEmail(identity.email) || normalizeFlowEmail(account.email);
+    if (!email) return { status: 'identity_unavailable' };
+    account.email = email;
+    account.flowUrl = identity.url || account.flowUrl;
+    account.flowAccount = identityAccount || account.flowAccount;
+    await persistLinkedAccounts();
+
+    const session = await fetchLabsSession();
+    const sessionEmail = normalizeFlowEmail(session?.user?.email);
+    if (sessionEmail === email && typeof session?.access_token === 'string'
+        && captureLinkedAccountToken(account, 'Bearer ' + session.access_token, 'labs_session')) {
+      await closeLinkedAccountSyncTab(account.id);
+      return { status: 'ready', email };
+    }
+
+    if (!allowSignIn) return {
+      status: sessionEmail && sessionEmail !== email ? 'account_mismatch' : 'sign_in_required',
+      email,
+      labsEmail: sessionEmail,
+    };
+
+    // Labs owns one cookie session per browser profile. Switch that session to
+    // this Google account only long enough to obtain its access token, then keep
+    // the token bound to the linked account object while moving to the next one.
+    linkedAccountSyncTargetId = account.id;
+    await openMatchingLabsSignIn(email, account.flowUrl, false);
+    return { status: 'sign_in_started', email };
+  } catch (error) {
+    return {
+      status: 'session_sync_failed',
+      error: error?.message?.startsWith('LABS_') || error?.message === 'UNEXPECTED_SIGNIN_DESTINATION'
+        ? error.message : 'SESSION_CHECK_FAILED',
+    };
+  }
 }
 
 async function refreshSelectedAccountSession(allowSignIn = false) {

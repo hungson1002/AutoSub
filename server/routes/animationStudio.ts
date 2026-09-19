@@ -9,7 +9,7 @@ import {
   listAnimationProjectVersions,
   restoreAnimationProjectVersion,
 } from '../services/animationProjects';
-import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene, generateAnimationCharacterOptions, retryMissingAnimationImages } from '../services/animationDirector';
+import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene, generateAnimationCharacterOptions, generateAnimationThumbnailOptions, retryMissingAnimationImages } from '../services/animationDirector';
 import { enqueueAnimationProjectRender, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
 import { generateAnimationAsset, generateAnimationNarration, getAnimationAssetFile, listAnimationAssets, registerAnimationAsset, resolveAnimationAssets, updateAnimationAsset } from '../services/animationAssets';
 import { autoFixAnimationQuality, checkAnimationQuality } from '../services/animationQuality';
@@ -33,6 +33,16 @@ export async function animationStudioRoutes(app: FastifyInstance) {
     reply.raw.once('close', abortDisconnectedClient);
     try { return await generateAnimationCharacterOptions(request.body as Parameters<typeof generateAnimationCharacterOptions>[0], controller.signal); }
     catch (error) { return reply.code(400).send({ error: message(error, 'Không thể tạo các lựa chọn nhân vật.') }); }
+    finally { clearTimeout(timeout); request.raw.off('aborted', abortDisconnectedClient); reply.raw.off('close', abortDisconnectedClient); }
+  });
+  app.post('/api/animation-studio/thumbnails', async (request, reply) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error('Tạo thumbnail quá 6 phút.')), 6 * 60_000);
+    const abortDisconnectedClient = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    request.raw.once('aborted', abortDisconnectedClient);
+    reply.raw.once('close', abortDisconnectedClient);
+    try { return await generateAnimationThumbnailOptions(request.body as Parameters<typeof generateAnimationThumbnailOptions>[0], controller.signal); }
+    catch (error) { return reply.code(400).send({ error: message(error, 'Không thể tạo thumbnail cho video.') }); }
     finally { clearTimeout(timeout); request.raw.off('aborted', abortDisconnectedClient); reply.raw.off('close', abortDisconnectedClient); }
   });
   app.get('/api/animation-studio/director-jobs', async (request) => animationDirectorJobs.list((request.query as { projectId?: string }).projectId));
