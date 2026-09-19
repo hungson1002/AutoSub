@@ -44,15 +44,15 @@
 .studio-preview-first .animation-director-prompt .sr-only { position: static; width: auto; height: auto; clip: auto; white-space: normal; display: block; margin-bottom: 8px; color: #b6c1cd; font-size: 12px; }
 .studio-preview-first .animation-director-prompt textarea { height: 116px; min-height: 116px; max-height: 240px; resize: vertical; font-size: 13px; line-height: 1.6; }
 .studio-preview-first .animation-director-options { display: flex; flex-direction: column; align-items: stretch; gap: 14px; }
-.animation-director-job { display: grid; gap: 8px; min-width: 0; margin-top: 12px; }
-.animation-director-job p { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.animation-director-job { display: grid; gap: 10px; min-width: 0; padding: 12px; border: 1px solid rgba(255,138,69,.3); border-radius: 9px; background: linear-gradient(135deg, rgba(255,138,69,.1), rgba(17,25,35,.96) 68%); }
+.animation-director-job p { margin: 0; color: #e9eef3; font-size: 12px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
 .animation-director-progress { display: grid; gap: 6px; min-width: 0; }
-.animation-director-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #aebdcb; font-size: 11px; }
-.animation-director-progress-head span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.animation-director-progress-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; color: #aebdcb; font-size: 11px; line-height: 1.4; }
+.animation-director-progress-head span { min-width: 0; overflow-wrap: anywhere; }
 .animation-director-progress-head strong { flex: 0 0 auto; color: #ffd2b6; font-variant-numeric: tabular-nums; }
 .animation-director-progress-track { height: 7px; overflow: hidden; border: 1px solid #344353; border-radius: 999px; background: #0d151e; }
 .animation-director-progress-track > span { display: block; height: 100%; min-width: 0; border-radius: inherit; background: linear-gradient(90deg, #ff7d3b, #ffad70); transition: width .25s ease; }
-.animation-director-job .button { min-height: 44px; white-space: normal; }
+.animation-director-job .button { width: 100%; min-width: 0; min-height: 38px; white-space: normal; line-height: 1.35; }
 .studio-preview-first .animation-duration { display: grid !important; grid-template-columns: minmax(0, 1fr) 56px auto; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
 .studio-preview-first .animation-duration > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .studio-preview-first .animation-duration input { width: 56px; min-width: 0; font-size: 13px; }
@@ -142,8 +142,9 @@
 .studio-preview-first .animation-ratio-buttons button[aria-pressed="true"] { color: #ffd3b9; border-color: #ba7448; background: #30251f; }
 .studio-preview-first .animation-voiceover button { width: 100%; height: 36px; font-size: 12px; margin-top: 8px; }
 .animation-director-actions-bottom { display: grid; gap: 10px; padding: 14px 16px 18px; border-top: 1px solid var(--studio-line); background: rgba(255,255,255,.012); }
-.animation-director-actions-bottom > .button { width: 100%; min-height: 42px; margin: 0; font-size: 12px; }
+.animation-director-actions-bottom > .button { width: 100%; min-width: 0; min-height: 42px; margin: 0; padding: 10px 12px; font-size: 12px; line-height: 1.35; text-align: center; white-space: normal; overflow-wrap: anywhere; }
 .animation-director-actions-bottom > .button.primary { min-height: 52px; font-size: 13px; font-weight: 700; }
+.animation-director-actions-bottom > .button.primary.is-loading { color: #ffe0ca; border: 1px solid rgba(255,177,125,.45); background: linear-gradient(135deg, #8d4c2c, #683922); box-shadow: none; cursor: progress; opacity: 1; }
 .animation-director-actions-bottom .animation-open-saved-result { border: 1px solid rgba(91,217,159,.36); background: rgba(91,217,159,.07); color: #bdf5d8; }
 .animation-director-actions-bottom .animation-thumbnail-tool { order: initial; }
 .studio-preview-first .animation-workspace, .studio-preview-first .animation-workspace:not(.has-selection) { grid-column: -2; grid-row: 2; grid-template-columns: 188px minmax(0, 1fr); }

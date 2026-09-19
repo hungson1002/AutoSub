@@ -465,17 +465,20 @@ export async function flowAgentStatus(signal?: AbortSignal) {
   const readStatus = async () => {
     const deadline = AbortSignal.timeout(5_000);
     const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
-    const response = await fetch(`${baseUrl()}/health`, { signal: requestSignal, headers: headers() });
-    const health = await parseResponse<FlowAgentHealth>(response);
+    const [health, isolatedWorkers] = await Promise.all([
+      fetch(`${baseUrl()}/health`, { signal: requestSignal, headers: headers() }).then((response) => parseResponse<FlowAgentHealth>(response)),
+      listReadyIsolatedFlowWorkers().catch(() => []),
+    ]);
     const linkedReady = (health.clients || []).some((client) => client.has_flow_key === true);
-    const extensionConnected = Boolean(health.extension_connected) || (health.clients || []).length > 0;
+    const isolatedReady = isolatedWorkers.length > 0;
+    const extensionConnected = Boolean(health.extension_connected) || (health.clients || []).length > 0 || isolatedReady;
     // The legacy primary client can legitimately have no token while seven
     // linked same-profile accounts are fully authenticated. Treat the linked
     // pool as the real session source instead of failing preflight because the
     // primary top-level has_flow_key flag is false.
-    const hasFlowKey = Boolean(health.has_flow_key) || linkedReady;
-    const poolHealthy = health.status === 'healthy' || linkedReady;
-    return { installed: true, connected: poolHealthy && extensionConnected && hasFlowKey, extensionConnected, hasFlowKey, status: linkedReady ? 'healthy' : (health.status || 'unknown'), transport: health.transport || 'none', url: baseUrl() };
+    const hasFlowKey = Boolean(health.has_flow_key) || linkedReady || isolatedReady;
+    const poolHealthy = health.status === 'healthy' || linkedReady || isolatedReady;
+    return { installed: true, connected: poolHealthy && extensionConnected && hasFlowKey, extensionConnected, hasFlowKey, status: linkedReady || isolatedReady ? 'healthy' : (health.status || 'unknown'), transport: isolatedReady ? 'isolated' : (health.transport || 'none'), url: baseUrl() };
   };
   try {
     return await readStatus();

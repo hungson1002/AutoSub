@@ -523,6 +523,18 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể mở project đã lưu.'), 'error'); }
     finally { setLoadingProjects(false); }
   };
+  const ensureFlowReady = async () => {
+    if (!usingFlowAgentAssets || flowAgent?.connected) return true;
+    try {
+      const status = await api.refreshFlowAgent();
+      setFlowAgent(status);
+      if (!status.connected) throw new Error('Flow Agent đã nối extension nhưng chưa xác thực được phiên Google Flow.');
+      return true;
+    } catch (error) {
+      setDirectorError(friendlyErrorMessage(error, 'Nano Banana 2 chưa sẵn sàng.'));
+      return false;
+    }
+  };
   const save = async () => {
     setSaving(true);
     try {
@@ -548,6 +560,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       return;
     }
     if (!ttsProvider || !ttsAssignment?.model) { setDirectorError('Hãy cấu hình provider/model TTS để tool tự tạo voiceover.'); return; }
+    if (autoGenerateAssets && !(await ensureFlowReady())) return;
     if (autoGenerateAssets && !characterReference && !selectedCharacterAssetId) { await prepareCharacterOptions(); return; }
     const selectedVoice = ttsVoice || ttsProvider.voices?.[0]?.id || '';
     setDirectorError(''); setDirectorWarning(''); setDirecting(true);
@@ -760,7 +773,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         {showSubtitles && <label className="animation-subtitle-size"><span>Cỡ chữ</span><input aria-label="Cỡ chữ phụ đề" type="number" min="16" max="120" value={subtitleFontSize} onChange={(event) => updateSubtitleFontSize(Math.max(16, Math.min(120, Number(event.target.value) || 16)))} /></label>}
         {showSubtitles && subtitleLayer && <button className="button quiet animation-edit-subtitle" type="button" onClick={() => setSelectedLayerId(subtitleLayer.id)}>Sửa câu hiện tại</button>}
         <label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tạo ảnh theo từng nhịp giải thích</span></label>
-        {autoGenerateAssets && <><select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => { const value = event.target.value; setImageProviderId(value); setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1'); setCharacterOptions([]); setSelectedCharacterAssetId(''); }}><option value="flow-agent">Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : ' · chưa kết nối'}</option>{providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{!usingFlowAgentAssets && <small className="animation-reference-note">Ảnh tham chiếu nhân vật hiện cần Nano Banana 2.</small>}</>}
+        {autoGenerateAssets && <><select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => { const value = event.target.value; setImageProviderId(value); setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1'); setCharacterOptions([]); setSelectedCharacterAssetId(''); }}><option value="flow-agent">Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : flowAgent?.extensionConnected ? ' · đang xác thực' : ' · chưa kết nối'}</option>{providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{!usingFlowAgentAssets && <small className="animation-reference-note">Ảnh tham chiếu nhân vật hiện cần Nano Banana 2.</small>}</>}
         {autoGenerateAssets && <div className="animation-character-picker">
           <div className="animation-character-picker-head"><span>Nhân vật và phong cách</span>{(characterReference || selectedCharacterAssetId) && <button type="button" onClick={() => { setCharacterReference(undefined); setSelectedCharacterAssetId(''); }}>Đổi lựa chọn</button>}</div>
           {characterReference ? <div className="animation-character-reference"><button type="button" aria-label="Xem lớn ảnh nhân vật tham chiếu" onClick={() => setCharacterPreview({ name: characterReference.name, uri: animationAssetUrl(characterReference.uploadId) })}><img src={animationAssetUrl(characterReference.uploadId)} alt="" /></button><span><b>Ảnh của bạn</b>{characterReference.name}</span></div> : selectedCharacter ? <div className="animation-character-reference"><button type="button" aria-label={`Xem lớn ${selectedCharacter.name}`} onClick={() => setCharacterPreview({ id: selectedCharacter.id, name: selectedCharacter.name, uri: selectedCharacter.uri })}><img src={selectedCharacter.uri} alt="" /></button><span><b>Đã chọn</b>{selectedCharacter.name}</span></div> : <label className="animation-character-upload"><Image size={16} aria-hidden="true" /><span>Tải ảnh nhân vật của bạn</span><input type="file" accept="image/png,image/jpeg,image/webp" disabled={preparingCharacters} onChange={(event) => { void uploadCharacterReference(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label>}
@@ -768,15 +781,6 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
           {!characterReference && characterOptions.length > 0 && <><div className="animation-character-options" role="radiogroup" aria-label="Chọn nhân vật">{characterOptions.map((asset) => <article className={selectedCharacterAssetId === asset.id ? 'selected' : ''} key={asset.id}><button className="animation-character-thumb" type="button" aria-label={`Xem lớn ${asset.name}`} onClick={() => setCharacterPreview({ id: asset.id, name: asset.name, uri: asset.uri })}><img src={asset.uri} alt="" /><span>{asset.name}</span></button><button className="animation-character-select" type="button" role="radio" aria-checked={selectedCharacterAssetId === asset.id} onClick={() => setSelectedCharacterAssetId(asset.id)}>{selectedCharacterAssetId === asset.id ? 'Đã chọn' : 'Chọn'}</button></article>)}</div><button className="animation-character-regenerate" type="button" onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng lượt tạo mới' : 'Tạo lại 4 phương án'}</button></>}
         </div>}
       </div>
-      {directorJob && <div className="animation-director-job">
-        <p role="status" aria-live="polite">{directorJob.stage}</p>
-        <div className="animation-director-progress" aria-label={`Tiến trình ${Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%`}>
-          <div className="animation-director-progress-head"><span>{directorJob.status === 'completed' && directorJob.progressTotal ? `${directorJob.progressTotal}/${directorJob.progressTotal} ảnh đã xong` : directorJob.progressLabel || (directorJob.progressTotal !== undefined && directorJob.progressCurrent !== undefined ? `${directorJob.progressCurrent}/${directorJob.progressTotal} ảnh đã xong` : 'Đang xử lý')}</span><strong>{Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%</strong></div>
-          <div className="animation-director-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0, Math.min(100, directorJob.progressPercent || 0))}><span style={{ width: `${Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%` }} /></div>
-        </div>
-        {directing && <button className="button quiet" type="button" onClick={() => void cancelDirector()}>Dừng dựng animation</button>}
-        {['failed', 'interrupted', 'cancelled'].includes(directorJob.status) && <button className="button quiet" type="button" onClick={() => void resumeDirector()}>Tiếp tục job đã lưu</button>}
-      </div>}
       {directorError && <div className="animation-director-error" role="alert"><details><summary>Lỗi hoặc gián đoạn kết nối. Xem chi tiết</summary><p>{directorError}</p></details><button type="button" aria-label="Đóng thông báo lỗi" onClick={() => setDirectorError('')}><X size={14} aria-hidden="true" /></button></div>}
       {directorWarning && <div className="animation-director-error warning" role="status"><details><summary>{directorWarningTitle}</summary><p>{directorWarning}</p></details>{/thiếu hình|không tạo được ảnh|ảnh minh họa/i.test(directorWarning) && <button className="button primary animation-retry-missing" type="button" disabled={retryingMissingImages || !flowAgent?.connected} onClick={() => void retryMissingImages()}><RefreshCw size={14} aria-hidden="true" />{retryingMissingImages ? 'Đang tạo lại…' : 'Tạo lại ảnh lỗi'}</button>}<button type="button" aria-label="Đóng cảnh báo" onClick={() => setDirectorWarning('')}><X size={14} aria-hidden="true" /></button></div>}
     </div>
@@ -826,7 +830,16 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       <div className="animation-voiceover"><button type="button" disabled={creatingVoiceover} onClick={() => void createVoiceover()}>{creatingVoiceover ? 'Đang tạo…' : 'Tạo lại voiceover'}</button></div>
     </div>
     <div className="animation-director-actions-bottom" aria-label="Hành động tạo video">
-      <button className="button primary" type="button" disabled={directing || preparingCharacters || brief.trim().length < 10 || (autoGenerateAssets && (!usingFlowAgentAssets || !flowAgent?.connected)) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang viết kịch bản, tạo ảnh và lồng tiếng…' : autoGenerateAssets && !characterReference && !selectedCharacterAssetId ? 'Chuẩn bị nhân vật' : 'Bắt đầu tạo video'}</button>
+      <button className={`button primary${directing ? ' is-loading' : ''}`} type="button" disabled={directing || preparingCharacters || brief.trim().length < 10 || (autoGenerateAssets && !usingFlowAgentAssets) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang dựng video…' : autoGenerateAssets && !characterReference && !selectedCharacterAssetId ? 'Chuẩn bị nhân vật' : 'Bắt đầu tạo video'}</button>
+      {directorJob && <div className="animation-director-job">
+        <p role="status" aria-live="polite">{directorJob.stage}</p>
+        <div className="animation-director-progress" aria-label={`Tiến trình ${Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%`}>
+          <div className="animation-director-progress-head"><span>{directorJob.status === 'completed' && directorJob.progressTotal ? `${directorJob.progressTotal}/${directorJob.progressTotal} ảnh đã xong` : directorJob.progressLabel || (directorJob.progressTotal !== undefined && directorJob.progressCurrent !== undefined ? `${directorJob.progressCurrent}/${directorJob.progressTotal} ảnh đã xong` : 'Đang xử lý')}</span><strong>{Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%</strong></div>
+          <div className="animation-director-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0, Math.min(100, directorJob.progressPercent || 0))}><span style={{ width: `${Math.max(0, Math.min(100, directorJob.progressPercent || 0))}%` }} /></div>
+        </div>
+        {directing && <button className="button quiet" type="button" onClick={() => void cancelDirector()}>Dừng dựng animation</button>}
+        {['failed', 'interrupted', 'cancelled'].includes(directorJob.status) && <button className="button quiet" type="button" onClick={() => void resumeDirector()}>Tiếp tục job đã lưu</button>}
+      </div>}
       {directorJob?.hasResult && <button className="button quiet animation-open-saved-result" type="button" onClick={() => void restoreDirectorResult()}>Mở kết quả đã lưu</button>}
       {(videoHasNarration || thumbnailAssets.length > 0) && <div id="animation-thumbnail-tool" className="animation-thumbnail-tool">
         <div className="animation-thumbnail-head"><span><Image size={15} aria-hidden="true" /> Thumbnail video</span><button className="button quiet" type="button" disabled={generatingThumbnails || directing || !videoHasNarration || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void generateThumbnails()}>{generatingThumbnails ? 'Đang tạo 3 thumbnail…' : thumbnailAssets.length ? 'Tạo lại 3 phương án' : 'Tạo 3 phương án'}</button></div>
