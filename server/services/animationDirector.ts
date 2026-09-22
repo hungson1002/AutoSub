@@ -32,14 +32,19 @@ type VisualBeatMotion = 'push' | 'pull' | 'pan-left' | 'pan-right' | 'drift-up' 
 type VisualBeatTransition = 'cut' | 'match-cut' | 'crossfade';
 type BeatActor = { assetId: string; animation: string; fromX: number; toX: number; y: number };
 type BeatDiagram = { steps: string[]; layout?: 'process' | 'comparison' };
-type DirectorVisualBeat = { narrationCue?: string; action?: string; purpose?: string; visual?: string; motion?: VisualBeatMotion; transition?: VisualBeatTransition; objects?: AnimatedObject[]; actors?: BeatActor[]; diagram?: BeatDiagram };
+type DirectorVisualBeat = { narrationCue?: string; onScreenText?: string; action?: string; purpose?: string; visual?: string; motion?: VisualBeatMotion; transition?: VisualBeatTransition; objects?: AnimatedObject[]; actors?: BeatActor[]; diagram?: BeatDiagram };
 type DirectorSegment = { title?: string; narration?: string; visual?: string; visualDetail?: string; visualBeats?: DirectorVisualBeat[]; motionGraphic?: 'particle' | 'path' | 'focus' | 'none' };
-type DirectorReply = { spriteRequests?: unknown; characterRequests?: Array<{ key: string; name: string; kind: 'stick' | 'robot'; color?: string }>; characterOptions?: Array<{ name?: string; prompt?: string }>; thumbnailOptions?: ThumbnailConceptCandidate[]; name?: string; continuityBible?: string; scenes?: AnimationScene[]; segments?: DirectorSegment[]; assetRequests?: Array<{ key: string; name: string; prompt: string; type?: 'image' | 'background' | 'object' | 'icon' | 'character'; tags?: string[]; style?: string }> };
+type StoryboardShotType = 'establishing' | 'action' | 'detail' | 'over-shoulder' | 'comparison' | 'process' | 'reaction' | 'metaphor';
+type DirectorResearchFact = { claim: string; evidence?: string; source?: string; confidence: 'high' | 'medium' | 'low'; use: 'use' | 'qualify' | 'avoid' };
+export type DirectorNarrativePhase = { phase: string; objective: string; keyClaim?: string; visualAnchor?: string };
+export type DirectorResearchPacket = { centralQuestion: string; thesis: string; audiencePromise: string; sourceQueries: string[]; narrativeArc: DirectorNarrativePhase[]; facts: DirectorResearchFact[]; unknowns: string[]; hookAngles: string[] };
+type DirectorPlanReview = { approved: boolean; severity: 'low' | 'medium' | 'high'; issues: string[]; rewriteInstructions: string[] };
+type DirectorReply = { spriteRequests?: unknown; characterRequests?: Array<{ key: string; name: string; kind: 'stick' | 'robot'; color?: string }>; characterOptions?: Array<{ name?: string; prompt?: string }>; thumbnailOptions?: ThumbnailConceptCandidate[]; name?: string; continuityBible?: string; researchPacket?: DirectorResearchPacket; qualityReview?: DirectorPlanReview; scenes?: AnimationScene[]; segments?: DirectorSegment[]; assetRequests?: Array<{ key: string; name: string; prompt: string; type?: 'image' | 'background' | 'object' | 'icon' | 'character'; tags?: string[]; style?: string }> };
 
 export type LongAnimationSegment = {
   title: string;
   narration: string;
-  visualBeats: Array<{ narrationCue?: string; action?: string; purpose: string; visual: string; motion: VisualBeatMotion; transition: VisualBeatTransition; objects?: AnimatedObject[]; actors?: BeatActor[]; diagram?: BeatDiagram }>;
+  visualBeats: Array<{ narrationCue?: string; onScreenText?: string; action?: string; purpose: string; visual: string; motion: VisualBeatMotion; transition: VisualBeatTransition; objects?: AnimatedObject[]; actors?: BeatActor[]; diagram?: BeatDiagram }>;
   motionGraphic: 'particle' | 'path' | 'focus' | 'none';
 };
 
@@ -47,10 +52,110 @@ type DirectorAssetRequest = NonNullable<DirectorReply['assetRequests']>[number];
 
 const narrationWordCount = (segments: Array<{ narration?: string }>) => segments.reduce((total, segment) => total + String(segment.narration || '').trim().split(/\s+/u).filter(Boolean).length, 0);
 
+const defaultNarrativeArc = (centralQuestion: string, thesis: string): DirectorNarrativePhase[] => [
+  { phase: 'hook', objective: centralQuestion || 'Open with a familiar situation that makes the viewer curious.', visualAnchor: 'A concrete everyday action in a specific setting.' },
+  { phase: 'question', objective: 'Reframe the situation as one clear question the video will answer.', keyClaim: centralQuestion, visualAnchor: 'The viewer notices a contradiction or unexpected change.' },
+  { phase: 'mechanism', objective: 'Explain the causal mechanism in plain language, one link at a time.', keyClaim: thesis, visualAnchor: 'A physical process or relationship shown in the scene.' },
+  { phase: 'example', objective: 'Make the mechanism tangible with one grounded example or comparison.', visualAnchor: 'A before/after or step-by-step situation with a human scale.' },
+  { phase: 'nuance', objective: 'Name the important limitation, exception or reasonable objection.', visualAnchor: 'A second condition or contrasting outcome in the same visual world.' },
+  { phase: 'payoff', objective: 'Answer the opening question and return to the opening image with a useful takeaway.', keyClaim: thesis, visualAnchor: 'A visual callback that shows what changed in the opening situation.' },
+];
+
+export function normalizeResearchPacket(value: unknown): DirectorResearchPacket {
+  const input = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const centralQuestion = String(input.centralQuestion || '').trim().slice(0, 240);
+  const thesis = String(input.thesis || '').trim().slice(0, 360);
+  const facts = Array.isArray(input.facts) ? input.facts.map((item): DirectorResearchFact | undefined => {
+    const fact = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+    const claim = String(fact.claim || '').trim().slice(0, 320);
+    if (!claim) return undefined;
+    const confidence = fact.confidence === 'high' || fact.confidence === 'low' ? fact.confidence : 'medium';
+    const use = fact.use === 'avoid' || fact.use === 'qualify' ? fact.use : 'use';
+    return { claim, evidence: String(fact.evidence || '').trim().slice(0, 500) || undefined, source: String(fact.source || '').trim().slice(0, 240) || undefined, confidence, use };
+  }).filter((item): item is DirectorResearchFact => Boolean(item)).slice(0, 18) : [];
+  const narrativeArc = Array.isArray(input.narrativeArc)
+    ? input.narrativeArc.map((item): DirectorNarrativePhase | undefined => {
+      const phase = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+      const objective = String(phase.objective || '').trim().slice(0, 320);
+      if (!objective) return undefined;
+      return {
+        phase: String(phase.phase || '').trim().toLocaleLowerCase('en').slice(0, 32) || 'explain',
+        objective,
+        keyClaim: String(phase.keyClaim || '').trim().slice(0, 320) || undefined,
+        visualAnchor: String(phase.visualAnchor || '').trim().slice(0, 320) || undefined,
+      };
+    }).filter((item): item is DirectorNarrativePhase => Boolean(item)).slice(0, 8)
+    : [];
+  return {
+    centralQuestion,
+    thesis,
+    audiencePromise: String(input.audiencePromise || '').trim().slice(0, 320) || (thesis ? `By the end, the viewer understands ${thesis}` : ''),
+    sourceQueries: Array.isArray(input.sourceQueries) ? input.sourceQueries.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 8) : [],
+    narrativeArc: narrativeArc.length >= 4 ? narrativeArc : defaultNarrativeArc(centralQuestion, thesis),
+    facts,
+    unknowns: Array.isArray(input.unknowns) ? input.unknowns.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 12) : [],
+    hookAngles: Array.isArray(input.hookAngles) ? input.hookAngles.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 6) : [],
+  };
+}
+
+export function researchBlueprintDirective(packet: DirectorResearchPacket) {
+  return `RESEARCH AND NARRATIVE BLUEPRINT: ${JSON.stringify({
+    centralQuestion: packet.centralQuestion,
+    thesis: packet.thesis,
+    audiencePromise: packet.audiencePromise,
+    sourceQueries: packet.sourceQueries,
+    narrativeArc: packet.narrativeArc,
+    facts: packet.facts,
+    unknowns: packet.unknowns,
+    hookAngles: packet.hookAngles,
+  })}. Treat this as the source of truth. Follow the narrativeArc in order: do not open with a conclusion, skip the mechanism, or end without a callback. Every phase must be audible in the narration and visible in at least one concrete AI-image beat. sourceQueries are research questions, not citations; never turn them into claimed facts. Use only facts with use=use, qualify facts marked qualify, and omit facts marked avoid. If evidence is missing, say what is known and what remains uncertain instead of filling the gap with invented numbers, dates, studies, people or sources.`;
+}
+
+function normalizePlanReview(value: unknown): DirectorPlanReview {
+  const input = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const severity = input.severity === 'high' || input.severity === 'medium' ? input.severity : 'low';
+  return {
+    approved: input.approved !== false,
+    severity,
+    issues: Array.isArray(input.issues) ? input.issues.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 10) : [],
+    rewriteInstructions: Array.isArray(input.rewriteInstructions) ? input.rewriteInstructions.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 10) : [],
+  };
+}
+
 export function characterReferenceDirective(hasReference: boolean) {
   return hasReference
     ? 'CHARACTER REFERENCE HAS HIGHEST PRIORITY: the attached reference image is the single source of truth for every recurring character appearance. Copy the same head shape, facial language, body proportions, clothing silhouette, clothing details, accessories, line weight and accent colors exactly. The reference may be a model sheet with multiple poses; treat those as the SAME character, not alternate designs. Ignore any conflicting appearance words in the storyboard, style preset or continuityBible. Only the pose, action, camera angle and expression may change. Never redesign the character, swap hoodie/shirt/jacket, enlarge the head or eyes into chibi/anime proportions, add/remove hair or accessories, or change rendering style. If the recurring character is not needed in a shot, do not insert them.'
     : 'No external character reference is attached. Recurring characters must still keep one stable design, proportions, clothing and rendering language across the whole video.';
+}
+
+/**
+ * A deterministic shot list keeps the image model from solving every cue with
+ * the same centered mascot on the same empty background. It is deliberately
+ * independent of the model response so retries and checkpoints keep the same
+ * visual grammar without another planning request.
+ */
+export function storyboardShotDirection(index: number, purpose = '') {
+  const normalizedPurpose = String(purpose || '').toLocaleLowerCase('en');
+  let type: StoryboardShotType;
+  if (/comparison|contrast|before|after|versus|difference/.test(normalizedPurpose)) type = 'comparison';
+  else if (/mechanism|process|cause|effect|how/.test(normalizedPurpose)) type = 'process';
+  else if (/hook|opening/.test(normalizedPurpose)) type = index % 2 ? 'action' : 'establishing';
+  else if (/payoff|conclusion|reveal/.test(normalizedPurpose)) type = index % 2 ? 'reaction' : 'metaphor';
+  else {
+    const sequence: StoryboardShotType[] = ['establishing', 'action', 'detail', 'over-shoulder', 'comparison', 'process', 'reaction', 'metaphor'];
+    type = sequence[Math.abs(Math.round(index)) % sequence.length];
+  }
+  const directions: Record<StoryboardShotType, string> = {
+    establishing: 'ESTABLISHING SHOT: use a wide or three-quarter view. Show the story-specific location and the subject inside it, with a readable foreground, midground and background. Let the environment explain where and why this happens.',
+    action: 'ACTION SHOT: use a medium or full-body composition. Show the recurring character or subject performing one visible action with a concrete prop; the pose and interaction must carry the meaning.',
+    detail: 'DETAIL INSERT: use a close-up or macro crop of the exact object, hand, document, product or physical change being discussed. Keep enough contextual surface to avoid an abstract floating object.',
+    'over-shoulder': 'OVER-THE-SHOULDER / POV SHOT: show the subject looking at, choosing, measuring or discovering the relevant object or situation. Use depth and a clear visual line of attention instead of a centered portrait.',
+    comparison: 'COMPARISON SHOT: show two physically distinct states, choices or outcomes in one clean composition, such as left/right spaces or before/after objects. Use position, scale, color and quantity to explain the contrast; do not use runtime graphics or a text-heavy infographic.',
+    process: 'PROCESS SHOT: show the cause and consequence as a concrete spatial sequence or transformation inside the scene. Make the relationship visible through objects, distance, quantity or state change; do not rely on labels or arrows.',
+    reaction: 'REACTION SHOT: show a specific human response caused by the fact just explained, framed close or medium-close. Use expression, posture and the surrounding situation; avoid a generic smiling mascot on a blank background.',
+    metaphor: 'CONCRETE METAPHOR SHOT: turn the idea into one memorable physical situation that remains understandable without words. Keep the metaphor grounded in the topic and compose it as a full scene, not floating symbols or random icons.',
+  };
+  return { type, instruction: directions[type] };
 }
 
 export type VisualTextLanguage = 'Vietnamese' | 'English';
@@ -67,15 +172,16 @@ export function visualTextDirective(language: VisualTextLanguage = 'English') {
   const languageRule = language === 'Vietnamese'
     ? 'The video language is VIETNAMESE. Every intentional word or phrase rendered inside an image MUST be Vietnamese. Translate generic English labels such as SALE, FREE, DEAL, BUY or SAVE into natural Vietnamese. Numbers, currency symbols, percentages, arrows, product/brand proper nouns and standard units may remain as symbols/names.'
     : 'The video language is ENGLISH. Every intentional word or phrase rendered inside an image MUST be English. Do not insert Vietnamese labels. Numbers, currency symbols, percentages, arrows, product/brand proper nouns and standard units may remain as symbols/names.';
-  return `REFERENCE-LIKE TEXT POLICY: normal storyboard images are visual-first. Across the whole video, AT MOST 20% of visual beats may contain intentional on-image text; roughly four text-bearing shots in a 23-shot minute is enough. Avoid text in adjacent shots. Default to ZERO text whenever the picture can communicate the idea. Text is only a semantic accent, like the reference videos: one keyword/label, one number/percentage/price, or one compact comparison such as 100 → 50. Use at most ONE prominent text element in the composition. HARD LIMIT FOR EVERY TEXT-BEARING SHOT: render only ONE text block, maximum 4 whitespace-separated words and maximum 24 visible characters total, unless the content is purely a short numeric expression. Never render a complete sentence. Never render narration, storyboard instructions, scene titles, explanatory clauses, quoted spoken lines or prompt wording as text in the image. If the only available wording is longer than this limit, OMIT TEXT ENTIRELY and communicate the idea visually. The permitted text must be large enough to read instantly. Never make text carry the explanation. Do not create a title plus secondary labels, multi-line headings, paragraphs, subtitles, detailed receipts, shopping lists, tables, menus full of words, fake app/UI screens, decorative filler text, or tiny unreadable writing. If the image works without words, use no words. ${languageRule}`;
+  return `REFERENCE-LIKE TEXT POLICY: normal storyboard images are visual-first. Across the whole video, AT MOST 20% of visual beats may contain intentional on-image text; use short labels, numbers, arrows and compact comparisons only when they clarify the exact idea being spoken. Avoid text in adjacent shots. Default to ZERO text whenever the picture can communicate the idea. Text is only a semantic accent, like the reference videos: one keyword/label, one number/percentage/price, or one compact comparison such as 100 → 50. Use at most ONE prominent text element in the composition. HARD LIMIT FOR EVERY TEXT-BEARING SHOT: render only ONE text block, maximum 4 whitespace-separated words and maximum 24 visible characters total, unless the content is purely a short numeric expression. Never render a complete sentence. Never render narration, storyboard instructions, scene titles, explanatory clauses, quoted spoken lines or prompt wording as text in the image. If the only available wording is longer than this limit, OMIT TEXT ENTIRELY and communicate the idea visually. The permitted text must be large enough to read instantly. Never make text carry the explanation. Do not create a title plus secondary labels, multi-line headings, paragraphs, subtitles, detailed receipts, shopping lists, tables, menus full of words, fake app/UI screens, decorative filler text, or tiny unreadable writing. If the image works without words, use no words. ${languageRule}`;
 }
 
-export function chooseStoryboardTextBeatIndexes(beats: Array<{ visual?: string; narrationCue?: string }>, ratio = .2) {
+export function chooseStoryboardTextBeatIndexes(beats: Array<{ visual?: string; narrationCue?: string; onScreenText?: string }>, ratio = .2) {
   const limit = Math.max(0, Math.floor(beats.length * Math.max(0, Math.min(.2, ratio))));
   if (!limit) return new Set<number>();
   const scored = beats.map((beat, index) => {
-    const text = `${String(beat.visual || '')} ${String(beat.narrationCue || '')}`.toLocaleLowerCase('vi');
+    const text = `${String(beat.visual || '')} ${String(beat.narrationCue || '')} ${String(beat.onScreenText || '')}`.toLocaleLowerCase('vi');
     let score = 0;
+    if (String(beat.onScreenText || '').trim()) score += 6;
     if (/[₫$€£¥%]|→/.test(text)) score += 5;
     if (/\b(?:sale|free|deal|price|discount|label|sign|text|number|percentage|giảm giá|miễn phí|tặng|giá|nhãn|biển|phần trăm)\b/iu.test(text)) score += 4;
     if (/\b\d+(?:[.,]\d+)?\b/u.test(text)) score += 2;
@@ -139,14 +245,14 @@ export function buildVisualDensityPlan(durationSeconds: number) {
   const openingSeconds = Math.min(15, duration);
   const openingVisualCount = Math.max(1, Math.round(openingSeconds / 2.25));
   const mainSeconds = Math.max(0, duration - openingSeconds);
-  const mainVisualCount = mainSeconds ? Math.max(1, Math.round(mainSeconds / 2.9)) : 0;
+  const mainVisualCount = mainSeconds ? Math.max(1, Math.round(mainSeconds / 3)) : 0;
   const visualDurationsSeconds = [
     ...Array.from({ length: openingVisualCount }, () => openingSeconds / openingVisualCount),
     ...Array.from({ length: mainVisualCount }, () => mainSeconds / mainVisualCount),
   ];
   const visualCount = visualDurationsSeconds.length;
   // A narration scene is only a timing/container boundary. The reference style
-  // changes the actual composition every ~2-3 seconds, so every visual beat must
+  // changes the actual composition every ~3.5-4.5 seconds, so every visual beat must
   // remain eligible for its own generated image. Group a few beats into one scene
   // to avoid fragmenting narration/TTS into hundreds of tiny clips.
   const beatsPerScene = 3;
@@ -500,8 +606,13 @@ export function normalizeLongAnimationSegments(plan: DirectorReply, sceneCount: 
     const title = String(segment.title || `Cảnh ${segmentIndex + 1}`).trim();
     const legacyVisuals = [segment.visual, segment.visualDetail].map((value) => String(value || '').trim()).filter(Boolean);
     const supplied = Array.isArray(segment.visualBeats) ? segment.visualBeats : [];
-    const beats: LongAnimationSegment['visualBeats'] = supplied.map((beat, beatIndex) => ({
-      narrationCue: typeof beat.narrationCue === 'string' && String(segment.narration || '').includes(beat.narrationCue.trim()) && beat.narrationCue.trim().length >= 4 ? beat.narrationCue.trim() : undefined,
+    const beats: LongAnimationSegment['visualBeats'] = supplied.map((beat, beatIndex) => {
+      const narrationCue = typeof beat.narrationCue === 'string' && String(segment.narration || '').includes(beat.narrationCue.trim()) && beat.narrationCue.trim().length >= 4 ? beat.narrationCue.trim() : undefined;
+      const candidateOnScreenText = typeof beat.onScreenText === 'string' ? beat.onScreenText.trim().split(/\s+/).slice(0, 4).join(' ').slice(0, 24) : '';
+      const onScreenText = candidateOnScreenText && narrationCue && narrationCue.toLocaleLowerCase('vi').includes(candidateOnScreenText.toLocaleLowerCase('vi')) ? candidateOnScreenText : undefined;
+      return {
+      narrationCue,
+      onScreenText,
       action: typeof beat.action === 'string' ? beat.action.trim().slice(0, 240) : undefined,
       purpose: String(beat?.purpose || `Nhịp hình ${beatIndex + 1}`).trim(),
       visual: String(beat?.visual || '').trim(),
@@ -513,7 +624,8 @@ export function normalizeLongAnimationSegments(plan: DirectorReply, sceneCount: 
       objects: normalizeAnimatedObjects(beat.objects),
       actors: Array.isArray(beat.actors) ? beat.actors.filter((actor) => actor && typeof actor.assetId === 'string' && typeof actor.animation === 'string' && [actor.fromX, actor.toX, actor.y].every((value) => Number.isFinite(value) && value >= .1 && value <= .9)).slice(0, 3) : undefined,
       diagram: Array.isArray(beat.diagram?.steps) ? { steps: beat.diagram.steps.filter((text) => typeof text === 'string' && text.trim()).map((text) => text.trim().slice(0, 80)).slice(0, beat.diagram.layout === 'comparison' ? 2 : 3), layout: beat.diagram.layout === 'comparison' ? 'comparison' as const : 'process' as const } : undefined,
-    })).filter((beat) => beat.visual || beat.objects?.length || beat.actors?.length || beat.diagram?.steps.length);
+      };
+    }).filter((beat) => beat.visual || beat.objects?.length || beat.actors?.length || beat.diagram?.steps.length);
     for (const visual of legacyVisuals) if (!beats.some((beat) => beat.visual === visual)) beats.push({ purpose: 'Minh họa bổ sung', visual, motion: 'locked', transition: 'cut' });
     // Do not fabricate extra image prompts to meet an arbitrary shot quota.
     const uniqueBeats = beats.filter((beat, index) => beat.objects?.length || beat.actors?.length || beat.diagram?.steps.length || beats.findIndex((other) => other.visual.toLowerCase().replace(/\s+/g, ' ').trim() === beat.visual.toLowerCase().replace(/\s+/g, ' ').trim()) === index);
@@ -585,20 +697,12 @@ export function buildVisualBeatTimeline(input: { sceneIndex: number; durationMs:
   const { sceneIndex, durationMs, width, height, visuals, beats } = input;
   const cueWindows = buildAnimationBeatWindows({ beats, narration: input.narration, durationMs });
   const starts = cueWindows.map((window) => window.startMs);
-  if (durationMs <= Math.max(1, beats.length) * 3000) {
-    for (let index = 1; index < starts.length; index++) {
-      const earliest = Math.max(starts[index - 1] + 1, durationMs - (starts.length - index) * 3000);
-      const latest = Math.min(durationMs - 1, starts[index - 1] + 3000);
-      starts[index] = Math.max(earliest, Math.min(latest, starts[index]));
-    }
-  }
   const windows = cueWindows.map((window, index) => ({
     ...window,
     startMs: starts[index],
     endMs: index + 1 < starts.length ? starts[index + 1] : durationMs,
   }));
   const layers: SceneLayer[] = [];
-  const commands: AnimationCommand[] = [];
   const count = Math.max(1, visuals.length);
   visuals.forEach((visual, beatIndex) => {
     if (!visual) return;
@@ -608,30 +712,24 @@ export function buildVisualBeatTimeline(input: { sceneIndex: number; durationMs:
     const startMs = window.startMs;
     const endMs = beatIndex === count - 1 ? durationMs : window.endMs;
     const beatDuration = Math.max(1, endMs - startMs);
-    const transitionDuration = (transition: VisualBeatTransition | undefined, duration: number) => transition === 'cut'
-      ? 1
-      : transition === 'match-cut'
-        ? Math.min(120, Math.max(60, Math.round(duration * .04)))
-        : Math.min(320, Math.max(160, Math.round(duration * .1)));
-    const transitionMs = transitionDuration(beat?.transition, beatDuration);
-    const nextBeat = beats[beatIndex + 1];
-    const nextTransitionMs = transitionDuration(nextBeat?.transition, Math.max(1, (windows[beatIndex + 1]?.endMs || durationMs) - endMs));
-    const locked = beat?.motion === 'locked';
-    const baseScale = locked ? 1 : beat?.motion?.startsWith('pan-') || beat?.motion?.startsWith('drift-') ? 1.09 : 1.03;
-    layers.push({ id, name: `${beat?.purpose || 'Nhịp hình'} · ${visual.name}`, type: 'image', assetId: visual.id, visible: true, locked: true, zIndex: beatIndex, width: locked ? width : Math.round(width * 1.08), height: locked ? height : Math.round(height * 1.08), transform: { ...defaultTransform(), opacity: beatIndex ? 0 : 1, scale: { x: baseScale, y: baseScale }, position: { x: width / 2, y: height / 2 } } });
-    if (beatIndex > 0) commands.push({ id: `visual-in-${sceneIndex}-${beatIndex}`, type: 'FADE_IN', targetId: id, startMs, durationMs: transitionMs, easing: 'ease-out' });
-    if (beatIndex < count - 1) commands.push({ id: `visual-out-${sceneIndex}-${beatIndex}`, type: 'FADE_OUT', targetId: id, startMs: endMs, durationMs: nextTransitionMs, easing: 'ease-in' });
-    if (beat?.motion === 'push' || beat?.motion === 'pull') {
-      const pulling = beat.motion === 'pull';
-      commands.push({ id: `visual-scale-${sceneIndex}-${beatIndex}`, type: 'SCALE', targetId: id, startMs, durationMs: beatDuration, easing: 'ease-in-out', from: pulling ? { x: 1.1, y: 1.1 } : { x: 1.02, y: 1.02 }, to: pulling ? { x: 1.02, y: 1.02 } : { x: 1.1, y: 1.1 } });
-    } else if (beat?.motion !== 'locked') {
-      const dx = width * .035; const dy = height * .035;
-      const from = beat?.motion === 'pan-left' ? { x: width / 2 + dx, y: height / 2 } : beat?.motion === 'pan-right' ? { x: width / 2 - dx, y: height / 2 } : beat?.motion === 'drift-up' ? { x: width / 2, y: height / 2 + dy } : { x: width / 2, y: height / 2 - dy };
-      const to = { x: width - from.x, y: height - from.y };
-      commands.push({ id: `visual-move-${sceneIndex}-${beatIndex}`, type: 'MOVE', targetId: id, startMs, durationMs: beatDuration, easing: 'ease-in-out', from, to });
-    }
+    // AI images are the complete visual. Keep each still on screen for the
+    // exact narration cue window and let the next still replace it with a cut.
+    // There are deliberately no camera, fade, scale or move commands here.
+    layers.push({ id, name: `AI image · ${visual.name}`, type: 'image', assetId: visual.id, visible: true, locked: true, zIndex: beatIndex, width, height, startMs, durationMs: beatDuration, transform: { ...defaultTransform(), opacity: 1, scale: { x: 1, y: 1 }, rotation: 0, position: { x: width / 2, y: height / 2 } } });
   });
-  return { layers, commands };
+  return { layers, commands: [] as AnimationCommand[] };
+}
+
+function fitStaticImageCueTimings(scene: CompositeScene) {
+  const images = scene.layers.filter((layer) => layer.type === 'image' && layer.startMs !== undefined && layer.durationMs !== undefined);
+  const plannedEnd = Math.max(0, ...images.map((layer) => (layer.startMs || 0) + (layer.durationMs || 0)));
+  if (!images.length || plannedEnd <= 0 || Math.abs(plannedEnd - scene.durationMs) <= 2) return scene.layers;
+  return scene.layers.map((layer) => {
+    if (layer.type !== 'image' || layer.startMs === undefined || layer.durationMs === undefined) return layer;
+    const startMs = Math.max(0, Math.min(scene.durationMs - 1, Math.round(layer.startMs / plannedEnd * scene.durationMs)));
+    const endMs = Math.max(startMs + 1, Math.min(scene.durationMs, Math.round((layer.startMs + layer.durationMs) / plannedEnd * scene.durationMs)));
+    return { ...layer, startMs, durationMs: endMs - startMs };
+  });
 }
 
 async function directLongAnimationProject(input: DirectAnimationInput, brief: string, targetDurationSeconds: number, strictDuration: boolean, checkpointKey: string, onStage: (stage: string) => Promise<void>) {
@@ -640,14 +738,17 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
   const density = buildVisualDensityPlan(targetDurationSeconds);
   const sceneCount = density.sceneCount;
   const visualsPerScene = density.visualsPerScene;
-  const targetWords = Math.round(targetDurationSeconds * 2.25);
+  // Vietnamese TTS counts whitespace-separated syllables. Aim near the
+  // measured pace of the user's reference explainers; the audio remains
+  // authoritative and the requested target remains approximate.
+  const narrationWordsPerSecond = 4.5;
+  const targetWords = Math.round(targetDurationSeconds * narrationWordsPerSecond);
   const targetMs = targetDurationSeconds * 1000;
   const hasCharacterReference = Boolean(input.assetGeneration?.referenceUploadId || input.assetGeneration?.referenceAssetId);
   const characterReferenceRule = characterReferenceDirective(hasCharacterReference);
   const requestedStyle = String(input.project.styleProfile?.style || '').trim();
   const requestedTone = input.project.styleProfile?.tone || 'balanced';
-  const imageTextLanguage = visualTextLanguage(brief);
-  const textRule = visualTextDirective(imageTextLanguage);
+  const textRule = 'AI-IMAGE-ONLY TEXT POLICY: do not create runtime text, keyword overlays, subtitles, labels, captions, charts, UI, arrows, badges, emoji, decorative icons or vector symbols. The generated image must communicate the spoken idea through concrete subjects, actions, objects, setting, composition, lighting and visual cause-and-effect. If the visual prompt explicitly requires a sign, label or symbol as part of the artwork, let the AI render it inside the image; never add a separate editor layer on top.';
   const styleRule = requestedStyle
     ? `USER VISUAL STYLE IS IMMUTABLE: ${requestedStyle}. Apply it to every generated visual; do not replace it with a generic cinematic, 3D, doodle, whiteboard or storybook preset. If this is a stick-figure/mascot style, keep the same head shape, face language, line weight, body proportions, clothing silhouette and accent colors in every recurring appearance; never reinterpret the mascot as chibi, anime, realistic, 3D or a different illustration language. When an external character reference is attached, it overrides generic character appearance hints from this style preset.`
     : 'No explicit visual style was supplied; infer one coherent style from the brief and keep it consistent. Recurring characters must keep the same design language and proportions across every shot.';
@@ -660,43 +761,80 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
         : requestedTone === 'serious'
           ? 'STORY TONE: calm, precise and professional. Prefer clarity and evidence over jokes or hype.'
           : 'STORY TONE: natural and balanced. Keep the explanation conversational, clear and engaging without forcing jokes or hype.';
-  const hybridRule = 'AI-IMAGE-ONLY VISUAL RULE: every visualBeat must contain a complete generated-image prompt in visual. Do not replace storyboard beats with vector-only objects, procedural diagrams, shapes, or empty visual prompts. All meaningful shot changes remain AI-generated still images.';
-  const storyRules = `STORYBOARD CONTRACT: turn the user's input into a narrated visual story. If it is already a detailed script, preserve its facts, order and intent while making it natural to speak. If it is only a premise, invent a complete coherent script. Each segment is a short narration container, not one reusable picture. Split the narration into atomic visual ideas. Every visualBeat must represent the exact idea currently being spoken and should normally be a DISTINCT composition/shot when the subject, relationship, example, location, scale or explanatory function changes. Do not hold one pretty image and simulate coverage with repeated zooms. Reuse a composition only when the spoken idea genuinely stays the same and a focus change communicates new information. narrationCue must be the exact clause where that visual becomes relevant. Prefer literal explanation first: show the actual object, place, action, relationship or comparison being discussed before using metaphor. Use metaphor only when it makes the mechanism clearer. Mix establishing scenes, character actions, object inserts, diagrams/comparisons, maps, process steps and reaction shots according to the narration; never force one visual type. The first 15 seconds may move at 2-2.5 seconds per beat; the main explanation should stay near 2.5-3.5 seconds. Important comparisons or mechanism explanations may use a longer readable hold. Target roughly 20-24 meaningful composition changes per minute overall; do not exceed 25 except a deliberate short montage. Generated bitmap/image shots are STATIC by default: use motion="locked" and do not use push, pull, pan or drift on still illustrations. Do not create Ken Burns zooms to fake animation. Prefer a clean cut to a genuinely different composition when the spoken idea changes. Reserve visible motion for genuinely editable diagram/object/number/reveal techniques when the runtime can execute them; do not manufacture motion on the bitmap itself. Cuts are the normal transition for fast educational explanation; use crossfade only when continuity or passage of time benefits from it. Return a continuityBible that locks recurring character identity, head/face language, clothing, proportions, palette, line weight/render language and world. ${styleRule} ${toneRule} ${characterReferenceRule} ${hasCharacterReference ? 'When writing visual prompts for a recurring referenced character, DO NOT invent or restate clothing, hair, head shape, eye size, body proportions, accessories or character colors. Refer to them simply as the recurring reference mascot/character and specify only pose, action, expression, framing and interaction. The attached reference supplies appearance.' : 'A selected AI character design may be supplied as an identity anchor; do not force that character into every beat.'} ${textRule} ${hybridRule} Prefer comprehension and real shot changes over decorative camera motion.`;
-  brief = `${brief}\n\n${storyRules}`;
-  const checkpoint = await loadAnimationCheckpoint<{ plan: DirectorReply; segments: LongAnimationSegment[]; sceneIds: string[]; narrationDurationsMs?: number[]; narrationRenderSpeed?: number }>(checkpointKey);
+  const hybridRule = 'AI-IMAGE-ONLY VISUAL RULE: every visualBeat must contain a complete, production-ready generated-image prompt in visual. Do not use runtime vector objects, procedural diagrams, shapes, sprites, icons, text or empty visual prompts. If the narration describes a comparison or process, show it as a concrete scene or composition inside the generated image, without labels or overlay graphics. All meaningful shot changes remain AI-generated still images.';
+  const explainerQualityRule = `EXPLAINER QUALITY CONTRACT: If the input is only a topic, write a complete educational story with this order: relatable cold open, one clear question, causal mechanism, concrete numerical example, limitation or nuance, then a short callback conclusion. Keep one thesis throughout instead of listing unrelated facts. If the input is already a script, preserve its facts and intent but rewrite it into natural spoken Vietnamese. Use short sentences, one idea per sentence, and place pauses only at real punctuation; avoid stacking several numbers, claims or metaphors in one breath. Prefer about 12-16 Vietnamese whitespace-separated words per 3-second visual beat, allowing up to 18 only for the opening hook, so the narration stays natural while remaining close to the requested duration. Distinguish analogy from fact and qualify claims containing first, always, everyone, only, invented, or all. Never inherit a title card, subtitle, label or visual idea from another topic: every title and image prompt must be derived from the current brief. The opening title must name the actual topic, not a stale template. End with a direct answer and a visual callback to the opening example.`;
+  const storyRules = `STORYBOARD CONTRACT: turn the user's input into a narrated visual story. If it is already a detailed script, preserve its facts, order and intent while making it natural to speak. If it is only a premise, invent a complete coherent script. Each segment is a short narration container, not one reusable picture. Split the narration into atomic visual ideas. Every visualBeat must represent the exact idea currently being spoken and should normally be a DISTINCT composition/shot when the subject, relationship, example, location, scale or explanatory function changes. Do not hold one pretty image and simulate coverage with repeated zooms. Reuse a composition only when the spoken idea genuinely stays the same and a focus change communicates new information. narrationCue must be the exact clause where that visual becomes relevant. Prefer literal explanation first: show the actual object, place, action, relationship or comparison being discussed before using metaphor. Use metaphor only when it makes the mechanism clearer. Mix establishing scenes, character actions, object inserts, diagrams/comparisons, maps, process steps and reaction shots according to the narration; never force one visual type. The first 15 seconds may move at 2-2.5 seconds per beat; the main explanation should stay near 2.5-3.5 seconds. Important comparisons or mechanism explanations may use a longer readable hold. Target roughly 20-24 meaningful composition changes per minute overall; do not exceed 25 except a deliberate short montage. Generated bitmap/image shots are STATIC by default: use motion="locked" and do not use push, pull, pan or drift on still illustrations. Do not create Ken Burns zooms to fake animation. Prefer a clean cut to a genuinely different composition when the spoken idea changes. Reserve visible motion for genuinely editable diagram/object/number/reveal techniques when the runtime can execute them; do not manufacture motion on the bitmap itself. Use short crossfades for continuing cue changes and reserve hard cuts for deliberate contrast, punchlines or major location changes. Return a continuityBible that locks recurring character identity, head/face language, clothing, proportions, palette, line weight/render language and world. ${styleRule} ${toneRule} ${characterReferenceRule} ${hasCharacterReference ? 'When writing visual prompts for a recurring referenced character, DO NOT invent or restate clothing, hair, head shape, eye size, body proportions, accessories or character colors. Refer to them simply as the recurring reference mascot/character and specify only pose, action, expression, framing and interaction. The attached reference supplies appearance.' : 'A selected AI character design may be supplied as an identity anchor; do not force that character into every beat.'} ${textRule} ${hybridRule} ${explainerQualityRule} Prefer comprehension and real shot changes over decorative camera motion.`;
+  const durationContract = `DURATION GUIDANCE: ${strictDuration ? `the user selected about ${targetDurationSeconds} seconds as a planning reference` : `use about ${targetDurationSeconds} seconds as a planning reference`}. This is an approximate target, not a hard cap. Preserve the complete meaning and conclusion even if the measured Vietnamese TTS ends up somewhat shorter or longer. Keep normal spoken speed around 1.00×; never solve timing by speaking faster, clipping the ending, or adding dead air. Let the measured narration determine the final scene duration. Use one image to support one complete spoken thought; only introduce another image when the narration moves to a genuinely new subject, relationship, example or consequence.`;
+  const shotListRule = 'DIRECTOR SHOT LIST: before writing image prompts, assign each visual beat a deliberate shot role. Rotate through establishing environment, medium character action, object/detail insert, over-the-shoulder or point-of-view, physical comparison, causal process, reaction, and grounded metaphor. The role must fit the narration, but adjacent beats must not all use the same centered character portrait. Use a specific location or surface whenever the topic allows it; vary wide/medium/close scale and camera angle while preserving the same art direction. Backgrounds should carry context and depth, not default to an empty cream canvas. A recurring character can return as an anchor, but should not appear in every frame when an object, environment or detail would explain the sentence better. Never use variety as random decoration: every change must clarify the spoken idea.';
+  brief = `${brief}\n\n${durationContract}\n\n${storyRules}\n\n${shotListRule}`;
+  const referenceVideoRule = `REFERENCE VIDEO PRESENTATION RULE: write like a narrator speaking to one viewer, not like an encyclopedia. Use direct address at meaningful turns: “bạn hãy thử nghĩ…”, “tôi sẽ chỉ cho bạn…”, “để tôi dẫn bạn qua…”, “bạn có để ý…?”. Use present tense, concrete micro-actions and short clauses connected by natural turns such as “nhưng”, “và”, “bây giờ”, “vậy nên”. Ask a question, anticipate the viewer's doubt, then reveal evidence or a consequence. Do not repeat “bạn” mechanically in every sentence. Build the arc as cold open with a familiar action, rewind or reframing, objection, evidence, guided example, causal consequence and callback to the opening. For adjacent beats, create a SHOT FAMILY: keep the same character, place, palette and visual grammar while changing one meaningful variable per frame—pose, hand position, gaze, prop, object state, crop, scale, diagram step or short keyword. These are separate still images that create editorial motion through cuts; never ask one image to do every step. Aim for roughly 1–3 seconds per ordinary beat, 2–4 seconds for a readable explanation, and use longer holds only for an intentional diagram or title card. When the narration says a concrete keyword or number such as “morning”, “tomorrow”, “17 hours” or a contrast, put that exact short token in onScreenText only when it genuinely helps; the image prompt must say what changes from the adjacent frame. onScreenText is not a subtitle and must never be a full sentence.`;
+  const onScreenTextSchemaRule = 'OUTPUT FIELD: every visualBeat may include onScreenText. Set it to one exact short keyword, phrase, number or comparison that appears in that beat narrationCue, or set it to an empty string. Use it only when the reference-like editorial emphasis helps; it is not a subtitle. Keep adjacent beats visually related when they belong to the same shot family, but change one concrete visual variable so the sequence can be cut together as motion.';
+  const cadenceRule = 'NATURAL NARRATION CADENCE: write for a calm human explainer at approximately 4.5 Vietnamese whitespace-separated syllables per second. Let commas, sentence endings, questions and reveals create real breathing room. Do not compress several clauses into one breath, and do not rely on TTS speed changes or dead air to meet the approximate duration.';
+  const vieneuPerformanceRule = 'VIENEU PERFORMANCE: write the narration as something a human would perform aloud, not as a flat article. Vary sentence length, use a real question before a reveal, put a comma or em dash before a turn, and reserve exclamation marks for genuine emphasis. Express feeling through word choice, sentence rhythm and punctuation only. Never add bracketed stage directions, emotion tags or sound effects because they would be read aloud or leak into captions.';
+  const pacingOverrideRule = 'SEMANTIC VISUAL SYNC OVERRIDE: images are illustrations for the narration, not a rapid slideshow and not a fixed-timed slideshow. The planning image count is only a soft estimate; never split or hold a shot just to satisfy images-per-minute. Each visualBeat must represent one coherent spoken idea. Start the image when its exact narrationCue becomes relevant, keep it while that object, mechanism, example or consequence is being explained, and change only when the spoken meaning genuinely changes. A short cue may have a short shot; a long explanation may keep one shot longer. If adjacent cues describe the same visual idea, merge them; if one sentence contains two genuinely different mechanisms or examples, split them at the exact clause. The narration stays continuous at 1.00× and the visual timeline follows the meaning of the words.';
+  const overlayOverrideRule = 'FINAL OVERLAY RULE: do not create runtime text, icon, chart, diagram, sprite, shape or procedural layers. The only visual layer is the generated AI image; the only non-visual layer is the voiceover audio. onScreenText is metadata for the image prompt only and must never become an editor overlay.';
+  const imageOnlySchemaRule = 'IMAGE-ONLY OUTPUT CONTRACT: every visualBeat must have a non-empty, detailed visual prompt. Set onScreenText to one short exact keyword, number or comparison from narrationCue only when an embedded label materially improves comprehension; otherwise use an empty string. Omit objects, actors and diagram. Comparisons and processes must be depicted inside the AI-generated composition; do not create separate runtime labels, arrows, icons, charts or graphics.';
+  const visualProductionOverride = 'AI IMAGE-ONLY EXECUTION: keep the voice natural at 1.00x and let measured narration define duration. Every meaningful visual beat is one complete static AI image held for its narration cue. Use hard cuts only; never add camera push, pull, pan, zoom, fade, transition, sprite, diagram, icon or runtime text layer. Build adjacent shots as a coherent family: same character, setting and palette, with one meaningful change in pose, prop, crop, object state or background. If onScreenText is non-empty, it may appear only as a short label rendered inside the AI artwork; never render narration, subtitles or prompt text as an overlay.';
+  const expressiveNarrationOverride = 'EXPRESSIVE SPOKEN PERFORMANCE OVERRIDE: the script must sound like one thoughtful Vietnamese narrator guiding one viewer, with warmth, curiosity and controlled emphasis. Use natural punctuation as performance direction: commas for small turns, an em dash before a reveal, and a question mark before an answer. Alternate short punchy sentences with slightly longer explanatory sentences. Put the key word near the end of a sentence when emphasis helps. Use direct address only where it feels natural, not as a repeated template. Do not write stage directions, bracketed emotion tags, sound effects, all-caps emphasis or punctuation spam; the voice engine must receive clean spoken Vietnamese. Keep every sentence easy to say in one breath at normal 1.00x speed.';
+  const factualDirectorOverride = 'FACTUAL DIRECTOR OVERRIDE: separate verified facts, reasonable mechanisms and illustrative analogies. Never invent a statistic, date, study, quote, named person or source. If the brief does not provide evidence for a precise claim, explain the mechanism without false precision or qualify the claim in the narration. A memorable hook may be surprising, but it must be honest and paid off by the conclusion.';
+  const visualTypographySafetyRule = 'AI ARTWORK TYPOGRAPHY SAFETY: default to zero readable text inside generated images because image-model lettering is unreliable. Use a short embedded word, number or symbol only when it is essential to the exact explanation and supplied by the narration; never ask the model to render a paragraph, subtitle, title card, UI, table or decorative pseudo-writing. If the concept works without lettering, omit it.';
+  brief = `${brief}\n\n${referenceVideoRule}\n\n${onScreenTextSchemaRule}\n\n${cadenceRule}\n\n${vieneuPerformanceRule}\n\n${pacingOverrideRule}\n\n${overlayOverrideRule}`;
+  const imageOnlyExecutionRule = 'FINAL RENDER CONTRACT: this product exports only a sequence of full-frame AI stills and the voiceover. Ignore any older motion instruction in a prompt, checkpoint or project. Set every visual beat motion to locked, every scene transition to cut, and leave scene.commands and camera.commands empty. Do not create text, icon, shape, chart, diagram, sprite, particle or other runtime overlay layers.';
+  brief = `${brief}\n\n${visualProductionOverride}\n\n${imageOnlyExecutionRule}\n\n${expressiveNarrationOverride}\n\n${factualDirectorOverride}\n\n${visualTypographySafetyRule}`;
+  const checkpoint = await loadAnimationCheckpoint<{ plan: DirectorReply; segments: LongAnimationSegment[]; sceneIds: string[]; narrationDurationsMs?: number[]; narrationRenderSpeed?: number; sceneAssets?: Array<Array<AnimationAsset | null | undefined>> }>(checkpointKey);
   let plan: DirectorReply;
   let segments: LongAnimationSegment[];
   let continuity: string;
   let sceneIds: string[];
+  let researchPacket: DirectorResearchPacket;
+  const directorWarnings: string[] = [];
   let narrationDurationsMs: number[] | undefined;
-  let narrationRenderSpeed = Math.max(.5, Math.min(2, Number(input.narration?.speed) || 1));
+  // The storyboard director always uses the provider's normal speaking rate.
+  // Duration is solved with script length and real measured audio, never by
+  // speeding up the voice to force a timeline.
+  const narrationRenderSpeed = 1;
   if (checkpoint) {
     plan = checkpoint.plan;
     segments = checkpoint.segments;
     sceneIds = checkpoint.sceneIds;
     narrationDurationsMs = Array.isArray(checkpoint.narrationDurationsMs) ? checkpoint.narrationDurationsMs.map(Number) : undefined;
-    if (Number.isFinite(checkpoint.narrationRenderSpeed) && Number(checkpoint.narrationRenderSpeed) > 0) narrationRenderSpeed = Math.max(.5, Math.min(2, Number(checkpoint.narrationRenderSpeed)));
     if (!Array.isArray(segments) || segments.length !== sceneCount || sceneIds.length !== segments.length) throw new Error('Checkpoint animation không hợp lệ; không tự tạo lại tài nguyên.');
     continuity = String(plan.continuityBible || '').trim().slice(0, 1800);
+    researchPacket = normalizeResearchPacket(plan.researchPacket);
   } else {
     const chunks = Math.ceil(sceneCount / 20);
     const plannedSegments: DirectorSegment[] = [];
-    plan = { segments: [] };
+    await onStage('Dang lap ho so thong tin va kiem tra do chinh xac');
+    const researchRaw = await chat(input.provider, input.model, [{
+      role: 'system',
+      content: 'You are the factual research editor and narrative architect for an educational video. Return compact JSON only with shape {"researchPacket":{"centralQuestion":"","thesis":"","audiencePromise":"","sourceQueries":[],"narrativeArc":[{"phase":"hook|question|mechanism|example|nuance|payoff","objective":"","keyClaim":"","visualAnchor":""}],"facts":[{"claim":"","evidence":"","source":"","confidence":"high|medium|low","use":"use|qualify|avoid"}],"unknowns":[],"hookAngles":[]}}. First identify the strongest defensible facts needed to answer the brief, then design a six-phase arc in this order: familiar hook, one question, causal mechanism, grounded example, limitation or objection, answer and callback. The audiencePromise must say what the viewer will understand by the end. sourceQueries are questions that would need external research; they are not evidence and must never be presented as citations. Do not invent citations, URLs, studies, dates, statistics, named people or source titles. Only fill source when it is explicitly supplied in the brief; otherwise leave it empty and lower confidence. Any precise/current claim without support must be qualified or marked avoid. Put unresolved points in unknowns. Hook angles must be honest questions, contrasts or consequences grounded in the packet, never fake shock claims. Keep this compact.'
+    }, { role: 'user', content: brief }], undefined, 8192);
+    researchPacket = normalizeResearchPacket(jsonFromDirectorReply(researchRaw).researchPacket);
+    if (!researchPacket.facts.length) directorWarnings.push('Ho so thong tin chua co du kien co the kiem chung; storyboard se luot bo cac khang dinh cu the khong co can cu.');
+    if (researchPacket.unknowns.length) directorWarnings.push(`Ho so thong tin con ${researchPacket.unknowns.length} diem chua ro; noi dung se duoc noi co dieu kien thay vi khang dinh tuyet doi.`);
+    plan = { segments: [], researchPacket };
     continuity = '';
+    const factualPacketRule = researchBlueprintDirective(researchPacket);
+    brief = `${brief}\n\nNARRATIVE ARC FOR THIS STORYBOARD: ${JSON.stringify(researchPacket.narrativeArc)}. Write one connected story that moves from hook and question to mechanism, example, nuance and payoff. Do not treat the arc as six title cards; make each phase emerge through spoken narration and concrete images.`;
     for (let chunkIndex = 0; chunkIndex < chunks; chunkIndex++) {
       const chunkSize = Math.min(20, sceneCount - plannedSegments.length);
       const chunkStart = plannedSegments.length;
       const chunkVisualCounts = visualsPerScene.slice(chunkStart, chunkStart + chunkSize);
-      const chunkWordTargets = density.sceneDurationsSeconds.slice(chunkStart, chunkStart + chunkSize).map((seconds) => Math.max(8, Math.round(seconds * 2.25)));
+      const chunkWordTargets = density.sceneDurationsSeconds.slice(chunkStart, chunkStart + chunkSize).map((seconds) => Math.max(12, Math.round(seconds * narrationWordsPerSecond)));
       await onStage(`Đang viết storyboard ${chunkIndex + 1}/${chunks}`);
       const prior = plannedSegments.at(-1);
-      const planRaw = await chat(input.provider, input.model, [{ role: 'system', content: `You are a storyboard director. Return compact JSON only: {"name":"","continuityBible":"","segments":[{"title":"","narration":"a short connected narration passage","visualBeats":[{"purpose":"hook|explain|comparison|mechanism|payoff","narrationCue":"exact clause from narration where this shot becomes relevant","visual":"a complete prompt for this distinct shot/composition, or empty when a procedural beat fully explains the idea","motion":"locked","transition":"cut|match-cut|crossfade","objects":[{"name":"","shape":"ellipse|rectangle","fill":"#RRGGBB","width":0.12,"height":0.12,"path":[{"t":0,"x":0.2,"y":0.4,"rotation":0},{"t":1,"x":0.7,"y":0.4,"rotation":0}]}],"diagram":{"layout":"process|comparison","steps":["short label"]}}],"motionGraphic":"none"}]}.  This is chunk ${chunkIndex + 1}/${chunks}; create exactly ${chunkSize} consecutive narration containers, covering positions ${plannedSegments.length + 1}-${plannedSegments.length + chunkSize} of ${sceneCount}, and about ${Math.round(targetWords * chunkSize / sceneCount)} spoken words. The required meaningful visualBeat count for each returned segment, in order, is exactly [${chunkVisualCounts.join(', ')}]. Keep the spoken-word distribution per segment close to [${chunkWordTargets.join(', ')}] respectively (about ±15% each) so real TTS fits the requested timeline instead of making one scene much longer than the others. Each beat is normally a distinct image/shot tied to one atomic idea; do not repeat the same composition merely to satisfy the count. ${chunkIndex === 0 ? 'Only the first 15 seconds may use the faster hook pace.' : `Continue directly after: ${prior?.narration || ''}`} ${chunkIndex === chunks - 1 ? 'Resolve the idea in the final segment.' : 'Do not conclude the story yet.'} ${continuity ? `Use this immutable continuityBible verbatim: ${continuity}` : 'Infer and return one detailed continuityBible from the user input, requested style and selected character reference.'} ${textRule}\n\n${storyRules}` }, { role: 'user', content: brief }], undefined, 16_384);
+      const planRaw = await chat(input.provider, input.model, [{ role: 'system', content: `You are a storyboard director. Return compact JSON only: {"name":"","continuityBible":"","segments":[{"title":"","narration":"a short connected narration passage","visualBeats":[{"purpose":"hook|explain|comparison|mechanism|payoff","narrationCue":"exact clause from narration where this shot becomes relevant","onScreenText":"empty string","visual":"a complete detailed prompt for this distinct AI-generated image shot","motion":"locked","transition":"cut|match-cut|crossfade"}],"motionGraphic":"none"}]}.  This is chunk ${chunkIndex + 1}/${chunks}; create exactly ${chunkSize} consecutive narration containers, covering positions ${plannedSegments.length + 1}-${plannedSegments.length + chunkSize} of ${sceneCount}, and about ${Math.round(targetWords * chunkSize / sceneCount)} spoken words. The required meaningful visualBeat count for each returned segment, in order, is exactly [${chunkVisualCounts.join(', ')}]. Keep the spoken-word distribution per segment close to [${chunkWordTargets.join(', ')}] respectively (about ±15% each) so real TTS fits the requested timeline instead of making one scene much longer than the others. Each beat is normally a distinct image/shot tied to one atomic idea; do not repeat the same composition merely to satisfy the count. ${chunkIndex === 0 ? 'Only the first 15 seconds may use the faster hook pace.' : `Continue directly after: ${prior?.narration || ''}`} ${chunkIndex === chunks - 1 ? 'Resolve the idea in the final segment.' : 'Do not conclude the story yet.'} ${continuity ? `Use this immutable continuityBible verbatim: ${continuity}` : 'Infer and return one detailed continuityBible from the user input, requested style and selected character reference.'} ${textRule}\n\n${storyRules}\n\n${imageOnlySchemaRule}\n\n${factualPacketRule}` }, { role: 'user', content: brief }], undefined, 16_384);
       let chunk = jsonFromDirectorReply(planRaw);
       const chunkTargetWords = Math.round(targetWords * chunkSize / sceneCount);
-      if (narrationWordCount((chunk.segments || []).slice(0, chunkSize)) < chunkTargetWords * .88) {
-        const expandedRaw = await chat(input.provider, input.model, [{ role: 'system', content: `The storyboard narration is too short for the requested video duration. Return the same compact JSON shape with exactly ${chunkSize} segments and ${chunkTargetWords - Math.round(chunkTargetWords * .04)}-${chunkTargetWords + Math.round(chunkTargetWords * .04)} total Vietnamese spoken words. Preserve facts, order and continuity, but add useful explanation rather than filler. Keep the per-segment spoken-word distribution close to [${chunkWordTargets.join(', ')}] respectively and keep exactly [${chunkVisualCounts.join(', ')}] visualBeats per segment; every narrationCue must be an exact atomic clause from its expanded narration. Return JSON only.` }, { role: 'user', content: JSON.stringify(chunk) }], undefined, 16_384);
+      let chunkWords = narrationWordCount((chunk.segments || []).slice(0, chunkSize));
+      for (let expansionPass = 0; expansionPass < 2 && chunkWords < chunkTargetWords * .94; expansionPass += 1) {
+        const expandedRaw = await chat(input.provider, input.model, [{ role: 'system', content: `The storyboard narration is too short for the requested video duration. Return the same compact JSON shape with exactly ${chunkSize} segments and at least ${Math.round(chunkTargetWords * .96)} total Vietnamese spoken words, aiming for ${chunkTargetWords}. Preserve facts, order and continuity, but add useful explanation, a concrete example, a viewer-facing question or a consequence rather than filler. Keep the per-segment spoken-word distribution close to [${chunkWordTargets.join(', ')}] respectively and keep exactly [${chunkVisualCounts.join(', ')}] visualBeats per segment; every narrationCue must be an exact atomic clause from its expanded narration. Do not speak faster or add dead air. ${imageOnlySchemaRule} Return JSON only.` }, { role: 'user', content: JSON.stringify({ currentWords: chunkWords, targetWords: chunkTargetWords, chunk }) }], undefined, 16_384);
         const expanded = jsonFromDirectorReply(expandedRaw);
-        if ((expanded.segments || []).length >= chunkSize && narrationWordCount((expanded.segments || []).slice(0, chunkSize)) > narrationWordCount((chunk.segments || []).slice(0, chunkSize))) chunk = expanded;
+        const expandedWords = narrationWordCount((expanded.segments || []).slice(0, chunkSize));
+        if ((expanded.segments || []).length >= chunkSize && expandedWords > chunkWords) {
+          chunk = expanded;
+          chunkWords = expandedWords;
+        } else break;
       }
       if (!continuity) continuity = String(chunk.continuityBible || '').trim().slice(0, 1800);
       if (!plan.name) plan.name = chunk.name;
@@ -704,181 +842,156 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
     }
     plan = { ...plan, continuityBible: continuity, segments: plannedSegments };
     segments = normalizeLongAnimationSegments(plan, sceneCount);
+    sceneIds = segments.map(() => randomUUID());
+  }
   const asStoryboard = (items: LongAnimationSegment[], expectedCounts = visualsPerScene) => items.map((segment, index) => ({
     ...segment,
-    visualBeats: segment.visualBeats.filter((beat) => beat.visual.trim() || beat.objects?.length || beat.diagram?.steps.length).slice(0, expectedCounts[index] || 1).map((beat) => ({
+    visualBeats: segment.visualBeats.filter((beat) => beat.visual.trim()).slice(0, expectedCounts[index] || 1).map((beat) => ({
       ...beat,
-      // Generated storyboard images are intentionally true stills. Reference
-      // videos get their energy from shot selection and cuts, while long-form
-      // mechanism/comparison beats may use real editable vector performances.
       motion: 'locked' as const,
-      transition: beat.transition,
+      transition: 'cut' as const,
       actors: undefined,
-      objects: beat.visual.trim() ? undefined : beat.objects,
-      diagram: beat.visual.trim() ? undefined : beat.diagram,
+      objects: undefined,
+      diagram: undefined,
     })),
     motionGraphic: 'none' as const,
   }));
   segments = asStoryboard(segments);
+  if (!checkpoint && narrationWordCount(segments) < targetWords * .94) {
+    await onStage('Dang bo sung giai thich de dat do dai tu nhien');
+    const expandedPlanRaw = await chat(input.provider, input.model, [{
+      role: 'system',
+      content: `The complete storyboard is still too short for the requested approximate duration. Return compact JSON only with the same {"segments":[]} shape. Preserve exactly ${sceneCount} segments, the same titles, facts, order, continuity and exactly these visual beat counts: [${visualsPerScene.join(', ')}]. Expand narration to at least ${Math.round(targetWords * .96)} Vietnamese spoken words, aiming for ${targetWords}, by adding useful causal explanation, a concrete example, an honest objection and a clear consequence. Keep each narrationCue an exact clause from its segment narration. Do not add filler, repeat sentences, speak faster, or create dead air. ${imageOnlySchemaRule}`
+    }, { role: 'user', content: JSON.stringify({ researchPacket, continuity, targetWords, segments }) }], undefined, 16_384);
+    const expandedPlan = asStoryboard(normalizeLongAnimationSegments(jsonFromDirectorReply(expandedPlanRaw), sceneCount));
+    if (expandedPlan.length === sceneCount && expandedPlan.every((segment, index) => segment.visualBeats.length === visualsPerScene[index]) && narrationWordCount(expandedPlan) > narrationWordCount(segments)) {
+      segments = expandedPlan;
+    } else {
+      directorWarnings.push('Storyboard van ngan hon muc xap xi sau khi bo sung; giu noi dung hop le va khong tang toc giong doc.');
+    }
+  }
   if (segments.some((segment, index) => segment.visualBeats.length !== visualsPerScene[index])) {
     for (const [index, segment] of segments.entries()) {
       const expectedCount = visualsPerScene[index] || 1;
       if (segment.visualBeats.length === expectedCount) continue;
-      const repaired = jsonFromDirectorReply(await chat(input.provider, input.model, [{ role: 'system', content: `Repair one storyboard segment. Keep its title and narration verbatim. Return JSON with one segments item containing exactly ${expectedCount} meaningful visualBeats. Each beat is normally a distinct shot/composition for a different atomic visual idea, and each narrationCue must be an exact different clause from the narration. Do not create redundant near-duplicate shots just to reach the count. Preserve this continuityBible: ${continuity}. ${textRule} ${storyRules}` }, { role: 'user', content: JSON.stringify(segment) }], undefined, 8192));
+      const repaired = jsonFromDirectorReply(await chat(input.provider, input.model, [{ role: 'system', content: `Repair one storyboard segment. Keep its title and narration verbatim. Return JSON with one segments item containing exactly ${expectedCount} meaningful visualBeats. Each beat is normally a distinct AI-generated image shot for a different atomic visual idea, and each narrationCue must be an exact different clause from the narration. Do not create redundant near-duplicate shots just to reach the count. Preserve this continuityBible: ${continuity}. ${textRule} ${storyRules} ${imageOnlySchemaRule}` }, { role: 'user', content: JSON.stringify(segment) }], undefined, 8192));
       const [candidate] = asStoryboard(normalizeLongAnimationSegments(repaired, 1), [expectedCount]);
       if (candidate?.narration === segment.narration && candidate.visualBeats.length === expectedCount) segments[index] = candidate;
     }
   }
-  if (strictDuration) {
-    for (const [index, segment] of segments.entries()) {
-      const targetSegmentWords = Math.max(8, Math.round((density.sceneDurationsSeconds[index] || 1) * 2.25));
-      const currentWords = narrationWordCount([segment]);
-      if (currentWords <= targetSegmentWords * 1.18) continue;
-      const expectedCount = visualsPerScene[index] || segment.visualBeats.length || 1;
-      const tightened = jsonFromDirectorReply(await chat(input.provider, input.model, [{ role: 'system', content: `Shorten one storyboard segment so its spoken narration fits a locked video timeline. Return JSON with exactly one segments item. Keep the title, facts, order, tone and explanatory meaning, but rewrite narration to ${Math.round(targetSegmentWords * .92)}-${Math.round(targetSegmentWords * 1.05)} spoken words. Keep exactly ${expectedCount} meaningful visualBeats and update every narrationCue so it is an exact clause from the shortened narration. Preserve the same visual ideas and continuityBible: ${continuity}. No filler. ${textRule} Return JSON only.\n\n${storyRules}` }, { role: 'user', content: JSON.stringify(segment) }], undefined, 8192));
-      const [candidate] = asStoryboard(normalizeLongAnimationSegments(tightened, 1), [expectedCount]);
-      if (candidate && candidate.visualBeats.length === expectedCount && narrationWordCount([candidate]) <= targetSegmentWords * 1.12) segments[index] = candidate;
-    }
-  }
   if (segments.length < sceneCount) throw new Error(`AI Director chỉ trả về ${segments.length}/${sceneCount} cảnh. Hãy thử dựng lại để bảo đảm đủ nhịp hình và thời lượng.`);
   if (segments.some((segment, index) => segment.visualBeats.length !== visualsPerScene[index])) throw new Error('Director chưa trả đủ mật độ hình theo atomic idea. Hãy tiếp tục job để sửa các cảnh còn thiếu thay vì kéo dài một ảnh quá 3 giây.');
-  if (narrationWordCount(segments) < targetWords * .8) throw new Error(`AI Director viết narration quá ngắn (${narrationWordCount(segments)}/${targetWords} từ) so với thời lượng ${Math.round(targetDurationSeconds / 60 * 10) / 10} phút. Project chưa được tạo để tránh xuất video ngắn sai yêu cầu; hãy tiếp tục job để AI viết lại đủ nội dung.`);
-    sceneIds = segments.map(() => randomUUID());
-
-    if (strictDuration && input.narration) {
-      const spokenTargetTotalMs = Math.max(1_000, targetMs - Math.min(Math.round(targetMs * .015), Math.max(200, sceneCount * 80)));
-      const targetNarrationMs = density.sceneDurationsSeconds.map((seconds) => Math.max(600, Math.round(spokenTargetTotalMs * seconds / Math.max(1, targetDurationSeconds))));
-      const buildNarrationMeasurementProject = (items: LongAnimationSegment[]): AnimationProject => ({
-        ...input.project,
-        assets: [],
-        scenes: items.map((segment, index): CompositeScene => ({
-          id: sceneIds[index],
-          name: segment.title || `Cảnh ${index + 1}`,
-          order: index,
-          durationMs: Math.max(1, Math.round((density.sceneDurationsSeconds[index] || 1) * 1000)),
-          narration: segment.narration,
-          transition: { type: 'cut', durationMs: 0 },
-          renderMode: 'composite',
-          backgroundColor: '#101218',
-          layers: [],
-          commands: [],
-          camera: { transform: defaultTransform(), commands: [] },
-        })),
-        productionPlan: undefined,
-        assetManifest: undefined,
-      });
-      const measureNarration = async (items: LongAnimationSegment[], speed = narrationRenderSpeed) => {
-        const measured = await generateAnimationNarration({ project: buildNarrationMeasurementProject(items), ...input.narration!, speed, preservePlannedDuration: false }, onStage);
-        return measured.scenes.map((scene) => Math.max(1, Math.round(scene.durationMs)));
-      };
-      narrationDurationsMs = await measureNarration(segments, narrationRenderSpeed);
-      for (let pass = 1; pass <= 4; pass += 1) {
-        const spokenTotal = narrationDurationsMs.reduce((sum, value) => sum + value, 0);
-        const totalRatio = spokenTotal / spokenTargetTotalMs;
-        const sceneRatios = narrationDurationsMs.map((value, index) => value / Math.max(1, targetNarrationMs[index] || value));
-        const sceneOutlier = sceneRatios.some((ratio) => ratio < .88 || ratio > 1.12);
-        if (totalRatio >= .985 && totalRatio <= 1.005 && !sceneOutlier) break;
-        const wordTargets = narrationFitWordTargets(segments, narrationDurationsMs, targetNarrationMs);
-        await onStage(`Đang căn kịch bản theo giọng đọc · ${Math.round(spokenTotal / 100) / 10}s → ${Math.round(spokenTargetTotalMs / 100) / 10}s · lượt ${pass}/4`);
-        const chunkSize = 12;
-        for (let start = 0; start < segments.length; start += chunkSize) {
-          const end = Math.min(segments.length, start + chunkSize);
-          const current = segments.slice(start, end);
-          const measuredChunk = narrationDurationsMs.slice(start, end);
-          const targetChunk = targetNarrationMs.slice(start, end);
-          const needsRewrite = measuredChunk.some((value, localIndex) => {
-            const ratio = value / Math.max(1, targetChunk[localIndex] || value);
-            return ratio < .9 || ratio > 1.1;
-          });
-          if (!needsRewrite) continue;
-          const timing = current.map((segment, localIndex) => ({
-            scene: start + localIndex + 1,
-            currentWords: narrationWordCount([segment]),
-            measuredSeconds: Math.round((measuredChunk[localIndex] || 0) / 100) / 10,
-            targetSeconds: Math.round((targetChunk[localIndex] || 0) / 100) / 10,
-            targetWords: wordTargets[start + localIndex],
-          }));
-          const fittedRaw = await chat(input.provider, input.model, [{ role: 'system', content: `You are fitting an already approved Vietnamese explainer storyboard to a LOCKED spoken duration using real measured TTS. Return compact JSON only with shape {"segments":[{"narration":"","visualBeats":[{"narrationCue":""}]}]}. Return exactly ${current.length} segments in the same order. Rewrite ONLY narration and narrationCue. Preserve every fact, explanation order, tone and existing visual idea; do not add a new topic that would require a new image. Make each narration natural spoken Vietnamese, not filler. Match each segment targetWords closely (about ±6%) because the current voice was measured, not estimated. Every narrationCue must be a verbatim clause inside its rewritten narration and there must be exactly the same number of cues as existing visual beats. Timing targets: ${JSON.stringify(timing)}. ${toneRule} Return JSON only.` }, { role: 'user', content: JSON.stringify(current.map((segment) => ({ title: segment.title, narration: segment.narration, visualBeats: segment.visualBeats.map((beat) => ({ purpose: beat.purpose, narrationCue: beat.narrationCue, visual: beat.visual })) }))) }], undefined, 16_384);
-          const fitted = jsonFromDirectorReply(fittedRaw).segments || [];
-          current.forEach((segment, localIndex) => {
-            const candidate = fitted[localIndex];
-            const narration = String(candidate?.narration || '').trim();
-            const candidateBeats = Array.isArray(candidate?.visualBeats) ? candidate!.visualBeats! : [];
-            const cues = segment.visualBeats.map((_beat, beatIndex) => String(candidateBeats[beatIndex]?.narrationCue || '').trim());
-            if (!narration || cues.length !== segment.visualBeats.length || cues.some((cue) => cue.length < 4 || !narration.includes(cue))) return;
-            segments[start + localIndex] = { ...segment, narration, visualBeats: segment.visualBeats.map((beat, beatIndex) => ({ ...beat, narrationCue: cues[beatIndex] })) };
-          });
-        }
-        narrationDurationsMs = await measureNarration(segments);
-      }
-      let spokenTotal = narrationDurationsMs.reduce((sum, value) => sum + value, 0);
-      // When the script is already close, prefer a tiny natural TTS slowdown over
-      // failing the whole job or padding several seconds of dead air. This keeps
-      // a locked 60s video sounding continuous without forcing another rewrite.
-      for (let speedPass = 1; speedPass <= 2 && spokenTotal < spokenTargetTotalMs * .985; speedPass += 1) {
-        const ratio = spokenTotal / Math.max(1, spokenTargetTotalMs);
-        if (ratio < .9) break;
-        const nextSpeed = Math.max(.9, Math.min(narrationRenderSpeed, narrationRenderSpeed * ratio));
-        if (Math.abs(nextSpeed - narrationRenderSpeed) < .005) break;
-        const previousSpeed = narrationRenderSpeed;
-        const previousDurations = narrationDurationsMs;
-        const previousTotal = spokenTotal;
-        narrationRenderSpeed = nextSpeed;
-        await onStage(`Lời đọc còn ngắn nhẹ · tự căn tốc độ ${previousSpeed.toFixed(2)}× → ${narrationRenderSpeed.toFixed(2)}×`);
-        const adjustedDurations = await measureNarration(segments, narrationRenderSpeed);
-        const adjustedTotal = adjustedDurations.reduce((sum, value) => sum + value, 0);
-        if (adjustedTotal > targetMs) {
-          narrationRenderSpeed = previousSpeed;
-          narrationDurationsMs = previousDurations;
-          spokenTotal = previousTotal;
-          break;
-        }
-        narrationDurationsMs = adjustedDurations;
-        spokenTotal = adjustedTotal;
-      }
-      if (spokenTotal < spokenTargetTotalMs * .94) throw new Error(`Kịch bản sau khi đo TTS vẫn quá ngắn: ${Math.round(spokenTotal / 100) / 10}s cho video ${targetDurationSeconds}s. Hệ thống đã thử viết lại và căn tốc độ đọc nhưng vẫn thiếu quá nhiều nội dung.`);
-      if (spokenTotal > targetMs) throw new Error(`Kịch bản sau khi đo TTS vẫn dài ${Math.round(spokenTotal / 100) / 10}s so với timeline ${targetDurationSeconds}s. Dừng trước khi tạo ảnh để tránh kéo dài video.`);
-      plan = { ...plan, segments: segments.map((segment) => ({ title: segment.title, narration: segment.narration, visualBeats: segment.visualBeats, motionGraphic: segment.motionGraphic })) };
-      await onStage(`Đã khóa kịch bản theo TTS thật · lời đọc ${Math.round(spokenTotal / 100) / 10}s / timeline ${targetDurationSeconds}s · tốc độ ${narrationRenderSpeed.toFixed(2)}×`);
+  if (!checkpoint) {
+    await onStage('Dang phan bien kich ban truoc khi tao hinh');
+    const reviewInput = segments.map((segment) => ({
+    title: segment.title,
+    narration: segment.narration,
+    visualBeats: segment.visualBeats.map((beat) => ({ purpose: beat.purpose, narrationCue: beat.narrationCue, onScreenText: beat.onScreenText, visual: beat.visual.slice(0, 520) })),
+    }));
+    brief = `${brief}\n\nSHOWRUNNER NARRATIVE CHECK: verify that the supplied storyboard visibly and audibly completes every phase in the narrativeArc. Reject a list of disconnected facts, a hook with no question, an explanation with no mechanism, an example with no consequence, or an ending that does not answer and callback to the opening.`;
+    const reviewRaw = await chat(input.provider, input.model, [{
+    role: 'system',
+    content: 'You are the senior showrunner reviewing an educational explainer before image generation. Return compact JSON only with shape {"qualityReview":{"approved":true,"severity":"low|medium|high","issues":[],"rewriteInstructions":[]}}. Check: factual claims stay within the research packet; the opening creates an honest curiosity hook; the story has one clear thesis and causal progression; the narration sounds like a person guiding one viewer; no scene holds one image while several unrelated ideas are spoken; adjacent visual beats form coherent AI-image shot families but still change a meaningful variable; every beat has a concrete image prompt and there are no runtime text, icon, chart, diagram or shape layers; the ending answers the opening question. Do not reject merely because the approximate duration is a little short or long. Mark high only for unsupported factual claims, missing conclusion, broken continuity, or severe visual/narration mismatch. Keep issues and rewriteInstructions concrete and short.'
+    }, { role: 'user', content: JSON.stringify({ brief, researchPacket, continuity, segments: reviewInput }) }], undefined, 12_288);
+    const qualityReview = normalizePlanReview(jsonFromDirectorReply(reviewRaw).qualityReview);
+    plan = { ...plan, qualityReview };
+    directorWarnings.push(...qualityReview.issues.slice(0, 4).map((issue) => `Director review: ${issue}`));
+    if (!qualityReview.approved && qualityReview.severity === 'high') {
+    await onStage('Dang viet lai storyboard theo phan bien cua dao dien');
+    const rewriteRaw = await chat(input.provider, input.model, [{
+      role: 'system',
+      content: `Rewrite the supplied storyboard as a complete educational explainer. Return compact JSON only with shape {"segments":[{"title":"","narration":"","visualBeats":[{"purpose":"hook|explain|comparison|mechanism|payoff","narrationCue":"exact clause from narration","onScreenText":"exact short token from narrationCue or empty string","visual":"complete distinct image prompt","motion":"locked","transition":"cut|match-cut|crossfade"}],"motionGraphic":"none"}]}. Preserve exactly ${sceneCount} segments and exactly these visual beat counts: [${visualsPerScene.join(', ')}]. Keep the approximate duration guidance; do not pad with filler or speak faster. Use only supported claims from the research packet. Apply these rewrite instructions: ${JSON.stringify(qualityReview.rewriteInstructions)}. Keep the direct-address conversational style, concrete examples, shot-family continuity and a clear callback ending. Do not invent citations, numbers, dates, people or sources.`
+    }, { role: 'user', content: JSON.stringify({ researchPacket, continuity, segments: reviewInput }) }], undefined, 16_384);
+    const rewritten = asStoryboard(normalizeLongAnimationSegments(jsonFromDirectorReply(rewriteRaw), sceneCount));
+    if (rewritten.length === sceneCount && rewritten.every((segment, index) => segment.visualBeats.length === visualsPerScene[index])) {
+      segments = rewritten;
+      directorWarnings.push('Storyboard da duoc viet lai sau phan bien nghiem trong.');
+    } else {
+      directorWarnings.push('Phan viet lai khong dat du so beat; giu ban storyboard hop le truoc do de tranh lam hong job.');
     }
-    await saveAnimationCheckpoint(checkpointKey, { plan, segments, sceneIds, narrationDurationsMs, narrationRenderSpeed });
+    }
   }
+  if (narrationWordCount(segments) < targetWords * .8) await onStage(`Narration ngắn hơn mốc ${targetWords} từ · giữ nội dung hoàn chỉnh và căn timeline theo lời đọc thật`);
+  plan = { ...plan, segments: segments.map((segment) => ({ title: segment.title, narration: segment.narration, visualBeats: segment.visualBeats, motionGraphic: segment.motionGraphic })) };
+  await saveAnimationCheckpoint(checkpointKey, { plan, segments, sceneIds, narrationDurationsMs, narrationRenderSpeed });
 
-  const generationWarnings: string[] = [];
+  const generationWarnings: string[] = [...directorWarnings];
   let allocatedMs = 0;
-  const sceneDurationsMs = strictDuration && narrationDurationsMs?.length === segments.length
-    ? allocateLockedSceneDurations(narrationDurationsMs, targetMs)
-    : segments.map((_segment, index) => {
+  const plannedSceneDurationsMs = segments.map((_segment, index) => {
       const durationMs = index === segments.length - 1 ? Math.max(1, targetMs - allocatedMs) : Math.round((density.sceneDurationsSeconds[index] || 1) * 1000);
       allocatedMs += durationMs;
       return durationMs;
     });
+  let measuredNarrationProject: AnimationProject | undefined;
+  if (input.narration && narrationDurationsMs?.length !== segments.length) {
+    await onStage('Đang tạo lời đọc trước để đo đúng nhịp minh họa');
+    const narrationDraftScenes: CompositeScene[] = segments.map((segment, index) => ({
+      id: sceneIds[index],
+      name: segment.title || `Cảnh ${index + 1}`,
+      order: index,
+      durationMs: plannedSceneDurationsMs[index] || 3000,
+      narration: segment.narration,
+      transition: index ? (input.project.transitionPreset || { type: 'cut', durationMs: 0 }) : { type: 'cut', durationMs: 0 },
+      renderMode: 'composite',
+      backgroundColor: '#101218',
+      layers: [],
+      commands: [],
+      camera: { transform: defaultTransform(), commands: [] },
+    }));
+    const narrationDraft: AnimationProject = { ...input.project, assets, scenes: narrationDraftScenes, assetManifest: undefined, updatedAt: new Date().toISOString() };
+    measuredNarrationProject = await generateAnimationNarration({ project: narrationDraft, ...input.narration, speed: narrationRenderSpeed, preservePlannedDuration: false, strictSceneDurations: false, includeSubtitles: false }, onStage);
+    narrationDurationsMs = measuredNarrationProject.scenes.map((scene) => Math.max(1, Math.round(scene.durationMs)));
+  }
+  const sceneDurationsMs = narrationDurationsMs?.length === segments.length
+    ? narrationDurationsMs.map((value) => Math.max(1, Math.round(Number(value) || 1)))
+    : plannedSceneDurationsMs;
   if (!continuity) generationWarnings.push('Director chưa trả hồ sơ nhất quán; cần kiểm tra thiết kế chủ thể trước khi xuất.');
-  const sceneAssets: Array<Array<AnimationAsset | undefined>> = segments.map((segment) => Array(segment.visualBeats.length).fill(undefined));
+  const sceneAssets: Array<Array<AnimationAsset | undefined>> = segments.map((segment, sceneIndex) => segment.visualBeats.map((_beat, beatIndex) => {
+    const restored = checkpoint?.sceneAssets?.[sceneIndex]?.[beatIndex];
+    return restored && typeof restored.id === 'string' ? restored : undefined;
+  }));
+  await saveAnimationCheckpoint(checkpointKey, {
+    plan,
+    segments,
+    sceneIds,
+    narrationDurationsMs,
+    narrationRenderSpeed,
+    sceneAssets: sceneAssets.map((row) => row.map((asset) => asset || null)),
+  });
   if (input.assetGeneration) {
+    // TTS/script planning is independent from Google Flow. Validate the image
+    // session only when a missing AI image is actually about to run; otherwise
+    // a voice-only phase can open/reload Flow tabs unnecessarily.
+    if (input.assetGeneration.generator === 'flow-agent' && sceneAssets.some((row) => row.some((asset) => !asset))) {
+      await validateGoogleFlowSession();
+    }
     const assetGeneration = input.assetGeneration;
     const aspect = input.project.width > input.project.height ? '16:9 landscape' : input.project.width < input.project.height ? '9:16 portrait' : '1:1 square';
     const tasks = segments.flatMap((segment, sceneIndex) => segment.visualBeats.map((beat, beatIndex) => ({ segment, beat, sceneIndex, beatIndex })));
-    const textBeatIndexes = chooseStoryboardTextBeatIndexes(tasks.map((task) => task.beat), .2);
+    const pendingTasks = tasks.flatMap((task, taskIndex) => sceneAssets[task.sceneIndex][task.beatIndex] ? [] : [{ task, taskIndex }]);
+    const restoredCount = tasks.length - pendingTasks.length;
+    if (!pendingTasks.length) {
+      await onStage(`Đã khôi phục ảnh ${restoredCount}/${tasks.length} · bỏ qua các ảnh đã tạo`);
+    }
     // Keep storyboard generation at one image per provider request. Live tests
     // show four single-image requests are stable, while packing two images into
     // each request increases provider latency enough to trigger timeouts.
     const flowBatchSize = 1;
     const workItems: Array<Array<{ taskIndex: number; task: typeof tasks[number] }>> = [];
-    for (let start = 0; start < tasks.length; start += flowBatchSize) {
-      workItems.push(tasks.slice(start, start + flowBatchSize).map((task, offset) => ({ taskIndex: start + offset, task })));
+    for (let start = 0; start < pendingTasks.length; start += flowBatchSize) {
+      workItems.push(pendingTasks.slice(start, start + flowBatchSize));
     }
     const configuredMax = Number(process.env.AUTOSUB_ANIMATION_IMAGE_CONCURRENCY);
-    const flowPool = assetGeneration.generator === 'flow-agent' ? await getGoogleFlowImagePoolCapacity() : undefined;
+    const flowPool = pendingTasks.length && assetGeneration.generator === 'flow-agent' ? await getGoogleFlowImagePoolCapacity() : undefined;
     const flowRecommendedConcurrency = flowPool?.recommendedSlots || 2;
+    const flowIsolatedCapacity = flowPool?.isolatedWorkers ? Math.max(1, flowPool.accountCount * Math.max(1, flowPool.slotsPerAccount || 1)) : 4;
     const maxConcurrency = assetGeneration.generator === 'flow-agent'
-      ? Math.max(1, Math.min(flowPool?.isolatedWorkers ? Math.max(1, flowPool.accountCount) : 4, Number.isFinite(configuredMax) && configuredMax > 0 ? Math.round(configuredMax) : flowRecommendedConcurrency))
+      ? Math.max(1, Math.min(flowIsolatedCapacity, Number.isFinite(configuredMax) && configuredMax > 0 ? Math.round(configuredMax) : flowRecommendedConcurrency))
       : Math.max(2, Math.min(8, Number.isFinite(configuredMax) && configuredMax > 0 ? Math.round(configuredMax) : 4));
-    // Isolated mode is one Flow Agent process per linked account, so seven
-    // ready accounts mean seven real image lanes. Legacy single-bridge mode
-    // keeps the empirically safe four-request ceiling.
+    // Isolated mode has two image lanes per linked account. Legacy
+    // single-bridge mode keeps the empirically safe four-request ceiling.
     let adaptiveLimit = Math.min(workItems.length, assetGeneration.generator === 'flow-agent' ? Math.min(flowRecommendedConcurrency, maxConcurrency) : Math.min(3, maxConcurrency));
-    if (assetGeneration.generator === 'flow-agent' && (assetGeneration.referenceUploadId || assetGeneration.referenceAssetId)) {
+    if (workItems.length && assetGeneration.generator === 'flow-agent' && (assetGeneration.referenceUploadId || assetGeneration.referenceAssetId)) {
       const referenceImagePath = await resolveAnimationGenerationReferencePath(assetGeneration);
       if (referenceImagePath) {
         const targetAccounts = Math.max(1, Math.min(7, flowPool?.accountCount || adaptiveLimit));
@@ -891,28 +1004,43 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
     }
     let flowPauseUntil = 0;
     let cursor = 0;
-    let completed = 0;
+    let completed = restoredCount;
     let successfulSinceTune = 0;
     let stopError: unknown;
     let lastProgressAt = 0;
-    await onStage(`Đang tạo ${tasks.length} ảnh AI · ${flowPool ? `${flowPool.accountCount} tài khoản sẵn sàng · ${adaptiveLimit} request ảnh song song` : `Turbo ${adaptiveLimit} luồng`} · scheduler tự xoay tài khoản khi mỗi ảnh hoàn tất`);
+    let checkpointWrite: Promise<void> = Promise.resolve();
+    const persistImageCheckpoint = async () => {
+      const next = checkpointWrite.then(() => saveAnimationCheckpoint(checkpointKey, {
+        plan,
+        segments,
+        sceneIds,
+        narrationDurationsMs,
+        narrationRenderSpeed,
+        sceneAssets: sceneAssets.map((row) => row.map((asset) => asset || null)),
+      }));
+      checkpointWrite = next;
+      await next;
+    };
+    if (workItems.length) await onStage(`Đang tạo ${tasks.length} ảnh AI · đã khôi phục ${restoredCount}/${tasks.length} · ${flowPool ? `${flowPool.accountCount} tài khoản sẵn sàng · ${adaptiveLimit} request ảnh song song` : `Turbo ${adaptiveLimit} luồng`} · scheduler tự xoay tài khoản khi mỗi ảnh hoàn tất`);
 
     const buildStoryboardRequest = (entry: { taskIndex: number; task: typeof tasks[number] }) => {
       const { taskIndex, task } = entry;
       const { segment, beat, sceneIndex, beatIndex } = task;
       const cue = beat.narrationCue || segment.narration;
-      const beatTextRule = textBeatIndexes.has(taskIndex)
-        ? `${textRule} This is one of the small number of text-eligible beats, so text MAY be used only if it materially helps this exact idea. IMPORTANT: the spoken context supplied below is for semantic guidance only and must NEVER be copied, paraphrased or rendered as image text. If you cannot express the useful label within the hard short-text limit, render NO TEXT.`
-        : `THIS SHOT MUST BE TEXT-FREE. It is part of the roughly 80% of storyboard beats that communicate visually without words. Render no intentional words, letters, labels, headings, captions, prices, percentages, receipts, signs, UI text or decorative writing. Do not invent pseudo-text. The spoken context below is semantic guidance only and must NEVER appear inside the image.`;
+      const shot = storyboardShotDirection(taskIndex, beat.purpose);
+      const beatTextRule = beat.onScreenText?.trim()
+        ? `${textRule} If text materially improves this shot, render exactly one large embedded artwork label and use this exact token only: "${beat.onScreenText.trim()}". Never render the narration, subtitles or prompt text.`
+        : `${textRule} Keep this shot text-free unless the concrete visual itself requires a naturally occurring sign or object label.`;
+      const shotTextCue = 'NO RUNTIME OVERLAY: the editor will not add text, icons, charts, diagrams, labels or symbols. Any intentional label must be rendered inside the generated AI artwork, never as a separate layer.';
       const request: DirectorAssetRequest = {
         key: `story-scene-${sceneIndex}-beat-${beatIndex}`,
         name: `${segment.title || `Cảnh ${sceneIndex + 1}`} · hình ${beatIndex + 1}`,
-        prompt: `${beat.visual}. Create this as one distinct full-frame ${aspect} educational-explainer shot. SPOKEN CONTEXT FOR MEANING ONLY — DO NOT RENDER OR PARAPHRASE THIS SENTENCE AS IMAGE TEXT: “${cue}”. The shot must communicate that idea at a glance and must be meaningfully different from adjacent beats when the narration changes subject, relationship, example, location, scale or explanatory function. Prefer literal visual evidence over generic symbolism. Keep the composition clean enough to read in about 2-3 seconds. Preserve recurring character identity exactly: same head shape, face language, body proportions, clothing silhouette, line weight, world and palette. Do not turn a recurring mascot into chibi, anime, realistic, 3D or any alternate rendering style. ${beatTextRule}`,
+        prompt: `${beat.visual}. Create this as one distinct full-frame ${aspect} educational-explainer shot. ${shot.instruction} SPOKEN CONTEXT FOR MEANING ONLY — never render or paraphrase this sentence as image text unless the visual prompt explicitly requires text inside the artwork: “${cue}”. The generated image itself must explain the cue through a concrete subject, visible action or state, setting, foreground/midground/background, composition, camera distance and angle, lighting, palette, and one clear visual cause-and-effect relationship. Prefer literal visual evidence over generic symbolism or stock imagery. The background is part of the explanation: use a topic-specific location, surface or environment with depth, not the same empty cream/white studio background. Across adjacent shots, keep character identity and art direction coherent but change the shot scale, camera angle, pose, prop state or location so the sequence feels deliberately storyboarded. Do not reuse the same centered pose and background more than twice in a row. Do not add any separate runtime overlay, layer, chart, icon, label or vector graphic; all visual content belongs inside this one AI-generated image. Preserve recurring character identity exactly: same head shape, face language, body proportions, clothing silhouette, line weight, world and palette. Do not turn a recurring mascot into chibi, anime, realistic, 3D or any alternate rendering style. ${beatTextRule}`,
         type: 'background',
-        tags: ['storyboard', `scene-${sceneIndex + 1}`, `beat-${beatIndex + 1}`, 'atomic-visual'],
+        tags: ['storyboard', `scene-${sceneIndex + 1}`, `beat-${beatIndex + 1}`, `shot-${shot.type}`, 'atomic-visual'],
         style: requestedStyle || continuity || 'story-matched consistent illustration',
       };
-      request.prompt = `${characterReferenceRule}\n${styleRule}\nSHOT CONTENT: ${request.prompt}\nCONTINUITY CONTEXT (lower priority than the attached reference): ${continuity || 'Keep recurring characters and the inferred visual language identical across the whole story.'}`;
+      request.prompt = `${shotTextCue}\n${characterReferenceRule}\n${styleRule}\nSHOT CONTENT: ${request.prompt}\nNON-NEGOTIABLE EDITORIAL SHOT DIRECTION: ${shot.instruction} Use the requested off-white/neutral palette as an accent, never as an empty default background. The frame must have a specific story location, surface or environment unless this is an intentional detail insert. Do not make a generic centered mascot portrait, empty studio, stock icon sheet or repetitive infographic.\nCONTINUITY CONTEXT (lower priority than the attached reference): ${continuity || 'Keep recurring characters and the inferred visual language identical across the whole story.'}`;
       return request;
     };
 
@@ -923,7 +1051,7 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
           // A failed isolated worker is cooled down by googleFlow.ts. Do not
           // throttle the other six independent workers because one account had
           // a timeout/session problem.
-          adaptiveLimit = Math.min(maxConcurrency, Math.max(1, flowPool.accountCount));
+          adaptiveLimit = Math.min(maxConcurrency, Math.max(1, flowPool.accountCount * Math.max(1, flowPool.slotsPerAccount || 1)));
         } else {
           adaptiveLimit = assetGeneration.generator === 'flow-agent'
             ? Math.max(2, adaptiveLimit - 1)
@@ -976,6 +1104,7 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
             const entry = item[index];
             if (entry) sceneAssets[entry.task.sceneIndex][entry.task.beatIndex] = asset;
           });
+          await persistImageCheckpoint();
           completed += generated.length;
           successfulSinceTune += generated.length;
           if (successfulSinceTune >= Math.max(8, adaptiveLimit * flowBatchSize * 2) && adaptiveLimit < Math.min(maxConcurrency, workItems.length)) {
@@ -997,37 +1126,54 @@ async function directLongAnimationProject(input: DirectAnimationInput, brief: st
       }
     };
     await Promise.all(Array.from({ length: Math.min(maxConcurrency, workItems.length) }, (_, workerIndex) => worker(workerIndex)));
+    await checkpointWrite;
     if (stopError) throw stopError;
     const missingAfterRetry = segments.reduce((total, segment, sceneIndex) => total + segment.visualBeats.reduce((sceneTotal, beat, beatIndex) => sceneTotal + (beat.visual.trim() && !sceneAssets[sceneIndex][beatIndex] ? 1 : 0), 0), 0);
     if (missingAfterRetry) throw new Error(`Còn ${missingAfterRetry} ảnh AI bắt buộc chưa tạo xong. Project không được hoàn tất để tránh xuất khung đen; các nhịp vector không cần ảnh và vẫn được giữ nguyên.`);
   }
   const generatedSceneAssets = sceneAssets.flat().filter((asset): asset is AnimationAsset => Boolean(asset));
   const allAssets = [...new Map([...assets, ...generatedSceneAssets].map((asset) => [asset.id, asset])).values()];
-  const configuredTransition = input.project.transitionPreset || { type: 'cut' as const, durationMs: 0 };
-  const transitionPreset = configuredTransition.type === 'cut'
-    ? { type: 'cut' as const, durationMs: 0 }
-    : { ...configuredTransition, durationMs: Math.max(80, Math.min(2000, configuredTransition.durationMs || 220)) };
+  const transitionPreset = { type: 'cut' as const, durationMs: 0 };
   const scenes: CompositeScene[] = segments.map((segment, index) => {
     const durationMs = sceneDurationsMs[index] || 3000; allocatedMs += durationMs;
     const visuals = sceneAssets[index];
     const timeline = buildVisualBeatTimeline({ sceneIndex: index, durationMs, width: input.project.width, height: input.project.height, visuals, beats: segment.visualBeats, narration: segment.narration });
-    const performance = buildBeatPerformances({ sceneIndex: index, durationMs, width: input.project.width, height: input.project.height, assets: allAssets, beats: segment.visualBeats, narration: segment.narration });
     if (segment.visualBeats.some((beat, beatIndex) => beat.visual.trim() && !visuals[beatIndex])) generationWarnings.push(`Câu ${index + 1}: thiếu ảnh composition minh họa bắt buộc, cần tạo lại trước khi xuất.`);
-    generationWarnings.push(...performance.warnings);
-    const combinedLayers = [...timeline.layers, ...performance.layers];
+    const combinedLayers = timeline.layers;
+    const performance = { warnings: [] as string[], layers: [] as SceneLayer[], commands: [] as AnimationCommand[] };
+    const clampSceneCommands = (_commands: AnimationCommand[], _durationMs: number): AnimationCommand[] => [];
+    if (!combinedLayers.length) throw new Error(`Cáº£nh ${index + 1} khĂ´ng cĂ³ áº£nh AI minh há»a Ä‘á»ƒ xuáº¥t.`);
     const layers: SceneLayer[] = combinedLayers.length ? combinedLayers : [{ id: `visual-${index}-0`, name: 'Thiếu hình minh họa', text: 'Chưa có hình minh họa', fontSize: 30, type: 'text' as const, visible: true, locked: false, zIndex: 0, width: Math.round(input.project.width * .62), height: 80, fill: '#ffffff', transform: { ...defaultTransform(), position: { x: input.project.width / 2, y: input.project.height / 2 } } }];
-    return { id: sceneIds[index], name: segment.title || `Cảnh ${index + 1}`, order: index, durationMs, narration: segment.narration, transition: index ? transitionPreset : { type: 'cut', durationMs: 0 }, renderMode: 'composite', backgroundColor: '#101218', layers, commands: [...timeline.commands, ...performance.commands], camera: { transform: defaultTransform(), commands: [] } };
+    return { id: sceneIds[index], name: segment.title || `Cảnh ${index + 1}`, order: index, durationMs, narration: segment.narration, transition: index ? transitionPreset : { type: 'cut', durationMs: 0 }, renderMode: 'composite', backgroundColor: '#101218', layers, commands: clampSceneCommands([...timeline.commands, ...performance.commands], durationMs), camera: { transform: defaultTransform(), commands: [] } };
   });
   const productionPlan = compileAnimationProductionPlan({ segments, sceneIds, sceneDurationsMs, continuityBible: continuity, diagnostics: generationWarnings });
   let project: AnimationProject = { ...input.project, id: input.project.id || randomUUID(), name: String(plan.name || brief).slice(0, 160), assets: allAssets, scenes, transitionPreset, productionPlan, assetManifest: undefined, styleProfile: { name: input.project.styleProfile?.name || 'AI Storyboard', style: requestedStyle || continuity || 'story-matched illustration with consistent recurring characters', palette: input.project.styleProfile?.palette || [], pacing: input.project.styleProfile?.pacing || 'balanced', tone: requestedTone }, updatedAt: new Date().toISOString(), generationWarnings };
   const issues = validateAnimationProject(project); if (issues.length) throw new Error(issues.slice(0, 8).map((item) => `${item.path}: ${item.message}`).join('; '));
-  if (input.narration) project = await generateAnimationNarration({ project, ...input.narration, speed: narrationRenderSpeed, preservePlannedDuration: true, strictSceneDurations: strictDuration }, onStage);
+  if (measuredNarrationProject) {
+    const narrationAssets = measuredNarrationProject.assets;
+    project = {
+      ...project,
+      assets: [...new Map([...project.assets, ...narrationAssets].map((asset) => [asset.id, asset])).values()],
+      scenes: project.scenes.map((scene) => {
+        if (scene.renderMode !== 'composite') return scene;
+        const narratedScene = measuredNarrationProject?.scenes.find((item) => item.id === scene.id);
+        if (!narratedScene || narratedScene.renderMode !== 'composite') return scene;
+        const audioLayers = narratedScene.layers.filter((layer) => layer.type === 'audio');
+        return { ...scene, durationMs: narratedScene.durationMs, layers: [...scene.layers, ...audioLayers] };
+      }),
+    };
+  } else if (input.narration) {
+    project = await generateAnimationNarration({ project, ...input.narration, speed: narrationRenderSpeed, preservePlannedDuration: false, strictSceneDurations: false, includeSubtitles: false }, onStage);
+  }
   await onStage('Đang kiểm tra project và tài nguyên');
   project = { ...project, scenes: project.scenes.map((scene) => scene.renderMode !== 'composite' ? scene : {
     ...scene,
-    layers: scene.layers.map((layer) => layer.name === 'Voiceover · Subtitle' ? { ...layer, fontSize: Math.max(layer.fontSize || 24, Math.round(Math.min(project.width, project.height) * .044)) } : layer),
-    commands: scene.commands.filter((command) => !(command.parameters?.autoVoiceover && scene.commands.some((other) => other.type === 'PLAY_ANIMATION' && other.targetId === command.targetId))),
+    layers: fitStaticImageCueTimings(scene).filter((layer) => layer.type === 'image' || layer.type === 'audio'),
+    commands: [],
+    camera: { ...scene.camera, commands: [] },
+    transition: { type: 'cut', durationMs: 0 },
   }) };
+  project = { ...project, transitionPreset: { type: 'cut', durationMs: 0 } };
   project.generationWarnings = [...(project.generationWarnings || []), ...checkAnimationQuality(project).filter((issue) => ['UNGROUNDED_MOTION', 'DECORATIVE_MOTION'].includes(issue.code)).map((issue) => issue.message)];
   return withAnimationAssetManifest(project);
 }
@@ -1037,7 +1183,6 @@ export async function directAnimationProject(input: DirectAnimationInput, onStag
   const brief = String(input.brief || '').trim().slice(0, 20_000);
   if (brief.length < 10) throw new Error('Hãy nhập chủ đề hoặc kịch bản ít nhất 10 ký tự.');
   if (!input.provider || !input.model) throw new Error('Chưa cấu hình provider/model cho AI Director.');
-  if (input.assetGeneration?.generator === 'flow-agent') await validateGoogleFlowSession();
   const requestedDurationSeconds = Number(input.targetDurationSeconds);
   const briefDurationSeconds = durationSecondsFromBrief(brief);
   const inputWords = brief.split(/\s+/).filter(Boolean).length;
@@ -1051,8 +1196,8 @@ export async function directAnimationProject(input: DirectAnimationInput, onStag
       ? Math.max(1, Math.round(Number(briefDurationSeconds)))
       : inputWords >= 40 ? Math.max(15, Math.min(1200, Math.round(inputWords / 2.25))) : 60;
   if (targetDurationSeconds > 0) {
-    const key = animationCheckpointKey({ version: 16, mode: 'ai-image-only-multi-account-flow-pool-reference-locked-static-shot-20pct-short-text-tts-speed-fitted-storyboard', projectId: input.project.id, brief, targetDurationSeconds, automaticDuration, strictDuration, width: input.project.width, height: input.project.height, fps: input.project.fps, style: input.project.styleProfile, provider: input.provider.id, model: input.model, narration: input.narration && { provider: input.narration.provider.id, model: input.narration.model, voice: input.narration.voice, speed: input.narration.speed }, referenceUploadId: input.assetGeneration?.referenceUploadId, referenceAssetId: input.assetGeneration?.referenceAssetId, assets: input.project.assets.map((asset) => ({ id: asset.id, uri: asset.uri, sprite: asset.sprite })) });
-    const executionKey = animationCheckpointKey({ key, image: { generator: input.assetGeneration?.generator, provider: input.assetGeneration?.provider?.id, model: input.assetGeneration?.model }, narration: input.narration && { provider: input.narration.provider.id, model: input.narration.model, voice: input.narration.voice, speed: input.narration.speed } });
+    const key = animationCheckpointKey({ version: 29, mode: 'ai-image-only-story-first-expressive-narration-v2', projectId: input.project.id, brief, targetDurationSeconds, automaticDuration, strictDuration, width: input.project.width, height: input.project.height, fps: input.project.fps, style: input.project.styleProfile, provider: input.provider.id, model: input.model, narration: input.narration && { provider: input.narration.provider.id, model: input.narration.model, voice: input.narration.voice, speed: 1 }, referenceUploadId: input.assetGeneration?.referenceUploadId, referenceAssetId: input.assetGeneration?.referenceAssetId, assets: input.project.assets.map((asset) => ({ id: asset.id, uri: asset.uri, sprite: asset.sprite })) });
+    const executionKey = animationCheckpointKey({ key, image: { generator: input.assetGeneration?.generator, provider: input.assetGeneration?.provider?.id, model: input.assetGeneration?.model }, narration: input.narration && { provider: input.narration.provider.id, model: input.narration.model, voice: input.narration.voice, speed: 1 } });
     return runAnimationOnce(executionKey, () => directLongAnimationProject(input, brief, targetDurationSeconds, strictDuration, key, onStage));
   }
   const library = await listAnimationAssets();
@@ -1112,7 +1257,7 @@ Canvas is ${input.project.width}x${input.project.height}. Use assetId values fro
     catch (repairError) { throw new Error(`AI Director đã thử sửa Scene JSON nhưng vẫn chưa hợp lệ: ${repairError instanceof Error ? repairError.message : String(repairError)}`); }
   }
   // TTS errors must not trigger a new planning/image-generation attempt.
-  if (input.narration) assembled = await generateAnimationNarration({ project: assembled, ...input.narration }, onStage);
+  if (input.narration) assembled = await generateAnimationNarration({ project: assembled, ...input.narration, includeSubtitles: false }, onStage);
   await onStage('Đang hoàn tất project');
   return withAnimationAssetManifest(assembled);
 }
@@ -1144,11 +1289,12 @@ export async function retryMissingAnimationImages(input: { project: AnimationPro
     const narration = plan.narrationUnits.find((unit) => unit.sceneId === task.scene.id)?.text || task.scene.narration;
     const style = String(project.styleProfile?.style || '').trim();
     const globalBeatIndex = imagePlanBeats.findIndex((beat) => beat.id === task.beat.id);
+    const shot = storyboardShotDirection(globalBeatIndex >= 0 ? globalBeatIndex : taskIndex, task.beat.technique);
     const beatTextRule = retryTextBeatIndexes.has(globalBeatIndex)
       ? `${retryTextRule} This repaired shot is text-eligible only if text materially improves the idea. The narration below is context only; never render or paraphrase it as image text. If no short 1-4 word label or compact number is clearly useful, use NO TEXT.`
       : 'THIS REPAIRED SHOT MUST BE TEXT-FREE. Render no intentional words, labels, headings, captions, prices, percentages, receipts, signs, UI text or decorative pseudo-writing. The narration below is semantic context only and must not appear inside the image.';
-    const prompt = `${task.beat.visibleEvidence}. Create one distinct full-frame educational-explainer shot for this missing beat. SPOKEN CONTEXT FOR MEANING ONLY — NEVER RENDER OR PARAPHRASE AS IMAGE TEXT: “${narration}”. Keep it meaningfully different from adjacent beats when the explanatory idea changes. Locked continuity: ${plan.continuityBible || style || 'keep recurring characters and visual language consistent'}. ${style ? `User visual style: ${style}.` : ''} ${beatTextRule} Avoid fake UI, watermarks, logos, borders or graphic violence.`;
-    const request: DirectorAssetRequest = { key: `retry-${task.beat.id}`, name: `Ảnh sửa · ${task.scene.name} · ${task.beatIndex + 1}`, prompt, type: 'background', tags: ['storyboard', 'repaired', 'atomic-visual', `scene-${task.sceneIndex + 1}`, `shot-${task.beatIndex + 1}`], style: style || undefined };
+    const prompt = `${task.beat.visibleEvidence}. Create one distinct full-frame educational-explainer shot for this missing beat. ${shot.instruction} SPOKEN CONTEXT FOR MEANING ONLY — NEVER RENDER OR PARAPHRASE AS IMAGE TEXT: “${narration}”. Keep it meaningfully different from adjacent beats when the explanatory idea changes. Locked continuity: ${plan.continuityBible || style || 'keep recurring characters and visual language consistent'}. ${style ? `User visual style: ${style}.` : ''} Use a specific story location, surface or environment; do not fall back to an empty cream background or a centered mascot portrait. ${beatTextRule} Avoid fake UI, watermarks, logos, borders or graphic violence.`;
+    const request: DirectorAssetRequest = { key: `retry-${task.beat.id}`, name: `Ảnh sửa · ${task.scene.name} · ${task.beatIndex + 1}`, prompt, type: 'background', tags: ['storyboard', 'repaired', 'atomic-visual', `scene-${task.sceneIndex + 1}`, `shot-${task.beatIndex + 1}`, `shot-${shot.type}`], style: style || undefined };
     const asset = await generateDirectorAssetUntilSuccess({
       request,
       generation: input.assetGeneration,
@@ -1161,11 +1307,8 @@ export async function retryMissingAnimationImages(input: { project: AnimationPro
     });
     const startMs = Math.max(0, Math.min(task.scene.durationMs - 1, Math.round(task.beat.startMs || 0)));
     const endMs = Math.max(startMs + 1, Math.min(task.scene.durationMs, Math.round(task.beat.endMs || task.scene.durationMs)));
-    const layer: SceneLayer = { id: task.layerId, name: `Ảnh đã sửa · ${asset.name}`, type: 'image', assetId: asset.id, visible: true, locked: true, zIndex: task.beatIndex, width: project.width, height: project.height, transform: { ...defaultTransform(), opacity: task.beatIndex ? 0 : 1, position: { x: project.width / 2, y: project.height / 2 } } };
-    const commands: AnimationCommand[] = [
-      ...(task.beatIndex ? [{ id: `visual-in-${task.sceneIndex}-${task.beatIndex}`, type: 'FADE_IN' as const, targetId: task.layerId, startMs, durationMs: 1, easing: 'ease-out' as const }] : []),
-      ...(task.beatIndex < task.beatCount - 1 ? [{ id: `visual-out-${task.sceneIndex}-${task.beatIndex}`, type: 'FADE_OUT' as const, targetId: task.layerId, startMs: endMs - 1, durationMs: 1, easing: 'ease-in-out' as const }] : []),
-    ];
+    const layer: SceneLayer = { id: task.layerId, name: `Ảnh đã sửa · ${asset.name}`, type: 'image', assetId: asset.id, visible: true, locked: true, zIndex: task.beatIndex, width: project.width, height: project.height, startMs, durationMs: Math.max(1, endMs - startMs), transform: { ...defaultTransform(), opacity: 1, position: { x: project.width / 2, y: project.height / 2 } } };
+    const commands: AnimationCommand[] = [];
     project = { ...project, assets: [...project.assets, asset], scenes: project.scenes.map((item) => item.id !== task.scene.id || item.renderMode !== 'composite' ? item : { ...item, layers: [...item.layers.filter((candidate) => candidate.id !== task.layerId && candidate.name !== 'Thiếu hình minh họa'), layer].sort((a, b) => a.zIndex - b.zIndex), commands: [...item.commands.filter((command) => command.targetId !== task.layerId), ...commands] }), updatedAt: new Date().toISOString() };
     repaired += 1;
   }

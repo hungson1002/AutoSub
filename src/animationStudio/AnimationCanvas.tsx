@@ -55,6 +55,24 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
     return () => onCanvasReadyRef.current?.(null);
   }, []);
 
+  // Load every project image before playback reaches its cue. Lazy-loading
+  // only the active cue makes a cut briefly expose the dark canvas background.
+  useEffect(() => {
+    const urls = [...new Set(assets.filter((asset) => (asset.type === 'image' || asset.type === 'background') && asset.uri).map((asset) => asset.uri))];
+    const repaint = () => drawRef.current();
+    const listeners: Array<{ image: HTMLImageElement; listener: () => void }> = [];
+    for (const uri of urls) {
+      const existing = imageCache.get(uri);
+      if (existing?.complete && existing.naturalWidth > 0) continue;
+      const image = existing || new Image();
+      const listener = () => repaint();
+      image.addEventListener('load', listener, { once: true });
+      listeners.push({ image, listener });
+      if (!existing) { imageCache.set(uri, image); image.src = uri; }
+    }
+    return () => listeners.forEach(({ image, listener }) => image.removeEventListener('load', listener));
+  }, [assets]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -97,7 +115,7 @@ export function AnimationCanvas({ scene, assets, width, height, timeMs, selected
         if (layer.type === 'image' && layer.assetId) {
           const asset = assets.find((item) => item.id === layer.assetId);
           const image = asset ? imageCache.get(asset.uri) : undefined;
-          if (image?.complete) {
+          if (image?.complete && image.naturalWidth > 0) {
             if (asset?.type === 'background') drawImageCover(context, image, layer.width, layer.height);
             else context.drawImage(image, 0, 0, layer.width, layer.height);
           }

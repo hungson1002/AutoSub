@@ -6,12 +6,14 @@ import path from 'node:path';
 import { ProviderError } from '../adapters/errors';
 import { run, temporaryRoot, workdir } from './ffmpeg';
 
-const VIENEU_VERSION = '3.6.4';
+const VIENEU_VERSION = '3.8.1';
 const SEA_G2P_VERSION = '0.9.1';
 const RUNTIME_ROOT = path.join(workdir, 'vieneu', 'runtime');
 const TEMP_ROOT = path.join(temporaryRoot, 'vieneu');
 const BRIDGE_SCRIPT = path.join(process.cwd(), 'server', 'services', 'vieneu_bridge.py');
-const IDLE_TIMEOUT_MS = 45_000;
+// Keep the ONNX model resident between previews. Loading VieNeu is much more
+// expensive than keeping its worker alive for a few minutes on this local app.
+const IDLE_TIMEOUT_MS = Math.max(60_000, Number(process.env.AUTOSUB_VIENEU_IDLE_TIMEOUT_MS) || 10 * 60_000);
 
 const pythonExecutable = () => process.platform === 'win32'
   ? path.join(RUNTIME_ROOT, '.venv', 'Scripts', 'python.exe')
@@ -24,13 +26,18 @@ export type VieneuInternalSilence = { startMs: number; endMs: number; durationMs
 const VIENEU_HESITATION_MIN_MS = 160;
 const VIENEU_NATURAL_PAUSE_MS = 95;
 const VIENEU_EDGE_GUARD_MS = 80;
-// Keep enough variation for natural emphasis while retaining a colder fallback
-// for short cues that develop unstable pauses or repeated phonemes.
-const VIENEU_PRIMARY_TEMPERATURE = 0.55;
-const VIENEU_RETRY_TEMPERATURE = 0.42;
+// VieNeu v3 Turbo's documented default is 0.8. A very small increase gives
+// punctuation and question/reveal contours a little more life without making
+// the speaker identity unstable. Keep a calmer retry only for short cues that
+// develop unstable pauses or repeated phonemes.
+const VIENEU_PRIMARY_TEMPERATURE = 0.82;
+const VIENEU_RETRY_TEMPERATURE = 0.62;
 
 export function prepareVieneuSpeechText(text: string) {
-  const content = text.normalize('NFC').replace(/\s+/g, ' ').trim();
+  const content = text.normalize('NFC')
+    .replace(/\[(?:laugh|chuckle|sigh|clear\s+throat|c\u01b0\u1eddi|th\u1edf\s+d\u00e0i|h\u1eafng\s+gi\u1ecdng)\]\s*/giu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!content || /[.!?…]["'’”)]*$/.test(content)) return content;
   return `${content}.`;
 }
@@ -167,7 +174,7 @@ export async function ensureVieneuRuntime(signal?: AbortSignal) {
     const uv = await findUv();
     if (!(await stat(executable).catch(() => undefined))?.isFile()) await runProcess(uv, ['venv', '--python', '3.12', path.join(RUNTIME_ROOT, '.venv')], signal);
     await runProcess(uv, ['pip', 'install', '--python', executable, '--no-deps', `vieneu==${VIENEU_VERSION}`], signal);
-    await runProcess(uv, ['pip', 'install', '--python', executable, `sea-g2p==${SEA_G2P_VERSION}`, 'onnxruntime>=1.20.0', 'numpy', 'soundfile', 'soxr', 'tokenizers>=0.20', 'huggingface_hub', 'PyYAML', 'perth>=0.2.0', 'kaldi-native-fbank==1.22.3'], signal);
+    await runProcess(uv, ['pip', 'install', '--python', executable, `sea-g2p==${SEA_G2P_VERSION}`, 'onnxruntime>=1.20.0', 'numpy', 'soundfile', 'soxr', 'tokenizers>=0.20', 'huggingface_hub', 'PyYAML', 'librosa>=0.11.0', 'kaldi-native-fbank==1.22.3'], signal);
     if (!await runtimeIsReady(executable, VIENEU_VERSION)) throw new ProviderError('VieNeu Local đã cài nhưng Python không import được runtime.', 503);
     return executable;
   })().catch((error) => {
@@ -194,6 +201,9 @@ const bridgeSlots: BridgeSlot[] = Array.from(
   () => ({ stdoutBuffer: '', stderrTail: '', load: 0, pending: new Map() }),
 );
 
+let vieneuWarmed = false;
+let vieneuWarmupPromise: Promise<void> | undefined;
+
 function clearIdleTimer(slot: BridgeSlot) {
   if (slot.idleTimer) clearTimeout(slot.idleTimer);
   slot.idleTimer = undefined;
@@ -211,6 +221,7 @@ function stopWorker(slot: BridgeSlot, reason?: Error) {
     slot.pending.clear();
   }
   slot.load = 0;
+  vieneuWarmed = false;
 }
 
 function scheduleIdleStop(slot: BridgeSlot) {
@@ -308,7 +319,28 @@ async function sendBridge(request: Record<string, unknown>, signal?: AbortSignal
 
 export async function vieneuRuntimeStatus(signal?: AbortSignal) {
   const executable = await ensureVieneuRuntime(signal);
-  return { executable, threads: vieneuThreads(), workers: vieneuWorkerCount() };
+  return { executable, threads: vieneuThreads(), workers: vieneuWorkerCount(), warmed: vieneuWarmed };
+}
+
+/**
+ * Load VieNeu's ONNX model in the persistent bridge without generating audio.
+ * All actual synthesis calls await the same promise, so opening Voice Studio
+ * and clicking "Nghe thử" at the same time cannot start duplicate model loads.
+ */
+export async function warmVieneuRuntime(signal?: AbortSignal) {
+  if (vieneuWarmed) return;
+  if (vieneuWarmupPromise) return vieneuWarmupPromise;
+  vieneuWarmupPromise = (async () => {
+    await ensureVieneuRuntime(signal);
+    await sendBridge({ op: 'warmup' }, signal);
+    vieneuWarmed = true;
+  })().catch((error) => {
+    vieneuWarmed = false;
+    throw error;
+  }).finally(() => {
+    vieneuWarmupPromise = undefined;
+  });
+  return vieneuWarmupPromise;
 }
 
 async function vieneuAudioQuality(file: string, signal?: AbortSignal) {
@@ -327,6 +359,7 @@ export async function synthesizeWithVieneu(text: string, voice: VieneuVoiceInput
   if (!voiceInput.referencePath && !voiceInput.presetName) throw new ProviderError('VieNeu TTS requires a preset voice or reference file.', 400);
   if (!content) throw new ProviderError('Nội dung VieNeu TTS đang trống.', 400);
   if (content.length > 8_000) throw new ProviderError('Mỗi lượt VieNeu TTS tối đa 8.000 ký tự.', 400);
+  await warmVieneuRuntime(signal);
   await mkdir(TEMP_ROOT, { recursive: true });
   const id = randomUUID();
   const rawOutput = path.join(TEMP_ROOT, `${id}.raw.wav`);

@@ -436,6 +436,28 @@ export function assertAnimationProject(value: unknown): asserts value is Animati
   if (issues.length) throw new Error(`Invalid animation project: ${issues.slice(0, 8).map((issue) => `${issue.path}: ${issue.message}`).join('; ')}`);
 }
 
+/** Repair stale editorial timestamps before a project reaches a renderer. */
+export function normalizeAnimationProjectForRender(project: AnimationProject): AnimationProject {
+  if (!project.productionPlan) return project;
+  const sceneDurations = new Map(project.scenes.map((scene) => [scene.id, Math.max(0, scene.durationMs)]));
+  const clamp = (sceneId: string, startMs: number | undefined, endMs: number | undefined) => {
+    const duration = sceneDurations.get(sceneId);
+    if (duration === undefined) return { startMs, endMs };
+    const nextStart = startMs === undefined ? undefined : Math.min(duration, Math.max(0, startMs));
+    const nextEnd = endMs === undefined ? undefined : Math.min(duration, Math.max(0, endMs));
+    if (nextStart !== undefined && nextEnd !== undefined && nextEnd <= nextStart) return { startMs: 0, endMs: duration };
+    return { startMs: nextStart, endMs: nextEnd };
+  };
+  return {
+    ...project,
+    productionPlan: {
+      ...project.productionPlan,
+      narrationUnits: project.productionPlan.narrationUnits.map((unit) => ({ ...unit, ...clamp(unit.sceneId, unit.startMs, unit.endMs) })),
+      beats: project.productionPlan.beats.map((beat) => ({ ...beat, ...clamp(beat.sceneId, beat.startMs, beat.endMs) })),
+    },
+  };
+}
+
 export const defaultTransform = (): Transform => ({
   position: { x: 0, y: 0 },
   scale: { x: 1, y: 1 },

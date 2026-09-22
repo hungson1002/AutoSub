@@ -7,6 +7,12 @@ import { resolveProviderType } from '../providers/base';
 import { cachedTtsPreview } from '../services/ttsPreviewCache';
 import { DUB_MASTERING_VERSION, masterDubBuffer } from '../services/audioMastering';
 import {
+  ensureVieneuPresetPreview,
+  isDefaultVieneuPresetPreview,
+  readVieneuPresetPreview,
+  warmVieneuPresetPreviews,
+} from '../services/vieneuPresetPreviews';
+import {
   cancelDubbingJob,
   createDubbingJob,
   findLatestDubbingJobByVideoId,
@@ -46,8 +52,22 @@ export async function dubbingRoutes(app: FastifyInstance) {
     try {
       const text = body.text?.trim() || 'Xin chào, đây là bản nghe thử để bạn đánh giá màu giọng, độ rõ, nhịp nói và cảm xúc trước khi dùng cho toàn bộ video.';
       const speed = Math.round((Number(body.speed) || 1) * 100) / 100;
+      const isVieneuPreview = resolveProviderType(body.provider) === 'vieneu-local'
+        && body.model === 'vieneu-v3-turbo'
+        && isDefaultVieneuPresetPreview(body.voice || '', text, speed);
+      if (isVieneuPreview) {
+        const diskCached = await readVieneuPresetPreview(body.voice || '', text, speed);
+        if (diskCached) {
+          reply.header('Content-Type', 'audio/wav');
+          reply.header('X-AutoSub-Preview-Cache', 'disk');
+          return reply.send(diskCached);
+        }
+      }
       const key = createHash('sha256').update(JSON.stringify({ masteringVersion: DUB_MASTERING_VERSION, providerId: body.provider.id, providerType: resolveProviderType(body.provider), baseUrl: body.provider.baseUrl, apiKey: body.provider.apiKey || '', model: body.model, voice: body.voice || '', speed, text })).digest('hex');
-      const result = await cachedTtsPreview(key, async () => masterDubBuffer(await synthesize(body.provider!, body.model!, body.voice || '', text, { speed, format: 'wav' })));
+      const result = await cachedTtsPreview(key, async () => {
+        if (isVieneuPreview) return ensureVieneuPresetPreview(body.voice || '', text, speed) as Promise<Buffer>;
+        return masterDubBuffer(await synthesize(body.provider!, body.model!, body.voice || '', text, { speed, format: 'wav' }));
+      });
       reply.header('Content-Type', 'audio/wav');
       reply.header('X-AutoSub-Preview-Cache', result.cache);
       return reply.send(result.audio);
@@ -99,6 +119,17 @@ export async function dubbingRoutes(app: FastifyInstance) {
     const body = (request.body as { cues?: Parameters<typeof retryFailedDubbingJob>[1] } | undefined) || {};
     try { return reply.send(await retryFailedDubbingJob(idFrom(request), Array.isArray(body.cues) ? body.cues : [])); }
     catch (error) { return sendRouteError(reply, error, 'Không thể chạy lại các cue lỗi.'); }
+  });
+
+  // Voice Studio calls this as soon as it opens. Warm the default preview first,
+  // then continue filling the remaining preset cache in the background.
+  app.post('/api/dubbing/vieneu-warmup', async (_request, reply) => {
+    try {
+      await warmVieneuPresetPreviews();
+      return reply.send({ ok: true, previews: 'ready-first-background-rest' });
+    } catch (error) {
+      return reply.code(error instanceof ProviderError ? error.status : 503).type('application/json').send(errorPayload(error, 'VieNeu chưa sẵn sàng.'));
+    }
   });
 
   app.post('/api/dubbing/jobs/:id/rebuild', async (request, reply) => {

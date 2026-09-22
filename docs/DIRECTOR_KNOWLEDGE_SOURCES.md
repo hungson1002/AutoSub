@@ -7,6 +7,10 @@ AutoSub uses implementation-neutral filmmaking principles derived from the sourc
 | [FilmAgent](https://github.com/HSwotch/FilmAgent) | Separate development, script/cinematography and verification; run a critique-correct pass before generation. |
 | [FilmAgent paper](https://arxiv.org/abs/2501.12909) | Plan actor actions and camera setups as explicit production decisions, then use collaborative feedback to verify intermediate work. |
 | [StoryMind](https://github.com/LinHao-city/StoryMind) | Plan shot scale, camera behavior, light and character anchors before generating video. |
+| [Storyboard AI](https://github.com/yogendra-yatnalkar/storyboard-ai) | Use a research-first flow: ground the topic, form the story and storyboard, then generate visual and voice assets. |
+| [script2video](https://github.com/reaink/script2video) | Convert a written script into explicit shot contracts with dialogue, mood, composition, sound and reference-image context. |
+| [Agentino script-to-video](https://github.com/agentino-os/agentino-pipeline-script-to-video) | Keep script, storyboard, voiceover, slideshow and captions as inspectable intermediate stages so a failed later stage can resume safely. |
+| [OpenMontage](https://github.com/nPowers/openmontage) | Separate research, proposal, script, scene plan, assets, edit and composition instead of collapsing the whole production into one prompt. |
 | [visual-skills](https://github.com/smixs/visual-skills) | Apply dramaturgy, shot function, blocking, lens choice and editing grammar before writing a model prompt. |
 | [MovieAgent](https://github.com/showlab/MovieAgent) | Separate story, directing, cinematography and location decisions so a short idea becomes an executable shot plan. |
 | [VideoClaw](https://github.com/HITsz-TMG/VideoClaw) | Treat AI filmmaking as an orchestrated multi-stage pipeline instead of a single prompt-to-video call. |

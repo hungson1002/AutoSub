@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { run, workdir } from './ffmpeg';
@@ -20,6 +20,21 @@ test('transcodes WebM and reuses cache by project fingerprint', async () => {
   await run('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=160x284:d=0.25', '-c:v', 'libvpx-vp9', source]);
   const changed = await transcodeAnimationRecording(projectId, await readFile(source), key);
   assert.notEqual(changed.path, first.path, 'client key cannot reuse a different recording');
+});
+
+test('retimes browser recording to the project timeline', async () => {
+  const source = path.join(workdir, `animation-render-retime-${randomUUID()}.webm`);
+  let outputPath = '';
+  try {
+    await run('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=160x284:d=0.5', '-c:v', 'libvpx-vp9', source]);
+    const result = await transcodeAnimationRecording(randomUUID(), await readFile(source), 'c'.repeat(64), { fps: 30, durationMs: 250 });
+    outputPath = result.path;
+    const output = await validateAnimationOutput(outputPath);
+    assert.ok(Math.abs(output.durationSeconds - 0.25) <= 1 / 30);
+  } finally {
+    await rm(source, { force: true });
+    if (outputPath) await rm(outputPath, { force: true });
+  }
 });
 
 test('persists and completes a queued render job', async () => {

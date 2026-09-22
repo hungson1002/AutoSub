@@ -19,4 +19,9 @@ Chrome bridge for [kodelyx/flow-agent](https://github.com/kodelyx/flow-agent). I
 4. Open <https://labs.google/fx/tools/flow>, sign in, and keep the tab open.
 5. Click the extension icon to open Flow Agent in Chrome's side panel.
 
+Use a normal browser tab, not an incognito/private tab. Flow Agent keeps the
+linked-account registry in the normal browser profile; incognito cookies and
+the Labs session are separate, so an incognito Flow tab cannot be used as a
+stable token source.
+
 Main documentation: [Flow Agent README](../README.md)

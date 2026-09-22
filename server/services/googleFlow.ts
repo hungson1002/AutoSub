@@ -27,7 +27,7 @@ const FLOW_REFERENCE_PREWARM_MAX = Math.max(1, Math.min(7, Number(process.env.AU
 // independent image slots. This gives 1 account = 2 parallel images,
 // 2 accounts = 4, 3 accounts = 6, ... without hammering one session with all
 // storyboard workers. The extension registers each linked account as its own
-// X-Client-Id, and the local Flow Agent already routes generation by that id.
+// X-Client-Id, and each isolated local Flow worker routes generation by that id.
 type FlowImageSlot = { clientId?: string; clientCount: number };
 type FlowCreditClient = { client_id?: string; ok?: boolean };
 const FLOW_IMAGE_SLOTS_PER_CLIENT = Math.max(1, Math.min(2, Number(process.env.AUTOSUB_FLOW_IMAGE_SLOTS_PER_ACCOUNT) || 2));
@@ -36,16 +36,11 @@ const FLOW_CLIENT_CACHE_MS = Math.max(250, Math.min(30_000, Number(process.env.A
 const FLOW_CLIENT_STALE_CACHE_MS = Math.max(30_000, Math.min(600_000, Number(process.env.AUTOSUB_FLOW_CLIENT_STALE_CACHE_MS) || 300_000));
 const FLOW_IMAGE_CLIENT_TIMEOUT_COOLDOWN_MS = Math.max(30_000, Math.min(600_000, Number(process.env.AUTOSUB_FLOW_IMAGE_CLIENT_TIMEOUT_COOLDOWN_MS) || 120_000));
 const FLOW_IMAGE_CLIENT_TRANSIENT_COOLDOWN_MS = Math.max(5_000, Math.min(120_000, Number(process.env.AUTOSUB_FLOW_IMAGE_CLIENT_TRANSIENT_COOLDOWN_MS) || 30_000));
-// The browser accounts can expose 14 theoretical slots, but all of them still
-// pass through one local FastAPI/extension bridge. Start with one request per
-// account, then open second slots only after sustained success. This preserves
-// real multi-account parallelism without allowing a 14-request burst to pin the
-// Flow Agent event loop and make /health unresponsive.
-// Live load tests on the current single-process Flow Agent show four single
-// image requests complete reliably, while a fifth simultaneous request can time
-// out and multi-image batches make the bridge less responsive. Keep four real
-// provider requests as the measured steady-state ceiling and rotate them fairly
-// across all ready accounts.
+const FLOW_IMAGE_CREDIT_CACHE_MS = Math.max(2_000, Math.min(60_000, Number(process.env.AUTOSUB_FLOW_IMAGE_CREDIT_CACHE_MS) || 10_000));
+const FLOW_IMAGE_CREDIT_COOLDOWN_MS = Math.max(30_000, Math.min(3_600_000, Number(process.env.AUTOSUB_FLOW_IMAGE_CREDIT_COOLDOWN_MS) || 300_000));
+// Isolated workers have their own local bridge, so two requests per account is
+// the intended multi-worker test mode. The legacy single bridge still uses its
+// smaller adaptive cap below; isolated workers use accountCount * slotsPerAccount.
 const FLOW_IMAGE_GLOBAL_CAP_MIN = Math.max(2, Math.min(4, Number(process.env.AUTOSUB_FLOW_IMAGE_GLOBAL_CAP_MIN) || 3));
 const FLOW_IMAGE_GLOBAL_CAP_MAX = Math.max(FLOW_IMAGE_GLOBAL_CAP_MIN, Math.min(4, Number(process.env.AUTOSUB_FLOW_IMAGE_GLOBAL_CAP_MAX) || 4));
 const FLOW_IMAGE_GLOBAL_CAP_INITIAL = Math.max(FLOW_IMAGE_GLOBAL_CAP_MIN, Math.min(FLOW_IMAGE_GLOBAL_CAP_MAX, Number(process.env.AUTOSUB_FLOW_IMAGE_GLOBAL_CAP_INITIAL) || 3));
@@ -61,6 +56,8 @@ let flowImageLastPressureAt = 0;
 let flowIsolatedReadyCount = 0;
 let flowClientCache: { at: number; ids: string[] } = { at: 0, ids: [] };
 let flowClientRefresh: Promise<string[]> | undefined;
+const flowImageCreditsByClient = new Map<string, { credits: number; at: number }>();
+const flowImageCreditReads = new Map<string, Promise<number | undefined>>();
 
 async function healthyFlowImageClients(signal?: AbortSignal) {
   const cacheAge = Date.now() - flowClientCache.at;
@@ -187,7 +184,7 @@ async function acquireFlowImageSlot(signal?: AbortSignal, preferredClientIds?: s
       await wait(Math.min(1_000, flowImagePressureUntil - now), signal);
       continue;
     }
-    const effectiveGlobalCap = flowIsolatedReadyCount > 0 ? flowIsolatedReadyCount : flowImageAdaptiveCap;
+    const effectiveGlobalCap = flowIsolatedReadyCount > 0 ? flowIsolatedReadyCount * FLOW_IMAGE_SLOTS_PER_CLIENT : flowImageAdaptiveCap;
     if (flowImageGlobalActive >= effectiveGlobalCap) {
       await waitForFlowImageCapacity(signal);
       continue;
@@ -201,17 +198,22 @@ async function acquireFlowImageSlot(signal?: AbortSignal, preferredClientIds?: s
       continue;
     }
     const afterProbe = Date.now();
-    const slotsPerClient = flowIsolatedReadyCount > 0 ? 1 : FLOW_IMAGE_SLOTS_PER_CLIENT;
+    const slotsPerClient = FLOW_IMAGE_SLOTS_PER_CLIENT;
+    const creditByClient = await readFlowImageCredits(clientIds, signal);
     const capacity = clientIds.map((clientId) => ({
       clientId,
       active: flowImageActiveByClient.get(clientId) || 0,
       lastStartedAt: flowImageLastStartedByClient.get(clientId) || 0,
       cooldownUntil: flowImageCooldownUntilByClient.get(clientId) || 0,
+      credits: creditByClient.get(clientId),
     })).filter((client) => client.active < slotsPerClient);
-    // Sorting by per-client active count makes the first wave spread across all
-    // seven accounts before any account receives its second concurrent request.
+    // Prefer the account with the largest live balance. Unknown balances stay
+    // usable, while known-zero accounts are the last resort until another
+    // account has been ruled out.
     const candidates = capacity.filter((client) => client.cooldownUntil <= afterProbe)
-      .sort((a, b) => a.active - b.active || a.lastStartedAt - b.lastStartedAt);
+      .sort((a, b) => creditRank(b.credits) - creditRank(a.credits)
+        || a.active - b.active
+        || a.lastStartedAt - b.lastStartedAt);
     const selected = candidates[0];
     if (!selected) {
       if (capacity.length) {
@@ -224,7 +226,7 @@ async function acquireFlowImageSlot(signal?: AbortSignal, preferredClientIds?: s
     }
     // Another waiter may have claimed the last global slot while /health was
     // being probed, so check the effective cap again before reserving.
-    const currentGlobalCap = flowIsolatedReadyCount > 0 ? flowIsolatedReadyCount : flowImageAdaptiveCap;
+    const currentGlobalCap = flowIsolatedReadyCount > 0 ? flowIsolatedReadyCount * FLOW_IMAGE_SLOTS_PER_CLIENT : flowImageAdaptiveCap;
     if (flowImageGlobalActive >= currentGlobalCap) {
       await waitForFlowImageCapacity(signal);
       continue;
@@ -254,10 +256,9 @@ function releaseFlowImageSlot(slot: FlowImageSlot) {
   const key = slot.clientId || '';
   flowImageActiveByClient.set(key, Math.max(0, (flowImageActiveByClient.get(key) || 1) - 1));
   flowImageGlobalActive = Math.max(0, flowImageGlobalActive - 1);
-  // Wake several queued workers after a completion because isolated workers
-  // expose one real lane per linked account, while the legacy bridge keeps its
-  // smaller adaptive cap.
-  const effectiveGlobalCap = flowIsolatedReadyCount > 0 ? flowIsolatedReadyCount : flowImageAdaptiveCap;
+  // Wake queued workers after a completion. Isolated workers expose two real
+  // lanes per linked account, while the legacy bridge keeps its smaller cap.
+  const effectiveGlobalCap = flowIsolatedReadyCount > 0 ? flowIsolatedReadyCount * FLOW_IMAGE_SLOTS_PER_CLIENT : flowImageAdaptiveCap;
   for (let index = 0; index < Math.max(1, effectiveGlobalCap - flowImageGlobalActive); index += 1) wakeFlowImageWaiter();
 }
 
@@ -269,9 +270,9 @@ export async function getGoogleFlowImagePoolCapacity(signal?: AbortSignal) {
   const ids = await healthyFlowImageClients(signal);
   const accountCount = Math.max(1, ids.filter(Boolean).length || 1);
   const isolated = flowIsolatedReadyCount > 0;
-  const slotsPerAccount = isolated ? 1 : FLOW_IMAGE_SLOTS_PER_CLIENT;
+  const slotsPerAccount = FLOW_IMAGE_SLOTS_PER_CLIENT;
   const totalSlots = accountCount * slotsPerAccount;
-  const effectiveCap = isolated ? accountCount : flowImageAdaptiveCap;
+  const effectiveCap = isolated ? totalSlots : flowImageAdaptiveCap;
   return {
     accountCount,
     slotsPerAccount,
@@ -287,6 +288,58 @@ async function flowBaseUrlForClient(clientId?: string) {
   if (!clientId) return baseUrl();
   return (await isolatedFlowWorkerBase(clientId)) || baseUrl();
 }
+
+function creditRank(credits: number | undefined) {
+  if (typeof credits !== 'number' || !Number.isFinite(credits)) return -1;
+  if (credits <= 0) return -2;
+  return credits;
+}
+
+async function readFlowImageCredit(clientId: string, signal?: AbortSignal): Promise<number | undefined> {
+  const normalizedClientId = clientId.trim();
+  if (!normalizedClientId) return undefined;
+  const cached = flowImageCreditsByClient.get(normalizedClientId);
+  if (cached && Date.now() - cached.at < FLOW_IMAGE_CREDIT_CACHE_MS) return cached.credits;
+  const inFlight = flowImageCreditReads.get(normalizedClientId);
+  if (inFlight) return inFlight;
+
+  const read = (async () => {
+    try {
+      const requestTimeout = AbortSignal.timeout(3_500);
+      const requestSignal = signal ? AbortSignal.any([signal, requestTimeout]) : requestTimeout;
+      const clientBase = await flowBaseUrlForClient(normalizedClientId);
+      const response = await fetch(`${clientBase}/v1/credits`, {
+        signal: requestSignal,
+        headers: { ...headers(), 'X-Client-Id': normalizedClientId },
+      });
+      if (!response.ok) return undefined;
+      const body = await response.json() as {
+        data?: { credits?: unknown };
+        credits?: unknown;
+        total_credits?: unknown;
+      };
+      const credits = Number(body.data?.credits ?? body.credits ?? body.total_credits);
+      if (!Number.isFinite(credits)) return undefined;
+      flowImageCreditsByClient.set(normalizedClientId, { credits, at: Date.now() });
+      return credits;
+    } catch {
+      return undefined;
+    }
+  })().finally(() => {
+    flowImageCreditReads.delete(normalizedClientId);
+  });
+  flowImageCreditReads.set(normalizedClientId, read);
+  return read;
+}
+
+async function readFlowImageCredits(clientIds: string[], signal?: AbortSignal) {
+  const entries = await Promise.all(clientIds.map(async (clientId) => [
+    clientId,
+    await readFlowImageCredit(clientId, signal),
+  ] as const));
+  return new Map(entries);
+}
+
 const localFlowUrl = () => {
   try { return ['127.0.0.1', 'localhost', '::1'].includes(new URL(baseUrl()).hostname); }
   catch { return false; }
@@ -372,7 +425,7 @@ export async function ensureGoogleFlowAgentRuntime() {
                 // Each isolated Flow account intentionally exposes two image slots.
                 // Keep the bridge semaphore aligned with the AutoSub scheduler so
                 // both requests can actually run concurrently on that account.
-                MAX_CONCURRENT_REQUESTS: process.env.MAX_CONCURRENT_REQUESTS || '2',
+                MAX_CONCURRENT_REQUESTS: process.env.AUTOSUB_FLOW_WORKER_CONCURRENCY || process.env.MAX_CONCURRENT_REQUESTS || '2',
                 // Multi-account scheduling already spreads the first wave across
                 // distinct sessions. A three-second GLOBAL gap made seven ready
                 // accounts behave almost sequentially, so keep only a small
@@ -455,6 +508,9 @@ async function parseResponse<T>(response: Response): Promise<T> {
       throw new FlowSessionError('Tab Google Flow đã kết nối nhưng lượt gọi tới Google bị gián đoạn (Failed to fetch). Phiên trên tab hiện tại cần được làm mới trước khi thử lại.', 'FLOW_FETCH_FAILED');
     }
     if (response.status === 401 || response.status === 403) throw new Error(`Flow Agent từ chối xác thực (HTTP ${response.status}): ${detail}`);
+    if (response.status === 429 && /credit|quota|not enough|insufficient/i.test(detail)) {
+      throw new FlowCreditError(`Tài khoản Google Flow không đủ credit: ${detail}`);
+    }
     if (response.status === 429) throw new Error(`Google Flow đang giới hạn request hoặc tài khoản không đủ credit: ${detail}`);
     throw new Error(`Flow Agent HTTP ${response.status}: ${detail}`);
   }
@@ -507,7 +563,7 @@ export async function validateGoogleFlowSession(_credentials?: unknown, signal?:
     await refreshFlowSessionOnce(signal);
     status = await flowAgentStatus(signal);
   }
-  if (!status.hasFlowKey) throw new FlowSessionError('Flow Agent chưa lấy được token sau khi tự mở và làm mới Google Flow. Hãy đăng nhập hoặc hoàn tất xác minh trên tab Flow vừa mở.');
+  if (!status.hasFlowKey) throw new FlowSessionError('Flow Agent chưa lấy được token. Hãy mở Google Flow trong cửa sổ thường (không ẩn danh), đăng nhập đúng tài khoản rồi bấm Refresh Token; AutoSub không tự mở tab khi đang chạy voice.');
   if (!status.connected) throw new FlowSessionError(('error' in status && status.error) || `Flow Agent chưa sẵn sàng (${status.status}).`);
   return { ok: true as const };
 }
@@ -521,8 +577,8 @@ async function refreshFlowSession(signal?: AbortSignal) {
   const targets: Array<string | undefined> = clientIds.length ? clientIds : [undefined];
   for (const clientId of targets) {
     const response = await fetch(`${baseUrl()}/v1/refresh-tokens`, {
-      // Upstream waits six seconds between open_flow_tab and refresh_flow_tab.
-      // The five-second read-probe timeout must not abort that command.
+      // Refresh reuses a normal Flow tab opened by the user; it must not turn
+      // an unrelated voice task into an implicit browser-tab launch.
       method: 'POST', signal, headers: { ...headers(), 'X-Force-Refresh': '1', ...(clientId ? { 'X-Client-Id': clientId } : {}) },
     });
     if (!response.ok) throw new FlowSessionError(`Flow Agent không thể làm mới phiên (HTTP ${response.status}).`);
@@ -658,7 +714,14 @@ async function requestWithSessionRecovery<T>(request: (attempt: number) => Promi
   }
 }
 
-type FlowImageOptions = { model?: string; size?: string; referenceImagePath?: string; signal?: AbortSignal; idempotencyKey?: string };
+type FlowImageOptions = {
+  model?: string;
+  size?: string;
+  referenceImagePath?: string;
+  signal?: AbortSignal;
+  idempotencyKey?: string;
+  _creditRotationAttempt?: number;
+};
 
 const FLOW_MULTI_PROMPT_PREFIX = '__AUTOSUB_MULTI_PROMPT_V1__:';
 function encodeFlowImagePrompts(prompts: string[]) {
@@ -756,6 +819,7 @@ export async function generateGoogleFlowImages(prompt: string | string[], output
   const deadline = AbortSignal.timeout(120_000);
   const requestSignal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
   const requestBase = await flowBaseUrlForClient(slot.clientId);
+  let slotReleased = false;
   try {
     await ensureGenerationFlowSession(requestSignal);
     // Upload the recurring reference once per linked account, then reuse that
@@ -834,6 +898,26 @@ export async function generateGoogleFlowImages(prompt: string | string[], output
     if (flowIsolatedReadyCount === 0) noteFlowImageSuccess();
     return results.map(({ bytes }) => ({ model: options.model || 'narwhal', bytes: bytes.length }));
   } catch (error) {
+    if (error instanceof FlowCreditError) {
+      if (slot.clientId) {
+        flowImageCreditsByClient.set(slot.clientId, { credits: 0, at: Date.now() });
+        cooldownFlowImageClient(slot.clientId, FLOW_IMAGE_CREDIT_COOLDOWN_MS);
+        const rotationAttempt = options._creditRotationAttempt || 0;
+        const knownClientCount = flowClientCache.ids.filter(Boolean).length;
+        // A 402 means this request was not charged. Release the current lane
+        // and transparently retry the same image on the next ranked account.
+        // Keep the retry bounded so an all-exhausted pool returns a clear error.
+        if (rotationAttempt < Math.max(0, (knownClientCount || 1) - 1)) {
+          releaseFlowImageSlot(slot);
+          slotReleased = true;
+          return generateGoogleFlowImages(prompt, outputFiles, {
+            ...options,
+            idempotencyKey: undefined,
+            _creditRotationAttempt: rotationAttempt + 1,
+          });
+        }
+      }
+    }
     if (deadline.aborted && !options.signal?.aborted) {
       cooldownFlowImageClient(slot.clientId, FLOW_IMAGE_CLIENT_TIMEOUT_COOLDOWN_MS);
       if (flowIsolatedReadyCount === 0) noteFlowImagePressure(slot.clientId ? `timeout ${slot.clientId}` : 'timeout', true);
@@ -861,7 +945,7 @@ export async function generateGoogleFlowImages(prompt: string | string[], output
     throw error;
   }
   } finally {
-    releaseFlowImageSlot(slot);
+    if (!slotReleased) releaseFlowImageSlot(slot);
   }
 }
 

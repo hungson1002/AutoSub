@@ -8,9 +8,8 @@ import { run, workdir } from './ffmpeg';
 export const VIENEU_VOICE_ROOT = path.join(workdir, 'voice-clones', 'vieneu');
 export const MAX_VOICE_REFERENCE_BYTES = 25 * 1024 * 1024;
 export const MIN_VOICE_REFERENCE_SECONDS = 3;
-export const MAX_VOICE_REFERENCE_SECONDS = 15;
-const NORMALIZED_REFERENCE_SECONDS = 8;
-export const VOICE_REFERENCE_VERSION = 3;
+export const VOICE_CLONE_SAMPLE_SECONDS = 10;
+export const VOICE_REFERENCE_VERSION = 4;
 export const VOICE_REFERENCE_SAMPLE_RATE = 48_000;
 export const VOICE_REFERENCE_FILTER = 'silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.10:start_threshold=-45dB,areverse';
 
@@ -83,8 +82,6 @@ export async function createVoiceCloneProfile(input: { name: string; sourcePath:
   if (sourceInfo.size > MAX_VOICE_REFERENCE_BYTES) throw new ProviderError('File mẫu giọng tối đa 25 MB.', 413);
   const sourceDuration = await probeDurationSeconds(input.sourcePath);
   if (sourceDuration < MIN_VOICE_REFERENCE_SECONDS) throw new ProviderError('Mẫu giọng phải dài ít nhất 3 giây.', 400);
-  if (sourceDuration > MAX_VOICE_REFERENCE_SECONDS) throw new ProviderError('Mẫu giọng tối đa 15 giây. Hãy cắt một đoạn sạch khoảng 3–8 giây.', 400);
-
   await mkdir(VIENEU_VOICE_ROOT, { recursive: true });
   const id = randomUUID();
   const staging = path.join(VIENEU_VOICE_ROOT, `.${id}.tmp`);
@@ -93,8 +90,8 @@ export async function createVoiceCloneProfile(input: { name: string; sourcePath:
   await mkdir(staging, { recursive: true });
   try {
     await run('ffmpeg', [
-      '-y', '-v', 'error', '-i', input.sourcePath,
-      '-vn', '-filter:a', VOICE_REFERENCE_FILTER, '-t', String(NORMALIZED_REFERENCE_SECONDS),
+      '-y', '-v', 'error', '-t', String(VOICE_CLONE_SAMPLE_SECONDS), '-i', input.sourcePath,
+      '-vn', '-filter:a', VOICE_REFERENCE_FILTER,
       '-ac', '1', '-ar', String(VOICE_REFERENCE_SAMPLE_RATE), '-c:a', 'pcm_s16le', referencePath,
     ]);
     const normalizedDuration = await probeDurationSeconds(referencePath);

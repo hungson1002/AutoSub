@@ -54,9 +54,20 @@ export function evaluateTransform(base: Transform, commands: AnimationCommand[],
 
 export function evaluateScene(scene: CompositeScene, timeMs: number): EvaluatedScene {
   const boundedTime = Math.min(scene.durationMs, Math.max(0, timeMs));
+  const timedImages = scene.layers.filter((layer) => layer.visible && layer.type === 'image' && layer.startMs !== undefined && layer.durationMs !== undefined);
+  const activeTimedImageIds = timedImages.length
+    ? (() => {
+      const active = timedImages.filter((layer) => boundedTime >= (layer.startMs || 0) && boundedTime < (layer.startMs || 0) + (layer.durationMs || 0));
+      if (active.length) return new Set(active.map((layer) => layer.id));
+      // A rounded cue boundary can leave a tiny hole between two images. Keep
+      // the previous still visible instead of flashing the scene background.
+      const previous = timedImages.filter((layer) => (layer.startMs || 0) <= boundedTime).sort((a, b) => (b.startMs || 0) - (a.startMs || 0))[0] || timedImages[0];
+      return new Set(previous ? [previous.id] : []);
+    })()
+    : undefined;
   return {
     layers: scene.layers
-      .filter((layer) => layer.visible)
+      .filter((layer) => layer.visible && (layer.type !== 'image' || layer.startMs === undefined || layer.durationMs === undefined || !activeTimedImageIds || activeTimedImageIds.has(layer.id)))
       .sort((a, b) => a.zIndex - b.zIndex)
       .map((layer) => ({ ...layer, transform: evaluateTransform(layer.transform, scene.commands.filter((command) => command.targetId === layer.id), boundedTime) })),
     camera: evaluateTransform(scene.camera.transform, scene.camera.commands, boundedTime),

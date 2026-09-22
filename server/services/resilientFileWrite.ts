@@ -25,9 +25,9 @@ async function retryTransient<T>(operation: () => Promise<T>, delays = [30, 75, 
 
 /**
  * OneDrive/Windows can briefly lock an existing JSON file while syncing it.
- * Keep the normal atomic temp->rename path, but retry transient locks and fall
- * back to a serialized direct overwrite if the sync provider holds the target
- * longer than the rename retry window.
+ * Keep the normal atomic temp->rename path and retry transient locks. Never
+ * fall back to truncating the destination in place: an interrupted direct
+ * overwrite can leave a valid JSON file as a zero-filled or partial file.
  */
 export async function writeTextFileResilient(file: string, text: string) {
   await mkdir(path.dirname(file), { recursive: true });
@@ -37,15 +37,8 @@ export async function writeTextFileResilient(file: string, text: string) {
     await retryTransient(() => rename(temporary, file));
     return;
   } catch (error) {
-    if (!isTransientFileLock(error)) {
-      await rm(temporary, { force: true }).catch(() => {});
-      throw error;
-    }
-    try {
-      await retryTransient(() => writeFile(file, text, 'utf8'), [50, 100, 200, 400, 800, 1200]);
-    } finally {
-      await rm(temporary, { force: true }).catch(() => {});
-    }
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
   }
 }
 

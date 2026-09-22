@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { ProviderError } from '../adapters/errors';
 import { run } from './ffmpeg';
-import { createVoiceCloneProfile, deleteVoiceCloneProfile, listVoiceCloneProfiles, resolveVoiceCloneReference, VOICE_REFERENCE_SAMPLE_RATE, VOICE_REFERENCE_VERSION } from './voiceClones';
+import { createVoiceCloneProfile, deleteVoiceCloneProfile, listVoiceCloneProfiles, resolveVoiceCloneReference, VOICE_CLONE_SAMPLE_SECONDS, VOICE_REFERENCE_SAMPLE_RATE, VOICE_REFERENCE_VERSION } from './voiceClones';
 
 test('voice clone profile requires explicit authorization', async () => {
   await assert.rejects(
@@ -19,13 +19,14 @@ test('voice clone profile normalizes, lists, resolves and deletes a reference', 
   const source = path.join(temporary, 'sample.wav');
   let profileId = '';
   try {
-    await run('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=3.2', '-ac', '1', '-ar', '24000', source]);
+    await run('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=12.2', '-ac', '1', '-ar', '24000', source]);
     const profile = await createVoiceCloneProfile({ name: '  Test   Voice  ', sourcePath: source, sourceName: 'sample.wav', authorized: true });
     profileId = profile.id;
     assert.equal(profile.name, 'Test Voice');
     assert.equal(profile.authorized, true);
     assert.equal(profile.referenceVersion, VOICE_REFERENCE_VERSION);
-    assert.ok(profile.durationMs >= 3_000);
+    assert.ok(profile.durationMs >= VOICE_CLONE_SAMPLE_SECONDS * 1000 - 250);
+    assert.ok(profile.durationMs <= VOICE_CLONE_SAMPLE_SECONDS * 1000 + 250);
     assert.ok((await listVoiceCloneProfiles()).some((item) => item.id === profile.id));
     const resolved = await resolveVoiceCloneReference(profile.id);
     assert.equal(resolved.profile.id, profile.id);

@@ -10,7 +10,8 @@ export function checkAnimationQuality(project: AnimationProject): AnimationQuali
   for (const scene of project.scenes) {
     if (scene.renderMode !== 'composite') continue;
     if (!scene.layers.length) issues.push({ severity: 'error', code: 'EMPTY_SCENE', sceneId: scene.id, message: 'Scene không có layer.' });
-    if (!scene.commands.length && !scene.camera.commands.length && scene.durationMs > 2500) issues.push({ severity: 'warning', code: 'STATIC_SCENE', sceneId: scene.id, message: 'Scene dài nhưng không có chuyển động hoặc camera.' });
+    const imageOnly = scene.layers.length > 0 && scene.layers.every((layer) => ['image', 'audio'].includes(layer.type)) && scene.layers.some((layer) => layer.type === 'image');
+    if (!imageOnly && !scene.commands.length && !scene.camera.commands.length && scene.durationMs > 2500) issues.push({ severity: 'warning', code: 'STATIC_SCENE', sceneId: scene.id, message: 'Scene dài nhưng không có chuyển động hoặc camera.' });
     const illustrated = scene.layers.some((layer) => layer.visible && layer.type === 'image' && layer.width >= project.width * .8 && layer.height >= project.height * .8);
     const performance = scene.commands.some((command) => {
       const layer = scene.layers.find((item) => item.id === command.targetId && item.visible);
@@ -19,7 +20,7 @@ export function checkAnimationQuality(project: AnimationProject): AnimationQuali
       const changes = command.from !== undefined && command.to !== undefined && JSON.stringify(command.from) !== JSON.stringify(command.to);
       return layer && !isLegacyAnimationAccent(layer) && grounded && ((layer.type === 'sprite' && command.type === 'PLAY_ANIMATION' && project.assets.find((asset) => asset.id === layer.assetId)?.sprite?.clips[command.animation || '']) || (['shape', 'diagram', 'chart'].includes(layer.type) && ['MOVE', 'SCALE', 'ROTATE'].includes(command.type) && changes));
     });
-    if (illustrated && !performance && scene.durationMs > 2500) issues.push({ severity: 'warning', code: 'SLIDESHOW_ONLY', sceneId: scene.id, message: 'Cảnh chỉ chuyển/zoom ảnh minh họa, chưa có chuyển động đối tượng. Cần sprite, sơ đồ có tiến trình hoặc clip video thật.' });
+    if (illustrated && !performance && !imageOnly && scene.durationMs > 2500) issues.push({ severity: 'warning', code: 'SLIDESHOW_ONLY', sceneId: scene.id, message: 'Cảnh chỉ chuyển/zoom ảnh minh họa, chưa có chuyển động đối tượng. Cần sprite, sơ đồ có tiến trình hoặc clip video thật.' });
     for (const layer of scene.layers) {
       if (isLegacyAnimationAccent(layer)) issues.push({ severity: 'warning', code: 'DECORATIVE_MOTION', sceneId: scene.id, layerId: layer.id, message: 'Hiệu ứng trang trí tự chèn cũ không gắn với nội dung. Sửa chất lượng sẽ bỏ riêng lớp này.' });
       if (!isLegacyAnimationAccent(layer) && ['shape', 'diagram', 'chart', 'sprite'].includes(layer.type) && scene.commands.some((command) => {

@@ -290,11 +290,15 @@ async function refreshMonitor() {
     document.getElementById('metric-success').textContent = status.metrics?.successCount || 0;
     document.getElementById('metric-failed').textContent = status.metrics?.failedCount || 0;
     const age = status.tokenAge == null ? null : Math.round(status.tokenAge / 60000);
-    document.getElementById('monitor-token').textContent = status.flowKeyPresent ? `Token ${age || 0}m` : 'No token';
+    const linkedReady = Math.max(0, Number(status.readyLinkedAccounts) || 0);
+    document.getElementById('monitor-token').textContent = status.flowKeyPresent
+      ? `Token ${age || 0}m`
+      : linkedReady ? `${linkedReady} linked token${linkedReady === 1 ? '' : 's'}` : 'No token';
     document.getElementById('monitor-client').textContent = (status.clientId || '-').replace(/^client-/, '');
     // Credits cost a real backend round-trip, so only fetch them when the
     // connection actually comes back up - not on every status tick.
-    if (connected && !wasConnected) refreshQuickStatus();
+    const creditText = document.getElementById('quick-credits')?.textContent || '—';
+    if (connected && (!wasConnected || (creditText === '—' && Date.now() % 15000 < 3000))) refreshQuickStatus();
     wasConnected = connected;
   } catch {
     const mark = document.getElementById('extension-mark');
@@ -434,6 +438,7 @@ async function refreshQuickStatus() {
     try {
       creditData = await runtimeMessage({ type: 'GET_CLIENT_CREDITS' });
     } catch (backgroundError) {
+      if (backgroundError?.message === 'CREDITS_UNAVAILABLE') throw backgroundError;
       console.warn('[Flow Agent] Background credits failed, trying direct API:', backgroundError);
       creditData = await apiJson('/v1/credits');
     }

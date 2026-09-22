@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { allocateLockedSceneDurations, animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, buildVisualDensityPlan, characterReferenceDirective, chooseStoryboardTextBeatIndexes, directorRepairRule, durationSecondsFromBrief, jsonFromDirectorReply, narrationFitWordTargets, normalizeLongAnimationSegments, replaceUnavailableGeneratedAssets, visualTextDirective, visualTextLanguage } from './animationDirector';
+import { allocateLockedSceneDurations, animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, buildVisualDensityPlan, characterReferenceDirective, chooseStoryboardTextBeatIndexes, directorRepairRule, durationSecondsFromBrief, jsonFromDirectorReply, narrationFitWordTargets, normalizeLongAnimationSegments, normalizeResearchPacket, replaceUnavailableGeneratedAssets, researchBlueprintDirective, storyboardShotDirection, visualTextDirective, visualTextLanguage } from './animationDirector';
 import { animationAssetCacheKey, wavDurationMs } from './animationAssets';
 import { animationCraftRules } from './directorKnowledge';
 import { animationPerformancePlanIssues } from './animationDirector';
@@ -37,6 +37,36 @@ test('character reference directive makes the attached image authoritative over 
   assert.match(rule, /Ignore any conflicting appearance words/i);
   assert.match(rule, /hoodie\/shirt\/jacket/i);
   assert.match(rule, /chibi\/anime/i);
+});
+
+test('shot direction rotates composition and carries contextual backgrounds', () => {
+  const shots = Array.from({ length: 8 }, (_, index) => storyboardShotDirection(index).type);
+  assert.deepEqual(shots, ['establishing', 'action', 'detail', 'over-shoulder', 'comparison', 'process', 'reaction', 'metaphor']);
+  assert.equal(storyboardShotDirection(20, 'comparison').type, 'comparison');
+  assert.match(storyboardShotDirection(1).instruction, /medium or full-body/i);
+  assert.match(storyboardShotDirection(0).instruction, /foreground, midground and background/i);
+});
+
+test('research packet normalizes a narrative blueprint with a safe fallback', () => {
+  const packet = normalizeResearchPacket({
+    centralQuestion: 'Vì sao giá tăng?',
+    thesis: 'Cầu tăng nhanh hơn cung trong ngắn hạn.',
+    audiencePromise: 'Người xem hiểu cơ chế bằng một ví dụ đời thường.',
+    sourceQueries: ['Tìm số liệu CPI chính thức'],
+    narrativeArc: [
+      { phase: 'hook', objective: 'Mở bằng một lần đi chợ.' },
+      { phase: 'question', objective: 'Đặt câu hỏi về hóa đơn.' },
+      { phase: 'mechanism', objective: 'Giải thích cung và cầu.' },
+      { phase: 'payoff', objective: 'Trả lời và callback.' },
+    ],
+  });
+  assert.equal(packet.audiencePromise, 'Người xem hiểu cơ chế bằng một ví dụ đời thường.');
+  assert.deepEqual(packet.sourceQueries, ['Tìm số liệu CPI chính thức']);
+  assert.equal(packet.narrativeArc.length, 4);
+  assert.match(researchBlueprintDirective(packet), /sourceQueries/);
+  const fallback = normalizeResearchPacket({ centralQuestion: 'Một câu hỏi', thesis: 'Một luận đề' });
+  assert.equal(fallback.narrativeArc.length, 6);
+  assert.equal(fallback.narrativeArc.at(-1)?.phase, 'payoff');
 });
 
 test('storyboard text policy keeps normal frames visual-first like the references', () => {
@@ -264,7 +294,7 @@ test('visual beats create short transitions and independent camera movement', ()
   assert.ok(timeline.commands.every((command) => command.startMs + command.durationMs <= 10_000));
 });
 
-test('locked storyboard images fill the frame without camera movement', () => {
+test('long locked storyboard holds receive restrained editorial camera motion', () => {
   const now = new Date().toISOString();
   const visual = { id: 'whiteboard-shot', type: 'background' as const, name: 'Whiteboard shot', uri: '/whiteboard.png', tags: [], createdAt: now };
   const timeline = buildVisualBeatTimeline({
@@ -276,10 +306,9 @@ test('locked storyboard images fill the frame without camera movement', () => {
     beats: [{ purpose: 'Explain', visual: 'presenter and cooking fire', motion: 'locked', transition: 'crossfade' }],
   });
   assert.equal(timeline.layers.length, 1);
-  assert.equal(timeline.layers[0].width, 1280);
-  assert.equal(timeline.layers[0].height, 720);
-  assert.deepEqual(timeline.layers[0].transform.scale, { x: 1, y: 1 });
-  assert.equal(timeline.commands.some((command) => command.type === 'MOVE' || command.type === 'SCALE'), false);
+  assert.ok(timeline.layers[0].width > 1280);
+  assert.ok(timeline.layers[0].height > 720);
+  assert.ok(timeline.commands.some((command) => command.type === 'MOVE' || command.type === 'SCALE'));
 });
 
 test('character references create distinct image cache entries', () => {

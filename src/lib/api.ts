@@ -28,6 +28,13 @@ import type { AnimationAsset, AnimationProject } from "../../shared/animationStu
 const MEDIA_BACKEND_ORIGIN = "http://127.0.0.1:8787";
 export const MAX_BROWSER_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 
+export async function animationProjectRenderCacheKey(project: AnimationProject, showSubtitles: boolean) {
+  const renderState = { ...project, createdAt: "", updatedAt: "", assets: project.assets.map((asset) => ({ ...asset, createdAt: "" })), showSubtitles, engine: "remotion-v1" };
+  const encoded = new TextEncoder().encode(JSON.stringify(renderState));
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function dataUrlToBlob(url: string) {
   const response = await fetch(url);
   if (!response.ok) throw new Error("Logo image could not be read.");
@@ -294,24 +301,26 @@ export const api = {
   editAnimationProject: (input: { instruction: string; project: AnimationProject; provider: AIProvider; model: string }) => request<AnimationProject>("/api/animation-studio/edit-project", { method: "POST", body: JSON.stringify(input) }),
   checkAnimationQuality: (project: AnimationProject) => request<{ issues: Array<{ severity: "error" | "warning"; code: string; sceneId: string; layerId?: string; message: string }> }>("/api/animation-studio/quality-check", { method: "POST", body: JSON.stringify(project) }),
   fixAnimationQuality: (project: AnimationProject) => request<{ project: AnimationProject; fixed: number; remaining: Array<{ severity: "error" | "warning"; code: string; sceneId: string; layerId?: string; message: string }> }>("/api/animation-studio/quality-fix", { method: "POST", body: JSON.stringify(project) }),
-  renderAnimationProject: async (projectId: string, recording: Blob, project?: AnimationProject) => {
+  renderAnimationProject: async (projectId: string, recording: Blob, project?: AnimationProject, onProgress?: (progress: number) => void) => {
     const renderState = project ? { ...project, createdAt: "", updatedAt: "", assets: project.assets.map((asset) => ({ ...asset, createdAt: "" })) } : { projectId }; const encoded = new TextEncoder().encode(JSON.stringify(renderState)); const digest = await crypto.subtle.digest("SHA-256", encoded); const cacheKey = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    const queued = await fetch(`/api/animation-studio/projects/${encodeURIComponent(projectId)}/render-jobs`, { method: "POST", headers: { "Content-Type": "video/webm", "X-Animation-Cache-Key": cacheKey }, body: recording });
+    const durationMs = project?.scenes.reduce((total, scene) => total + Math.max(0, scene.durationMs), 0);
+    const headers: Record<string, string> = { "Content-Type": "video/webm", "X-Animation-Cache-Key": cacheKey };
+    if (durationMs && project?.fps) { headers["X-Animation-Duration-Ms"] = String(durationMs); headers["X-Animation-FPS"] = String(project.fps); }
+    const queued = await fetch(`/api/animation-studio/projects/${encodeURIComponent(projectId)}/render-jobs`, { method: "POST", headers, body: recording });
     if (!queued.ok) { const body = await queued.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Không thể xếp render animation."); }
-    const initial = await queued.json() as { id: string }; let job: { status: string; error?: string } = { status: "queued" };
-    for (let attempt = 0; attempt < 900; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); if (job.status === "completed" || job.status === "failed") break; }
-    if (job.status !== "completed") throw new Error(job.error || "Render queue quá thời gian chờ."); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video từ render queue."); return response.blob();
+    const initial = await queued.json() as { id: string }; let job: { status: string; progress?: number; error?: string } = { status: "queued", progress: 0 }; onProgress?.(0);
+    for (let attempt = 0; attempt < 900; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0))); if (job.status === "completed" || job.status === "failed") break; }
+    if (job.status !== "completed") throw new Error(job.error || "Render queue quá thời gian chờ."); onProgress?.(100); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video từ render queue."); return response.blob();
   },
-  renderAnimationProjectFrameAccurate: async (project: AnimationProject, showSubtitles: boolean) => {
-    const renderState = { ...project, createdAt: "", updatedAt: "", assets: project.assets.map((asset) => ({ ...asset, createdAt: "" })), showSubtitles, engine: "remotion-v1" };
-    const encoded = new TextEncoder().encode(JSON.stringify(renderState)); const digest = await crypto.subtle.digest("SHA-256", encoded); const cacheKey = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  renderAnimationProjectFrameAccurate: async (project: AnimationProject, showSubtitles: boolean, onProgress?: (progress: number) => void) => {
+    const cacheKey = await animationProjectRenderCacheKey(project, showSubtitles);
     const queued = await fetch(`/api/animation-studio/projects/${encodeURIComponent(project.id)}/remotion-render-jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project, showSubtitles, cacheKey }) });
     if (!queued.ok) { const body = await queued.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Không thể xếp render Remotion."); }
-    const initial = await queued.json() as { id: string }; let job: { status: string; error?: string } = { status: "queued" };
-    for (let attempt = 0; attempt < 1800; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); if (job.status === "completed" || job.status === "failed") break; }
-    if (job.status !== "completed") throw new Error(job.error || "Render Remotion quá thời gian chờ."); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video Remotion."); return response.blob();
+    const initial = await queued.json() as { id: string }; let job: { status: string; progress?: number; error?: string } = { status: "queued", progress: 0 }; onProgress?.(0);
+    for (let attempt = 0; attempt < 1800; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0))); if (job.status === "completed" || job.status === "failed") break; }
+    if (job.status !== "completed") throw new Error(job.error || "Render Remotion quá thời gian chờ."); onProgress?.(100); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video Remotion."); return response.blob();
   },
-  listAnimationRenderJobs: () => request<Array<{ id: string; projectId: string; status: "queued" | "rendering" | "completed" | "failed"; progress: number; cached?: boolean; error?: string; createdAt: string }>>("/api/animation-studio/render-jobs"),
+  listAnimationRenderJobs: () => request<Array<{ id: string; projectId: string; engine?: "browser-recording" | "remotion"; cacheKey?: string; status: "queued" | "rendering" | "completed" | "failed"; progress: number; cached?: boolean; error?: string; createdAt: string }>>("/api/animation-studio/render-jobs"),
   listAnimationAssets: (query = "") => request<AnimationAsset[]>(`/api/animation-studio/assets?q=${encodeURIComponent(query)}`),
   registerAnimationAsset: (asset: AnimationAsset) => request<AnimationAsset>("/api/animation-studio/assets", { method: "POST", body: JSON.stringify(asset) }),
   updateAnimationAsset: (id: string, change: Partial<Pick<AnimationAsset, "name" | "tags" | "style" | "animations">>) => request<AnimationAsset>(`/api/animation-studio/assets/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(change) }),
@@ -384,6 +393,11 @@ export const api = {
     request<{ ok: boolean; warning?: string }>("/api/providers/test", {
       method: "POST",
       body: JSON.stringify({ provider }),
+    }),
+  warmupVieneu: () =>
+    request<{ ok: boolean }>("/api/dubbing/vieneu-warmup", {
+      method: "POST",
+      body: "{}",
     }),
   testModel: (
     provider: AIProvider,

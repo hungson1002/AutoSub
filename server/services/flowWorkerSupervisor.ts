@@ -127,7 +127,9 @@ async function startWorker(record: FlowWorkerRecord) {
       WS_PORT: String(WS_PORT_BASE + offset),
       EXT_POLL_INTERVAL_MS: process.env.EXT_POLL_INTERVAL_MS || '250',
       EXT_TRANSPORT: 'http',
-      MAX_CONCURRENT_REQUESTS: '1',
+      // Each linked account owns an isolated Flow worker. Allow the same two
+      // image lanes that the extension and scheduler expose for that account.
+      MAX_CONCURRENT_REQUESTS: process.env.AUTOSUB_FLOW_WORKER_CONCURRENCY || process.env.MAX_CONCURRENT_REQUESTS || '2',
       REQUEST_MIN_INTERVAL: process.env.REQUEST_MIN_INTERVAL || '0.35',
       GLOBAL_REQUEST_MIN_INTERVAL: process.env.GLOBAL_REQUEST_MIN_INTERVAL || '0',
       API_REQUEST_TIMEOUT: process.env.API_REQUEST_TIMEOUT || '120',

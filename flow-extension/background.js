@@ -29,7 +29,9 @@ const linkedPollBusy = new Set();
 const linkedCommandQueues = new Map();
 const linkedTabRepairTasks = new Map();
 let linkedTabHealthSweepRunning = false;
-const MAX_LINKED_COMMANDS_PER_ACCOUNT = 1;
+// Each linked account is backed by its own isolated Flow worker. Keep two
+// commands in flight so one account can use both image lanes safely.
+const MAX_LINKED_COMMANDS_PER_ACCOUNT = 2;
 const FLOW_WORKER_PORT_MIN = 8101;
 const FLOW_WORKER_PORT_MAX = 8199;
 
@@ -120,7 +122,7 @@ function publicLinkedAccount(account) {
   return {
     id: account.id,
     clientId: account.clientId,
-    email: account.email || null,
+    email: normalizeStoredFlowEmail(account.email),
     flowUrl: account.flowUrl || null,
     tabId: account.tabId ?? null,
     connected: !!account.httpConnected,
@@ -136,7 +138,7 @@ function persistLinkedAccounts() {
     linkedFlowAccounts: linkedFlowAccounts.map((account) => ({
       id: account.id,
       clientId: account.clientId,
-      email: account.email || null,
+      email: normalizeStoredFlowEmail(account.email),
       flowUrl: account.flowUrl || null,
       tabId: account.tabId ?? null,
       flowAccount: account.flowAccount || null,
@@ -145,6 +147,12 @@ function persistLinkedAccounts() {
       workerPort: Number(account.workerPort) || null,
     })),
   });
+}
+
+// Never expose stale or malformed account labels from extension storage.
+function normalizeStoredFlowEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
 }
 
 function persistSessionUpdate(token, capturedMetrics) {
@@ -180,6 +188,10 @@ function flowAccountFromUrl(value) {
 }
 
 function selectFlowAccount(tab) {
+  if (tab?.incognito) {
+    console.warn('[Flow Agent] Bỏ qua tab ẩn danh; Flow Agent cần tab Flow trong profile thường để đồng bộ token.');
+    return false;
+  }
   const account = flowAccountFromUrl(tab.url);
   if (!account || tab.id === captchaTabId || tab.id === accountSyncTabId) return false;
   const previousAccount = selectedFlowAccount;
@@ -338,6 +350,7 @@ async function init() {
       .filter((account) => account && account.id && account.clientId)
       .map((account) => ({
         ...account,
+        email: normalizeStoredFlowEmail(account.email),
         httpConnected: false,
         callbackSecret: null,
         callbackUrl: null,
@@ -357,7 +370,7 @@ async function init() {
   // Discover existing open Flow tab if any
   try {
     if (chrome.tabs?.query) {
-      const flowTabs = (await chrome.tabs.query({ url: FLOW_TAB_URLS })).filter((t) => t.id !== captchaTabId);
+      const flowTabs = (await chrome.tabs.query({ url: FLOW_TAB_URLS })).filter((t) => t.id !== captchaTabId && !t.incognito);
       const isPersistedLinked = (tab) => !!tab.url && linkedFlowAccounts.some((account) =>
         canonicalFlowAccount(account.flowAccount) === canonicalFlowAccount(flowAccountFromUrl(tab.url))
       );
@@ -658,8 +671,8 @@ async function waitForTabComplete(tabId, maxWaitMs = 10000) {
 
 // Finds/wakes/creates the Flow tab. Returns
 // the tab, or null if it couldn't be opened.
-async function _getOrOpenFlowTab() {
-  const flowTabs = (await chrome.tabs.query({ url: FLOW_TAB_URLS })).filter((tab) => tab.id !== captchaTabId);
+async function _getOrOpenFlowTab(allowCreate = true) {
+  const flowTabs = (await chrome.tabs.query({ url: FLOW_TAB_URLS })).filter((tab) => tab.id !== captchaTabId && !tab.incognito);
   const selected = flowTabs.find((tab) => tab.id === selectedFlowTabId)
     || flowTabs.find((tab) => tab.active)
   if (selected) {
@@ -680,12 +693,14 @@ async function _getOrOpenFlowTab() {
     }
   }
 
-  const tabs = await chrome.tabs.query({ url: FLOW_TAB_URLS });
+  const tabs = (await chrome.tabs.query({ url: FLOW_TAB_URLS })).filter((tab) => !tab.incognito);
   if (tabs.length) {
     workTabId = tabs[0].id;
     workTabCreatedByExtension = false;
     return tabs[0];
   }
+
+  if (!allowCreate) return null;
 
   const createdTab = await chrome.tabs.create({ url: FLOW_URL, active: false });
   workTabId = createdTab.id;
@@ -707,9 +722,9 @@ async function _getOrOpenFlowTab() {
   return createdTab;
 }
 
-async function getOrOpenFlowTab() {
+async function getOrOpenFlowTab(allowCreate = true) {
   if (flowTabOpening) return flowTabOpening;
-  flowTabOpening = _getOrOpenFlowTab();
+  flowTabOpening = _getOrOpenFlowTab(allowCreate);
   try {
     return await flowTabOpening;
   } finally {
@@ -744,7 +759,7 @@ function isTokenFresh() {
   return ageMs < 50 * 60 * 1000; // 50 minutes
 }
 
-async function captureTokenFromFlowTab(force = false) {
+async function captureTokenFromFlowTab(force = false, allowCreate = true) {
   // Skip if token is still fresh â€” no need to open/refresh anything
   if (!force && isTokenFresh()) {
     console.log('[Flow Agent] Token still fresh, skipping tab refresh');
@@ -757,12 +772,12 @@ async function captureTokenFromFlowTab(force = false) {
   }
   _openingFlowTab = true;
   try {
-    if (force) await invalidateFlowSession();
-    const tab = await getOrOpenFlowTab();
+    const tab = await getOrOpenFlowTab(allowCreate);
     if (!tab) {
-      console.log('[Flow Agent] Flow tab not ready yet after open');
+      console.log('[Flow Agent] No normal Flow tab is open; skipped non-interactive token refresh');
       return;
     }
+    if (force) await invalidateFlowSession();
     if (force) {
       await chrome.tabs.reload(tab.id, { bypassCache: true });
       await waitForTabComplete(tab.id, 20000);
@@ -962,13 +977,14 @@ async function handleAgentCommand(msg) {
         await sendToAgent({ type: 'token_captured', flowKey, clientId: extensionClientId });
       } else {
         console.log('[Flow Agent] refresh_flow_tab: forcing tab reload + re-capture');
-        if (force) {
-          await invalidateFlowSession();
-        }
-        await refreshSelectedAccountSession(true);
+        // Server-side refresh is a non-interactive health check. Do not open
+        // an OAuth tab when no normal Flow tab/session is available.
+        await refreshSelectedAccountSession(false);
         if (isTokenFresh() && flowKeySource !== 'labs_session') return;
         if (['account_mismatch', 'sign_in_required'].includes(flowSessionStatus.status)) return;
-        await captureTokenFromFlowTab(force);
+        // A background refresh must never create a visible Flow tab. The user
+        // can open Flow explicitly, after which this refresh reuses it.
+        await captureTokenFromFlowTab(force, false);
         await sleep(3000);
         if (flowKey) {
           await sendToAgent({ type: 'token_captured', flowKey, clientId: extensionClientId });
@@ -1122,28 +1138,24 @@ async function waitForLinkedAccountToken(account, timeoutMs = 30000) {
 
 async function restoreLinkedAccountSessions() {
   // Labs has one cookie session in this Opera profile, so token bootstrap must
-  // be sequential. Once captured, each bearer token stays bound to its own
-  // linked account/client and the generation requests can run in parallel.
+  // be sequential. Startup restore is intentionally passive: it may inspect
+  // an already-open normal Flow tab, but it must not create tabs or launch a
+  // Google sign-in flow while the user is doing an unrelated task such as TTS.
   for (const [index, account] of linkedFlowAccounts.entries()) {
     try {
       if (index) await sleep(450);
-      const tab = await ensureLinkedFlowAccountTab(account, false);
-      if (!tab?.id) continue;
+      const tab = await ensureLinkedFlowAccountTab(account, false, false);
+      if (!tab?.id) {
+        await connectLinkedAccount(account);
+        continue;
+      }
       await refreshLinkedAccountIdentity(account);
       await connectLinkedAccount(account);
 
       if (!account.flowKey) {
-        await chrome.tabs.reload(tab.id, { bypassCache: false }).catch(() => {});
-        await waitForTabComplete(tab.id, 20000).catch(() => {});
-        await sleep(1200);
-      }
-
-      if (!account.flowKey) {
-        const sync = await refreshLinkedAccountSession(account, true);
-        if (sync?.status === 'sign_in_started') {
-          const ready = await waitForLinkedAccountToken(account, 30000);
-          if (!ready) await cancelLinkedAccountSync(account.id);
-        }
+        // A passive session check can reuse an existing cookie, but never
+        // opens the account chooser or a new OAuth tab during startup.
+        await refreshLinkedAccountSession(account, false);
       }
 
       // Force hello again after token capture so Flow Agent updates the same
@@ -1251,7 +1263,9 @@ async function healthCheckLinkedTabs() {
   linkedTabHealthSweepRunning = true;
   try {
     for (const account of linkedFlowAccounts) {
-      if (!account || account.activeRequests > 0 || !account.flowKey) continue;
+      // Do not resurrect seven idle Flow tabs every 30 seconds. A real queued
+      // request/captcha will call ensureHealthyLinkedFlowTab on demand.
+      if (!account || account.activeRequests <= 0 || !account.flowKey) continue;
       if (account.tabHealthyAt && Date.now() - account.tabHealthyAt < 20_000) continue;
       if (account.tabRepairFailedAt && Date.now() - account.tabRepairFailedAt < 15_000) continue;
       try {
@@ -1433,14 +1447,18 @@ function linkedFlowRecoveryUrl(account) {
   return 'https://flow.google.com/';
 }
 
-async function ensureLinkedFlowAccountTab(account, active = false) {
+async function ensureLinkedFlowAccountTab(account, active = false, create = true) {
   if (!account) return null;
   if (account.tabId) {
     try {
       const tab = await chrome.tabs.get(account.tabId);
-      if (tab?.url && isFlowUrl(tab.url)) return tab;
+      if (tab?.url && isFlowUrl(tab.url) && !tab.incognito) return tab;
     } catch {}
     account.tabId = null;
+  }
+  if (!create) {
+    await persistLinkedAccounts();
+    return null;
   }
   const tab = await chrome.tabs.create({ url: linkedFlowRecoveryUrl(account), active });
   account.tabId = tab.id;
@@ -1615,7 +1633,7 @@ async function handleUploadVideo(msg) {
   const { videoBase64, projectId, videoSize } = params;
 
   try {
-    const tabs = await chrome.tabs.query({ url: FLOW_TAB_URLS });
+    const tabs = (await chrome.tabs.query({ url: FLOW_TAB_URLS })).filter((tab) => !tab.incognito);
     if (!tabs.length) {
       sendToAgent({ id, error: 'NO_FLOW_TAB' });
       return;
@@ -2230,22 +2248,45 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   }
 
   if (msg.type === 'GET_CLIENT_CREDITS') {
-    const host = String(connectedServerHost || CONFIG.DEFAULT_SERVER_HOST).trim().replace(/\/$/, '');
-    const hostWithoutScheme = host.replace(/^https?:\/\//i, '');
-    const local = /^(127\.0\.0\.1|localhost|192\.168\.|10\.)(:|$)/.test(hostWithoutScheme);
-    const base = /^https?:\/\//i.test(host) ? host : `${local ? 'http' : 'https'}://${host}`;
-    chrome.storage.local.get(['clientId']).then(({ clientId }) => fetch(`${base}/v1/credits`, {
-      headers: (extensionClientId || clientId) ? { 'X-Client-Id': extensionClientId || clientId } : {},
-    }))
-      .then(async (response) => {
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-        reply(data);
-      })
-      .catch((error) => {
-        console.error('[Flow Agent] Credit request failed:', error);
-        reply({ error: error.message });
-      });
+    chrome.storage.local.get(['clientId']).then(async ({ clientId }) => {
+      const host = String(connectedServerHost || CONFIG.DEFAULT_SERVER_HOST).trim().replace(/\/$/, '');
+      const hostWithoutScheme = host.replace(/^https?:\/\//i, '');
+      const local = /^(127\.0\.0\.1|localhost|192\.168\.|10\.)(:|$)/.test(hostWithoutScheme);
+      const primaryBase = /^https?:\/\//i.test(host) ? host : `${local ? 'http' : 'https'}://${host}`;
+      const linkedTargets = linkedFlowAccounts
+        .filter((account) => account?.flowKey && account.clientId)
+        .map((account) => ({ base: linkedAgentHttpBase(account), clientId: account.clientId, label: account.email || account.clientId }));
+      const targets = linkedTargets.length
+        ? linkedTargets
+        : [{ base: primaryBase, clientId: extensionClientId || clientId || '', label: 'primary' }];
+      const parseCredits = (payload) => {
+        const values = [payload?.data?.credits, payload?.credits, payload?.total_credits];
+        for (const value of values) {
+          const parsed = Number(value);
+          if (Number.isFinite(parsed)) return parsed;
+        }
+        return null;
+      };
+      const balances = (await Promise.all(targets.map(async (target) => {
+        try {
+          const response = await fetch(`${target.base}/v1/credits`, {
+            signal: AbortSignal.timeout(4000),
+            headers: target.clientId ? { 'X-Client-Id': target.clientId } : {},
+          });
+          if (!response.ok) return null;
+          const value = parseCredits(await response.json().catch(() => ({})));
+          return value == null ? null : { label: target.label, credits: value };
+        } catch {
+          return null;
+        }
+      }))).filter(Boolean);
+      if (!balances.length) throw new Error('CREDITS_UNAVAILABLE');
+      const total = balances.reduce((sum, item) => sum + item.credits, 0);
+      reply({ credits: total, total_credits: total, accounts: balances });
+    }).catch((error) => {
+      console.error('[Flow Agent] Credit request failed:', error);
+      reply({ error: error.message || 'CREDITS_UNAVAILABLE' });
+    });
     return true;
   }
 

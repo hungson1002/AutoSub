@@ -26,14 +26,29 @@ function progressFromStage(stage: string, previous: AnimationDirectorJob) {
     const total = Math.max(1, Number(doneImages[2]) || 1);
     return { progressPercent: Math.min(94, Math.max(20, Math.round(20 + 74 * current / total))), progressLabel: `${current}/${total} ảnh đã xong`, progressCurrent: current, progressTotal: total };
   }
-  const imageStart = /Đang tạo\s+(\d+)\s+ảnh/iu.exec(stage);
+  const restoredImages = /Đã khôi phục ảnh\s+(\d+)\/(\d+)/iu.exec(stage);
+  if (restoredImages) {
+    const current = Math.max(0, Number(restoredImages[1]) || 0);
+    const total = Math.max(1, Number(restoredImages[2]) || 1);
+    return { progressPercent: Math.min(94, Math.max(20, Math.round(20 + 74 * current / total))), progressLabel: `${current}/${total} ảnh đã xong`, progressCurrent: current, progressTotal: total };
+  }
+  const imageStart = /Đang tạo\s+(\d+)\s+ảnh\b(?:.*?đã khôi phục\s+(\d+)\/(\d+))?/iu.exec(stage);
   if (imageStart) {
     const total = Math.max(1, Number(imageStart[1]) || 1);
-    return { progressPercent: Math.max(previous.progressPercent || 0, 20), progressLabel: `0/${total} ảnh đã xong`, progressCurrent: 0, progressTotal: total };
+    const current = Math.max(0, Number(imageStart[2]) || 0);
+    return { progressPercent: Math.min(94, Math.max(previous.progressPercent || 0, Math.round(20 + 74 * current / total))), progressLabel: `${current}/${total} ảnh đã xong`, progressCurrent: current, progressTotal: total };
   }
   if (/Đang viết storyboard/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 8), progressLabel: 'Đang viết storyboard' };
   if (/Đang căn kịch bản|Lời đọc còn ngắn|Đã khóa kịch bản/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 15), progressLabel: 'Đang khóa lời đọc theo thời lượng' };
-  if (/Lời đọc Turbo|Đã tạo \d+\/\d+ câu lời đọc|tạo lời đọc/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 96), progressLabel: 'Đang tạo voiceover' };
+  const doneNarration = /Đã tạo\s+(\d+)\/(\d+)\s+câu lời đọc/iu.exec(stage);
+  if (doneNarration) {
+    const current = Math.max(0, Number(doneNarration[1]) || 0);
+    const total = Math.max(1, Number(doneNarration[2]) || 1);
+    return { progressPercent: Math.min(99, Math.max(previous.progressPercent || 96, Math.round(96 + 3 * current / total))), progressLabel: `${current}/${total} câu lời đọc` };
+  }
+  const narrationStart = /Lời đọc Turbo:\s*(\d+)\s*câu/iu.exec(stage);
+  if (narrationStart) return { progressPercent: Math.max(previous.progressPercent || 0, 96), progressLabel: `0/${Math.max(1, Number(narrationStart[1]) || 1)} câu lời đọc` };
+  if (/tạo lời đọc/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 96), progressLabel: 'Đang tạo voiceover' };
   if (/Đang hoàn tất project/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 99), progressLabel: 'Đang hoàn tất project' };
   return {};
 }

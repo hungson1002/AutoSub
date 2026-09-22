@@ -19,7 +19,7 @@ import { animationStudioRoutes } from './routes/animationStudio';
 import { storageRoutes } from './routes/storage';
 import { mcpRoutes } from './routes/mcp';
 import { ensureCapCutTtsRuntime } from './services/capcutTtsBridge';
-import { ensureVieneuRuntime } from './services/vieneuRuntime';
+import { warmVieneuPresetPreviews } from './services/vieneuPresetPreviews';
 import { ensureFlowAgentRuntime } from './services/flowBrowser';
 
 try { process.loadEnvFile?.(); }
@@ -73,9 +73,9 @@ app.setErrorHandler((error, _request, reply) => {
 const port = Number(process.env.AUTOSUB_PORT || 8787);
 await app.listen({ port, host: '127.0.0.1' });
 console.log(`AutoSub backend listening on http://127.0.0.1:${port}`);
-void Promise.allSettled([ensureCapCutTtsRuntime(), ensureVieneuRuntime(), ensureFlowAgentRuntime()]).then((results) => {
+void Promise.allSettled([ensureCapCutTtsRuntime(), warmVieneuPresetPreviews(), ensureFlowAgentRuntime()]).then((results) => {
   results.forEach((result, index) => {
-    const name = ['CapCut TTS', 'VieNeu', 'Flow Agent'][index];
+    const name = ['CapCut TTS', 'VieNeu + preview', 'Flow Agent'][index];
     if (result.status === 'fulfilled') app.log.info(`${name} runtime sẵn sàng.`);
     else app.log.warn(`${name} chưa sẵn sàng lúc khởi động: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
   });

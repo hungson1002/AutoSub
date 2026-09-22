@@ -5,9 +5,10 @@ import { buildVieneuPauseRepairFilter, parseVieneuInternalSilences, prepareViene
 
 test('VieNeu exposes the built-in preset catalog alongside clone voices', () => {
   const voices = listVieneuPresetVoices();
-  assert.equal(voices.length, 20);
+  assert.equal(voices.length, 25);
   assert.equal(voices[0]?.source, 'preset');
-  assert.equal(voices[0]?.id, 'preset:minh-duc');
+  assert.equal(voices[0]?.id, 'preset:adam-bua');
+  assert.equal(vieneuPresetVoiceName('preset:minh-quan-pro'), 'Minh Quân Pro');
   assert.equal(vieneuPresetVoiceName('preset:ngoc-huyen'), 'Ngọc Huyền');
   assert.equal(vieneuPresetVoiceName('clone-id'), undefined);
 });
@@ -46,6 +47,7 @@ test('VieNeu speech text keeps expressive punctuation and completes bare cues', 
   assert.equal(prepareVieneuSpeechText('Tuyệt quá!'), 'Tuyệt quá!');
   assert.equal(prepareVieneuSpeechText('Xin chào mọi người'), 'Xin chào mọi người.');
   assert.equal(prepareVieneuSpeechText('Chờ một chút…'), 'Chờ một chút…');
+  assert.equal(prepareVieneuSpeechText('[cười] Đây là một câu sạch.'), 'Đây là một câu sạch.');
 });
 
 test('VieNeu pause repair removes only the middle of a measured silence', () => {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -15,15 +15,37 @@ import { allocateNarrationTimings, createSentenceTimeMapper, splitNarrationUnits
 
 const file = path.join(workdir, 'animation-assets', 'library.json');
 let libraryWrites: Promise<unknown> = Promise.resolve();
+let libraryRecovery: Promise<void> | undefined;
 function mutateLibrary<T>(mutation: () => Promise<T>): Promise<T> {
   const pending = libraryWrites.then(mutation, mutation);
   libraryWrites = pending.catch(() => undefined);
   return pending;
 }
 
+function recoverCorruptLibrary() {
+  if (!libraryRecovery) {
+    libraryRecovery = (async () => {
+      const backup = `${file}.corrupt-${Date.now()}.json`;
+      await rename(file, backup).catch(() => undefined);
+      await writeJsonFileResilient(file, [], true).catch((error) => {
+        console.warn(`[animation-assets] Không thể tạo lại library.json sau khi phát hiện file hỏng: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      console.warn(`[animation-assets] library.json không hợp lệ; đã giữ bản gốc tại ${backup} và khởi tạo thư viện rỗng.`);
+    })().finally(() => { libraryRecovery = undefined; });
+  }
+  return libraryRecovery;
+}
+
 async function readLibrary(): Promise<AnimationAsset[]> {
-  try { const value = JSON.parse(await readFile(file, 'utf8')); return Array.isArray(value) ? value : []; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+  try {
+    const value = JSON.parse(await readFile(file, 'utf8'));
+    return Array.isArray(value) ? value : [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    if (!(error instanceof SyntaxError)) throw error;
+    await recoverCorruptLibrary();
+    return [];
+  }
 }
 
 async function writeLibrary(assets: AnimationAsset[]) {
@@ -31,6 +53,8 @@ async function writeLibrary(assets: AnimationAsset[]) {
 }
 
 const words = (value: string) => value.toLocaleLowerCase('vi').normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
+const vieneuEmotionCuePattern = /\[(?:cười|thở dài|hắng giọng)\]\s*/giu;
+const narrationCaptionText = (value: string) => value.replace(vieneuEmotionCuePattern, '').replace(/\s+/gu, ' ').trim();
 
 export async function listAnimationAssets(query = '') {
   const assets = await readLibrary(); const terms = words(query);
@@ -217,21 +241,79 @@ export async function audioDurationMs(audio: Buffer, extension = 'media') {
   }
 }
 
-async function mapConcurrentOrdered<T, R>(items: T[], limit: number, task: (item: T, index: number) => Promise<R>) {
+async function mapConcurrentOrdered<T, R>(items: T[], limit: number, task: (item: T, index: number) => Promise<R>, onComplete?: (completed: number, total: number) => Promise<void> | void) {
   const results = Array<R>(items.length);
   let cursor = 0;
+  let completed = 0;
   const worker = async () => {
     while (true) {
       const index = cursor++;
       if (index >= items.length) return;
       results[index] = await task(items[index], index);
+      completed += 1;
+      await onComplete?.(completed, items.length);
     }
   };
   await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), Math.max(1, items.length)) }, worker));
   return results;
 }
 
-export async function generateAnimationNarration(input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number; preservePlannedDuration?: boolean; strictSceneDurations?: boolean }, onStage: (stage: string) => Promise<void> = async () => {}) {
+const narrationEdgeRepairFilter = 'silenceremove=start_periods=1:start_duration=0.04:start_threshold=-42dB,aresample=48000,loudnorm=I=-16:TP=-1.5:LRA=7';
+
+/** Remove only leading provider padding; keep sentence-final pauses for natural narration. */
+async function normalizeNarrationAudio(audio: Buffer) {
+  if (!audio.length) return audio;
+  const directory = path.join(workdir, 'animation-assets', 'narration-normalized');
+  const input = path.join(directory, `${randomUUID()}.input`);
+  const output = path.join(directory, `${randomUUID()}.wav`);
+  await mkdir(directory, { recursive: true });
+  await writeFile(input, audio);
+  try {
+    await run('ffmpeg', ['-y', '-i', input, '-af', narrationEdgeRepairFilter, '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', output]);
+    const normalized = await readFile(output);
+    return wavDurationMs(normalized) > 0 ? normalized : audio;
+  } catch {
+    return audio;
+  } finally {
+    await Promise.all([rm(input, { force: true }), rm(output, { force: true })]);
+  }
+}
+
+async function joinNarrationAssets(units: Array<{ asset: AnimationAsset; durationMs: number; text: string }>, sceneName: string) {
+  const crossfadeMs = 40;
+  if (units.length === 1) return { asset: units[0].asset, durationMs: units[0].durationMs, crossfadeMs: 0 };
+  const cacheKey = createHash('sha256').update(JSON.stringify({ version: 1, kind: 'scene-narration', units: units.map((item) => ({ assetId: item.asset.id, durationMs: item.durationMs })) })).digest('hex');
+  const cached = await findCachedAnimationAsset(cacheKey);
+  if (cached) {
+    const cachedAudio = await readFile((await getAnimationAssetFile(cached.id)).path);
+    return { asset: cached, durationMs: await audioDurationMs(cachedAudio), crossfadeMs };
+  }
+  const id = randomUUID();
+  const directory = path.join(workdir, 'animation-assets', 'files');
+  const target = path.join(directory, `${id}.wav`);
+  await mkdir(directory, { recursive: true });
+  try {
+    const files = await Promise.all(units.map((item) => getAnimationAssetFile(item.asset.id)));
+    const filters = files.map((_file, index) => `[${index}:a]aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo[a${index}]`);
+    let current = '[a0]';
+    for (let index = 1; index < files.length; index += 1) {
+      const next = `[xf${index}]`;
+      filters.push(`${current}[a${index}]acrossfade=d=${(crossfadeMs / 1000).toFixed(3)}:c1=tri:c2=tri${next}`);
+      current = next;
+    }
+    await run('ffmpeg', ['-y', ...files.flatMap((item) => ['-i', item.path]), '-filter_complex', filters.join(';'), '-map', current, '-c:a', 'pcm_s16le', target]);
+    const audio = await readFile(target);
+    const durationMs = await audioDurationMs(audio);
+    if (!(durationMs > 0)) throw new Error('Joined narration has no measurable duration.');
+    const asset = await registerAnimationAsset({ id, type: 'audio', name: `Voiceover · ${sceneName} · smooth cue track`, uri: `/api/animation-studio/assets/${id}/file`, tags: ['voiceover', 'narration', 'scene-mix'], createdAt: new Date().toISOString(), source: 'generated', cacheKey, generationPrompt: units.map((item) => item.text).join(' ') });
+    return { asset, durationMs, crossfadeMs };
+  } catch (error) {
+    await rm(target, { force: true });
+    throw error;
+  }
+}
+
+export async function generateAnimationNarration(input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number; preservePlannedDuration?: boolean; strictSceneDurations?: boolean; includeSubtitles?: boolean }, onStage: (stage: string) => Promise<void> = async () => {}) {
   let project = input.project;
   const speed = Math.max(.5, Math.min(2, Number(input.speed) || 1));
   const sentenceTasks = input.project.scenes.flatMap((scene) => scene.renderMode !== 'composite' || !scene.narration.trim()
@@ -243,39 +325,44 @@ export async function generateAnimationNarration(input: { project: AnimationProj
   const requestedConcurrency = Math.max(1, Math.min(8, Number.isFinite(configuredConcurrency) && configuredConcurrency > 0 ? Math.round(configuredConcurrency) : 6));
   const ttsConcurrency = input.provider.providerType === 'capcut-tts' || input.provider.baseUrl.trim().toLowerCase() === 'local://capcut-tts'
     ? 1
-    : input.provider.providerType === 'vieneu-local' ? Math.min(2, requestedConcurrency) : requestedConcurrency;
+    : input.provider.providerType === 'vieneu-local' ? Math.min(3, requestedConcurrency) : requestedConcurrency;
   const prepareSentence = async (task: typeof sentenceTasks[number], renderSpeed: number) => {
     const normalizedSpeed = Math.max(.5, Math.min(2, Number(renderSpeed) || 1));
-    const cacheKey = createHash('sha256').update(JSON.stringify({ version: 1, kind: 'narration', text: task.text, provider: input.provider.id, model: input.model, voice: input.voice, speed: normalizedSpeed })).digest('hex');
+    const sourceCacheKey = createHash('sha256').update(JSON.stringify({ version: 3, kind: 'narration', text: task.text, provider: input.provider.id, model: input.model, voice: input.voice, speed: normalizedSpeed, expressiveVieneu: input.provider.providerType === 'vieneu-local' ? 'vieneu-3.8.1-performance-v2-temperature-0.82' : undefined })).digest('hex');
+    const cacheKey = createHash('sha256').update(JSON.stringify({ version: 3, kind: 'narration-smooth-cue', sourceCacheKey, edgeRepair: narrationEdgeRepairFilter })).digest('hex');
     let asset = await findCachedAnimationAsset(cacheKey);
     let audio: Buffer | undefined;
     if (asset) audio = await readFile((await getAnimationAssetFile(asset.id)).path);
     else {
-      const localVieNeu = input.provider.providerType === 'vieneu-local';
-      const maxAttempts = localVieNeu ? 4 : 2;
-      let lastError: unknown;
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        try {
-          audio = await synthesize(input.provider, input.model, input.voice, task.text, { speed: normalizedSpeed, format: 'wav' });
-          lastError = undefined;
-          break;
-        } catch (error) {
-          lastError = error;
-          const status = Number((error as { status?: unknown })?.status);
-          if (error instanceof Error && error.name === 'AbortError') throw error;
-          const retryable = localVieNeu
-            ? !Number.isFinite(status) || status >= 500 || status === 429
-            : !Number.isFinite(status) || status >= 500 || status === 429;
-          if (!retryable || attempt >= maxAttempts) break;
-          const delayMs = Math.min(2500, 400 * Math.pow(2, attempt - 1));
-          await onStage(`${localVieNeu ? 'VieNeu Local' : 'TTS'} lỗi tạm thời ở cảnh “${task.sceneName}”, câu ${task.sentenceIndex + 1} · tự thử lại ${attempt + 1}/${maxAttempts}`);
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
+      const sourceAsset = await findCachedAnimationAsset(sourceCacheKey);
+      if (sourceAsset) {
+        audio = await readFile((await getAnimationAssetFile(sourceAsset.id)).path);
+      } else {
+        const localVieNeu = input.provider.providerType === 'vieneu-local';
+        const maxAttempts = localVieNeu ? 4 : 2;
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          try {
+            audio = await synthesize(input.provider, input.model, input.voice, task.text, { speed: normalizedSpeed, format: 'wav' });
+            lastError = undefined;
+            break;
+          } catch (error) {
+            lastError = error;
+            const status = Number((error as { status?: unknown })?.status);
+            if (error instanceof Error && error.name === 'AbortError') throw error;
+            const retryable = !Number.isFinite(status) || status >= 500 || status === 429;
+            if (!retryable || attempt >= maxAttempts) break;
+            const delayMs = Math.min(2500, 400 * Math.pow(2, attempt - 1));
+            await onStage(`${localVieNeu ? 'VieNeu Local' : 'TTS'} lỗi tạm thời ở cảnh “${task.sceneName}”, câu ${task.sentenceIndex + 1} · tự thử lại ${attempt + 1}/${maxAttempts}`);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+        }
+        if (!audio) {
+          const detail = String((lastError as { detail?: unknown })?.detail || (lastError instanceof Error ? lastError.message : lastError || 'Không rõ lỗi')).replace(/\s+/g, ' ').trim().slice(0, 300);
+          throw new Error(`${localVieNeu ? 'VieNeu Local' : 'TTS'} không tạo được cảnh “${task.sceneName}”, câu ${task.sentenceIndex + 1} sau ${maxAttempts} lần thử.${detail ? ` Chi tiết: ${detail}` : ''}`);
         }
       }
-      if (!audio) {
-        const detail = String((lastError as { detail?: unknown })?.detail || (lastError instanceof Error ? lastError.message : lastError || 'Không rõ lỗi')).replace(/\s+/g, ' ').trim().slice(0, 300);
-        throw new Error(`${localVieNeu ? 'VieNeu Local' : 'TTS'} không tạo được cảnh “${task.sceneName}”, câu ${task.sentenceIndex + 1} sau ${maxAttempts} lần thử.${detail ? ` Chi tiết: ${detail}` : ''}`);
-      }
+      audio = await normalizeNarrationAudio(audio);
     }
     const measuredMs = await audioDurationMs(audio);
     if (!(measuredMs > 0)) throw new Error(`Không đo được audio câu ${task.sentenceIndex + 1} của cảnh “${task.sceneName}”. Đã giữ các tài nguyên tạo trước đó.`);
@@ -286,12 +373,12 @@ export async function generateAnimationNarration(input: { project: AnimationProj
       const target = path.join(workdir, 'animation-assets', 'files', `${id}.${extension}`);
       await mkdir(path.dirname(target), { recursive: true });
       await writeFile(target, audio);
-      asset = await registerAnimationAsset({ id, type: 'audio', name: `Voiceover · ${task.sceneName} · ${task.sentenceIndex + 1}`, uri: `/api/animation-studio/assets/${id}/file`, tags: ['voiceover', 'narration'], createdAt: new Date().toISOString(), source: 'generated', cacheKey, generationPrompt: task.text });
+      asset = await registerAnimationAsset({ id, type: 'audio', name: `Voiceover · ${task.sceneName} · ${task.sentenceIndex + 1}`, uri: `/api/animation-studio/assets/${id}/file`, tags: ['voiceover', 'narration', 'smooth-cue'], createdAt: new Date().toISOString(), source: 'generated', cacheKey, generationPrompt: task.text });
     }
     return { ...task, asset, durationMs, speed: normalizedSpeed };
   };
   await onStage(`Lời đọc Turbo: ${sentenceTasks.length} câu · tối đa ${Math.min(ttsConcurrency, sentenceTasks.length)} câu song song`);
-  const prepared = await mapConcurrentOrdered(sentenceTasks, ttsConcurrency, (task) => prepareSentence(task, speed));
+  const prepared = await mapConcurrentOrdered(sentenceTasks, ttsConcurrency, (task) => prepareSentence(task, speed), (completed, total) => onStage(`Đã tạo ${completed}/${total} câu lời đọc`));
   await onStage(`Đã tạo ${prepared.length}/${sentenceTasks.length} câu lời đọc · đang ráp timeline`);
 
   const preparedByScene = new Map<string, typeof prepared>();
@@ -300,21 +387,9 @@ export async function generateAnimationNarration(input: { project: AnimationProj
     const frameMs = 1000 / Math.max(1, project.fps);
     for (const sourceScene of input.project.scenes) {
       if (sourceScene.renderMode !== 'composite' || !sourceScene.narration.trim()) continue;
-      let units = (preparedByScene.get(sourceScene.id) || []).sort((a, b) => a.sentenceIndex - b.sentenceIndex);
-      let measured = units.reduce((total, item) => total + item.durationMs, 0);
-      if (measured <= sourceScene.durationMs + frameMs) continue;
-      let fitSpeed = Math.min(1.2, Math.max(speed, speed * measured / Math.max(1, sourceScene.durationMs) * 1.03));
-      await onStage(`Cảnh “${sourceScene.name}” có lời đọc dài hơn timeline · tự căn TTS nhẹ ${fitSpeed.toFixed(2)}×`);
-      units = await mapConcurrentOrdered(units, ttsConcurrency, (item) => prepareSentence(item, fitSpeed));
-      measured = units.reduce((total, item) => total + item.durationMs, 0);
-      if (measured > sourceScene.durationMs + frameMs && fitSpeed < 1.3) {
-        fitSpeed = Math.min(1.3, fitSpeed * measured / Math.max(1, sourceScene.durationMs) * 1.02);
-        await onStage(`Cảnh “${sourceScene.name}” vẫn dài · căn TTS lần cuối ${fitSpeed.toFixed(2)}×`);
-        units = await mapConcurrentOrdered(units, ttsConcurrency, (item) => prepareSentence(item, fitSpeed));
-        measured = units.reduce((total, item) => total + item.durationMs, 0);
-      }
-      if (measured > sourceScene.durationMs + frameMs) throw new Error(`Lời đọc cảnh “${sourceScene.name}” vẫn vượt thời lượng đã khóa dù đã căn tốc độ tối đa hợp lý. Hãy rút gọn narration thay vì kéo dài video.`);
-      preparedByScene.set(sourceScene.id, units);
+      const units = (preparedByScene.get(sourceScene.id) || []).sort((a, b) => a.sentenceIndex - b.sentenceIndex);
+      const measured = units.reduce((total, item) => total + item.durationMs, 0);
+      if (measured > sourceScene.durationMs + frameMs) throw new Error(`Lời đọc cảnh “${sourceScene.name}” dài hơn timeline đã khóa (${Math.round(measured / 100) / 10}s > ${Math.round(sourceScene.durationMs / 100) / 10}s). Hãy rút gọn kịch bản; hệ thống không tăng tốc giọng đọc để ép khớp.`);
     }
   }
 
@@ -324,20 +399,22 @@ export async function generateAnimationNarration(input: { project: AnimationProj
     if (!scene || scene.renderMode !== 'composite') continue;
     const units = (preparedByScene.get(scene.id) || []).sort((a, b) => a.sentenceIndex - b.sentenceIndex);
     const captions: NonNullable<SceneLayer['captionTimings']> = [];
-    const audioLayers: SceneLayer[] = [];
     const newAssets: AnimationAsset[] = [];
+    const joined = await joinNarrationAssets(units, scene.name);
+    const audioLayers: SceneLayer[] = [{ id: `voiceover-${scene.id}`, type: 'audio', name: `Voiceover · ${scene.name} · smooth cue track`, assetId: joined.asset.id, visible: true, locked: true, zIndex: 999, width: 1, height: 1, startMs: 0, durationMs: joined.durationMs, volume: 1, transform: defaultTransform() }];
+    newAssets.push(...units.map((item) => item.asset), joined.asset);
     let cursor = 0;
-    for (const item of units) {
-      newAssets.push(item.asset);
-      captions.push({ id: `sentence-${scene.id}-${item.sentenceIndex + 1}`, text: item.text, startMs: cursor, endMs: cursor + item.durationMs, source: 'measured-sentence' });
-      audioLayers.push({ id: `voiceover-${scene.id}-${item.sentenceIndex}`, type: 'audio', name: `Voiceover · ${scene.name}`, assetId: item.asset.id, visible: true, locked: true, zIndex: 999, width: 1, height: 1, startMs: cursor, durationMs: item.durationMs, volume: 1, transform: defaultTransform() });
-      cursor += item.durationMs;
+    for (const [index, item] of units.entries()) {
+      const visibleDurationMs = index === units.length - 1 ? item.durationMs : Math.max(1, item.durationMs - joined.crossfadeMs);
+      const endMs = index === units.length - 1 ? joined.durationMs : cursor + visibleDurationMs;
+      captions.push({ id: `sentence-${scene.id}-${item.sentenceIndex + 1}`, text: narrationCaptionText(item.text), startMs: cursor, endMs: Math.max(cursor + 1, endMs), source: 'measured-sentence' });
+      cursor += visibleDurationMs;
     }
-    const measuredDurationMs = cursor;
+    const measuredDurationMs = joined.durationMs;
     const durationMs = input.preservePlannedDuration ? Math.max(scene.durationMs, measuredDurationMs) : measuredDurationMs;
     const oldCaptions = scene.layers.find((layer) => layer.name === 'Voiceover · Subtitle')?.captionTimings || allocateNarrationTimings(scene.narration, scene.durationMs);
     const retime = createSentenceTimeMapper(oldCaptions, captions, scene.durationMs, measuredDurationMs);
-    const retimeVisuals = measuredDurationMs > scene.durationMs;
+    const retimeVisuals = measuredDurationMs > scene.durationMs || (!input.preservePlannedDuration && measuredDurationMs < scene.durationMs);
     const retimeCommand = (command: AnimationCommand): AnimationCommand => {
       if (!retimeVisuals) return command;
       const startMs = retime(command.startMs);
@@ -346,8 +423,8 @@ export async function generateAnimationNarration(input: { project: AnimationProj
     };
     const whiteboardStyle = /whiteboard|doodle/i.test(`${project.styleProfile?.name || ''} ${project.styleProfile?.style || ''}`);
     const subtitleFill = whiteboardStyle ? '#263238' : '#ffffff';
-    const subtitle: SceneLayer = { id: `subtitle-${scene.id}`, name: 'Voiceover · Subtitle', type: 'text', text: scene.narration, captionTimings: captions, visible: true, locked: false, zIndex: 1000, width: Math.round(project.width * .78), height: Math.round(Math.min(project.width, project.height) * .16), fill: subtitleFill, fontSize: Math.max(24, Math.round(Math.min(project.width, project.height) * .032)), transform: { ...defaultTransform(), position: { x: project.width / 2, y: project.height * .84 } } };
-    const replacement: typeof scene = { ...scene, durationMs, layers: [...scene.layers.filter((layer) => !((layer.type === 'audio' || layer.type === 'text') && layer.name.startsWith('Voiceover ·'))).map((layer) => layer.type !== 'audio' ? layer : { ...layer, startMs: retime(layer.startMs || 0), durationMs: layer.durationMs === undefined ? undefined : Math.min(layer.durationMs, durationMs - retime(layer.startMs || 0)) }), ...audioLayers, subtitle], commands: scene.commands.filter((command) => !command.parameters?.autoVoiceover).map(retimeCommand), camera: { ...scene.camera, commands: scene.camera.commands.map(retimeCommand) } };
+    const subtitle: SceneLayer = { id: `subtitle-${scene.id}`, name: 'Voiceover · Subtitle', type: 'text', text: narrationCaptionText(scene.narration), captionTimings: captions, visible: true, locked: false, zIndex: 1000, width: Math.round(project.width * .78), height: Math.round(Math.min(project.width, project.height) * .16), fill: subtitleFill, fontSize: Math.max(24, Math.round(Math.min(project.width, project.height) * .032)), transform: { ...defaultTransform(), position: { x: project.width / 2, y: project.height * .84 } } };
+    const replacement: typeof scene = { ...scene, durationMs, layers: [...scene.layers.filter((layer) => !((layer.type === 'audio' || layer.type === 'text') && layer.name.startsWith('Voiceover ·'))).map((layer) => layer.type !== 'audio' ? layer : { ...layer, startMs: retime(layer.startMs || 0), durationMs: layer.durationMs === undefined ? undefined : Math.min(layer.durationMs, durationMs - retime(layer.startMs || 0)) }), ...audioLayers, ...(input.includeSubtitles === false ? [] : [subtitle])], commands: scene.commands.filter((command) => !command.parameters?.autoVoiceover).map(retimeCommand), camera: { ...scene.camera, commands: scene.camera.commands.map(retimeCommand) } };
     const productionPlan = project.productionPlan ? {
       ...project.productionPlan,
       narrationUnits: project.productionPlan.narrationUnits.map((unit) => unit.sceneId === scene.id ? { ...unit, startMs: 0, endMs: measuredDurationMs, timingSource: 'measured-sentence' as const } : unit),

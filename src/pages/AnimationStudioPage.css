@@ -14,6 +14,7 @@
 .studio-preview-first .animation-toolbar-meta { display: none; }
 .studio-preview-first .animation-toolbar .button { font-size: 12px; white-space: nowrap; }
 .studio-preview-first .animation-toolbar-actions { gap: 6px; }
+.studio-preview-first .animation-export-button { min-width: 176px; font-variant-numeric: tabular-nums; }
 .studio-preview-first .animation-toolbar-actions > .button[aria-expanded="true"] { color: #ffc39e; background: #30251f; }
 .studio-preview-first .animation-toolbar-thumbnail { border-color: rgba(255,138,69,.55); color: #ffd0b3; background: rgba(255,138,69,.09); }
 .studio-preview-first .animation-toolbar-thumbnail:hover:not(:disabled) { border-color: #ff8a45; background: rgba(255,138,69,.16); }
@@ -46,6 +47,7 @@
 .studio-preview-first .animation-director-options { display: flex; flex-direction: column; align-items: stretch; gap: 14px; }
 .animation-director-job { display: grid; gap: 10px; min-width: 0; padding: 12px; border: 1px solid rgba(255,138,69,.3); border-radius: 9px; background: linear-gradient(135deg, rgba(255,138,69,.1), rgba(17,25,35,.96) 68%); }
 .animation-director-job p { margin: 0; color: #e9eef3; font-size: 12px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
+.animation-director-job-error { display: block; margin-top: -3px; color: #ffc2c7; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .animation-director-progress { display: grid; gap: 6px; min-width: 0; }
 .animation-director-progress-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; color: #aebdcb; font-size: 11px; line-height: 1.4; }
 .animation-director-progress-head span { min-width: 0; overflow-wrap: anywhere; }
@@ -177,6 +179,9 @@
 .studio-preview-first .animation-sequence-lane button b { font-size: 11px; }
 .animation-detail-timeline { position: relative; min-height: 0; display: grid; grid-template-rows: 24px minmax(0, 1fr); overflow: auto; }
 .studio-preview-first .animation-scrubber { opacity: 1; height: 5px; accent-color: #ff8a45; }
+.studio-preview-first .animation-sequence-playhead { width: 16px; background: transparent; box-shadow: none; pointer-events: auto; cursor: ew-resize; transform: translateX(-8px); outline: none; }
+.studio-preview-first .animation-sequence-playhead::before { content: ''; position: absolute; top: 0; bottom: 0; left: 7px; width: 2px; border-radius: 2px; background: #ff8a45; box-shadow: 0 0 8px rgba(255,138,69,.55); }
+.studio-preview-first .animation-sequence-playhead:focus-visible::before { width: 4px; left: 6px; box-shadow: 0 0 0 3px rgba(255,138,69,.22), 0 0 10px rgba(255,138,69,.7); }
 @media (max-width: 1280px) {
   .studio-preview-first.setup-open { grid-template-columns: 264px minmax(0, 1fr); }
   .studio-preview-first .animation-workspace, .studio-preview-first .animation-workspace:not(.has-selection), .studio-preview-first .animation-workspace.has-selection { grid-template-columns: 156px minmax(0, 1fr); }
@@ -210,3 +215,8 @@
   .studio-preview-first .animation-stage-controls label input { width: 48px; }
 }
 .studio-preview-first details:not([open]) > :not(summary) { display: none; }
+
+/* AI Storyboard is image-only: keep the cue overview, remove the legacy
+   command/motion editor and sprite-column control from the operating surface. */
+.animation-timeline-toggle, .animation-detail-timeline { display: none !important; }
+.animation-asset-generator > label:last-child { display: none; }

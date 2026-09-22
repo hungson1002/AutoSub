@@ -65,6 +65,11 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         import vieneu  # noqa: F401
 
         return {"ok": True}
+    if operation == "warmup":
+        # Constructing Vieneu loads the ONNX model and its preset voice data.
+        # No sample needs to be synthesized just to make the first preview fast.
+        get_tts()
+        return {"ok": True}
     if operation != "synthesize":
         raise ValueError(f"VieNeu bridge không hỗ trợ operation: {operation}")
     text = str(request.get("text", "")).strip()
@@ -75,7 +80,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     preset_name = str(request.get("presetName", "")).strip()
     voice = preset_name if preset_name else enrolled_voice(str(request.get("referencePath", "")))
     tts = get_tts()
-    temperature = max(0.35, min(1.0, float(request.get("temperature", 0.75))))
+    temperature = max(0.35, min(1.0, float(request.get("temperature", 0.8))))
     with contextlib.redirect_stdout(sys.stderr):
         audio = tts.infer(
             text,
