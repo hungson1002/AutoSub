@@ -9,6 +9,7 @@ export type IsolatedFlowWorker = {
   baseUrl: string;
   state: string;
   tokenReady: boolean;
+  extensionConnected: boolean;
   pid?: number;
 };
 
@@ -78,6 +79,7 @@ async function fetchWorkerHealth(port: number, timeoutMs = 1_200) {
     if (!response.ok) return undefined;
     return await response.json() as {
       status?: string;
+      extension_connected?: boolean;
       clients?: Array<{ client_id?: string; state?: string; has_flow_key?: boolean }>;
     };
   } catch {
@@ -87,10 +89,20 @@ async function fetchWorkerHealth(port: number, timeoutMs = 1_200) {
 
 function healthForClient(body: Awaited<ReturnType<typeof fetchWorkerHealth>>, clientId: string) {
   const client = body?.clients?.find((item) => item.client_id === clientId);
+  const state = client?.state || (client ? 'connected' : body?.status || 'starting');
+  const disconnected = /unauthorized|disconnected|offline|failed/i.test(state);
   return {
     tokenReady: Boolean(client?.has_flow_key),
-    state: client?.state || (client ? 'connected' : body?.status || 'starting'),
+    extensionConnected: Boolean(client) && !disconnected
+      && (typeof body?.extension_connected === 'boolean'
+        ? body.extension_connected
+        : !/unauthorized|disconnected|offline|failed/i.test(body?.status || '')),
+    state,
   };
+}
+
+export function isReadyIsolatedFlowWorker(worker: Pick<IsolatedFlowWorker, 'tokenReady' | 'extensionConnected'>) {
+  return worker.tokenReady && worker.extensionConnected;
 }
 
 async function choosePort(preferredPort?: number) {
@@ -208,7 +220,7 @@ export async function listIsolatedFlowWorkers(options: { ensureRunning?: boolean
 }
 
 export async function listReadyIsolatedFlowWorkers() {
-  return (await listIsolatedFlowWorkers()).filter((item) => item.tokenReady);
+  return (await listIsolatedFlowWorkers()).filter(isReadyIsolatedFlowWorker);
 }
 
 export async function isolatedFlowWorkerBase(clientId: string) {

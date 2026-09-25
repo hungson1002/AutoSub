@@ -20,7 +20,7 @@ export function McpSettingsPanel() {
     try { await run(); } catch (err) { setError(err instanceof Error ? err.message : 'Thao tác thất bại.'); } finally { setBusy(false); }
   }
   return <section className="settings-section mcp-settings">
-    <div className="settings-heading"><div><h2>MCP · Kết nối trợ lý AI</h2><p>Cho ứng dụng hỗ trợ MCP đọc, chỉnh sửa và render project AutoSub trên máy này.</p></div><span>{settings ? savedEnabled ? 'Đang bật' : 'Đang tắt' : 'Chưa kết nối'}</span></div>
+    <div className="settings-heading"><div><h2>MCP · Kết nối trợ lý AI</h2><p>Cho ứng dụng hỗ trợ MCP đọc, chỉnh sửa và render project AutoSub trên máy này.</p></div><span className={`mcp-settings-state ${settings ? savedEnabled ? 'is-enabled' : 'is-disabled' : ''}`}>{settings ? savedEnabled ? 'Đang bật' : 'Đang tắt' : 'Chưa kết nối'}</span></div>
     <p>Bản đầu: danh sách project, đọc/tạo/lưu animation, render MP4 và xem tiến độ. Chưa gọi tạo ảnh/video AI, chưa dùng credit Flow.</p>
     {settings && <>
       <div className="mcp-options">

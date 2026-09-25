@@ -89,7 +89,7 @@ test('concurrent library writes and measured TTS reruns preserve outputs without
   const server = createServer(async (req, res) => {
     for await (const _chunk of req) { /* drain request */ }
     calls++;
-    const samples = (calls === 1 ? 1 : 3) * 24000;
+    const samples = 4 * 24000;
     const wav = Buffer.alloc(44 + samples * 2);
     wav.write('RIFF', 0); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
     wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
@@ -106,7 +106,7 @@ test('concurrent library writes and measured TTS reruns preserve outputs without
     const first = await generateAnimationNarration(input);
     const second = await generateAnimationNarration({ ...input, project: first });
     const durationLocked = await generateAnimationNarration({ ...input, project: fixture(), preservePlannedDuration: true });
-    assert.equal(calls, 2);
+    assert.equal(calls, 1);
     assert.equal(second.scenes[0].durationMs, 4000);
     assert.equal(durationLocked.scenes[0].durationMs, 6000);
     assert.deepEqual(validateAnimationProject(second), []);
@@ -116,7 +116,8 @@ test('concurrent library writes and measured TTS reruns preserve outputs without
     assert.equal(timings[0].startMs, 0);
     assert.equal(timings[1].startMs, timings[0].endMs);
     assert.equal(timings[1].endMs, 4000);
-    assert.deepEqual(timings.map((cue) => cue.endMs - cue.startMs).sort((a, b) => a - b), [1000, 3000]);
+    assert.ok(timings.every((cue) => cue.source === 'sentence-proportional'));
+    assert.equal(timings.reduce((total, cue) => total + cue.endMs - cue.startMs, 0), 4000);
     assert.equal(new Set(second.assets.map((asset) => asset.id)).size, second.assets.length);
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });
@@ -154,13 +155,29 @@ test('narration retries a transient provider failure instead of aborting the who
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });
 
-test('Director resumes the accepted plan and shares duplicate submissions', async () => {
+test('Director checkpoints accepted plans, rejects missing images, and shares duplicate submissions', async () => {
+  const { buildVisualDensityPlan, directAnimationProject, batchDirectAnimationProjects } = await import('./animationDirector');
   let calls = 0;
-  const plan = { name: 'Checkpoint integration', continuityBible: 'One consistent illustrated presenter with an immutable face, outfit, palette and story world.', segments: Array.from({ length: 4 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân, sau đó là diễn biến, cuối cùng là kết quả rõ ràng.', visualBeats: [
+  const plan = { name: 'Checkpoint integration', continuityBible: 'One consistent illustrated presenter with an immutable face, outfit, palette and story world.', segments: Array.from({ length: 5 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân, sau đó là diễn biến, cuối cùng là kết quả rõ ràng.', visualBeats: [
     { purpose: 'explain', narrationCue: 'Đây là nguyên nhân', visual: 'The presenter demonstrates the concrete cause.', motion: 'locked', transition: 'cut' },
     { purpose: 'mechanism', narrationCue: 'sau đó là diễn biến', visual: 'A distinct explanatory shot shows the mechanism progressing.', motion: 'locked', transition: 'cut' },
     { purpose: 'payoff', narrationCue: 'cuối cùng là kết quả', visual: 'A distinct result shot makes the outcome visible.', motion: 'locked', transition: 'cut' },
   ], motionGraphic: 'none' })) };
+  const density = buildVisualDensityPlan(35);
+  const narration = 'Đây là nguyên nhân. Sau đó là diễn biến. Mắt xích kế tiếp cho thấy cơ chế. Cuối cùng là kết quả rõ ràng.';
+  const cues = ['Đây là nguyên nhân', 'Sau đó là diễn biến', 'Mắt xích kế tiếp cho thấy cơ chế', 'Cuối cùng là kết quả rõ ràng'];
+  plan.segments = density.visualsPerScene.map((beatCount, sceneIndex) => ({
+    title: `Part ${sceneIndex + 1}`,
+    narration,
+    visualBeats: cues.slice(0, beatCount).map((narrationCue, beatIndex) => ({
+      purpose: 'explain',
+      narrationCue,
+      visual: `Distinct image for scene ${sceneIndex + 1}, beat ${beatIndex + 1}.`,
+      motion: 'locked',
+      transition: 'cut',
+    })),
+    motionGraphic: 'none',
+  }));
   const server = createServer(async (req, res) => {
     for await (const _chunk of req) { /* drain */ }
     calls++;
@@ -171,22 +188,23 @@ test('Director resumes the accepted plan and shares duplicate submissions', asyn
   try {
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('server');
-    const { directAnimationProject, batchDirectAnimationProjects } = await import('./animationDirector');
     const provider = { id: 'checkpoint-fixture', name: 'Fixture', providerType: 'openai-compatible' as const, baseUrl: `http://127.0.0.1:${address.port}/v1`, authType: 'none' as const, enabled: true, models: [], capabilities: {} };
-    const input = { brief: 'Giải thích nguyên nhân và kết quả bằng sơ đồ', project: { ...fixture(), id: randomUUID() }, provider, model: 'fixture', targetDurationSeconds: 30 };
-    const [first, duplicate] = await Promise.all([directAnimationProject(input), directAnimationProject(input)]);
-    const resumed = await directAnimationProject(input);
-    assert.equal(calls, 1);
-    assert.deepEqual(first.scenes.map((s) => s.id), resumed.scenes.map((s) => s.id));
-    assert.deepEqual(first.scenes.map((s) => s.id), duplicate.scenes.map((s) => s.id));
-    assert.deepEqual(validateAnimationProject(resumed), []);
-    assert.equal(resumed.styleProfile?.name, 'AI Storyboard');
-    assert.ok(resumed.scenes.every((scene) => scene.renderMode !== 'composite' || !scene.layers.some((layer) => layer.name === 'Tiêu đề cảnh')));
-    await directAnimationProject({ ...input, brief: `${input.brief} với ví dụ mới` });
-    assert.equal(calls, 2);
+    const input = { brief: 'Giải thích nguyên nhân và kết quả bằng sơ đồ', project: { ...fixture(), id: randomUUID() }, provider, model: 'fixture', targetDurationSeconds: 35 };
+    const [first, duplicate] = await Promise.allSettled([directAnimationProject(input), directAnimationProject(input)]);
+    assert.equal(first.status, 'rejected');
+    assert.equal(duplicate.status, 'rejected');
+    if (first.status !== 'rejected' || duplicate.status !== 'rejected') throw new Error('Expected missing-image rejection');
+    assert.match(String(first.reason), /AI/i);
+    assert.match(String(duplicate.reason), /AI/i);
+    const requestsForAcceptedPlan = calls;
+    assert.ok(requestsForAcceptedPlan > 0);
+    await assert.rejects(directAnimationProject(input), /AI/i);
+    assert.equal(calls, requestsForAcceptedPlan, 'resuming the accepted checkpoint should not call the Director again');
+    await assert.rejects(directAnimationProject({ ...input, brief: `${input.brief} với ví dụ mới` }), /AI/i);
+    assert.equal(calls, requestsForAcceptedPlan * 2);
     const batch = await batchDirectAnimationProjects({ ...input, template: input.project, briefs: [input.brief] });
-    assert.equal(batch.completed, 1, batch.results[0]?.error);
-    assert.equal(batch.failed, 0);
-    assert.equal(calls, 3);
+    assert.equal(batch.completed, 0);
+    assert.equal(batch.failed, 1);
+    assert.equal(calls, requestsForAcceptedPlan * 3);
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });

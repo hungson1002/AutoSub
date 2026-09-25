@@ -45,7 +45,7 @@ export interface TranslationMemoryItem {
   source: string;
   translation: string;
 }
-type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent'; referenceUploadId?: string; referenceAssetId?: string };
+type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent'; referenceUploadId?: string; referenceAssetId?: string; characterAppearanceLock?: string };
 export interface AnimationDirectorJobStatus { id: string; projectId: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'; stage: string; error?: string; hasResult?: boolean; progressPercent?: number; progressLabel?: string; progressCurrent?: number; progressTotal?: number }
 export interface AnimationDirectorInput { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }
 export interface AnimationProjectSummary { id: string; name: string; width: number; height: number; fps: number; sceneCount: number; createdAt: string; updatedAt: string }
@@ -767,7 +767,7 @@ export const api = {
     model: string,
     voice: string,
     speed: number,
-    text = "Xin chào, đây là bản nghe thử để bạn đánh giá màu giọng, độ rõ, nhịp nói và cảm xúc trước khi dùng cho toàn bộ video.",
+    text?: string,
   ) => {
     const response = await fetch("/api/dubbing/test", {
       method: "POST",
@@ -981,6 +981,9 @@ export const api = {
   configureFilmReviewer: (id: string, vision?: { provider: AIProvider; model: string }) => request<{ ok: boolean }>(`/api/ai-video/jobs/${encodeURIComponent(id)}/reviewer`, { method: 'POST', body: JSON.stringify({ vision }) }),
   createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FilmVideoModel; imageModel?: string; aspectRatio: '9:16' | '16:9'; directionMode?: 'cinematic' | 'documentary' | 'commercial' | 'social-realism'; workflowMode?: 'review-first' | 'direct'; automationMode?: 'automatic' | 'manual'; characterReferenceUploadId?: string; script: { provider: AIProvider; model: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
   flowAgentStatus: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/status'),
+  ima2GptImageStatus: () => request<{ installed: boolean; running: boolean; connected: boolean; authStatus: string; models: string[]; modelChoices?: string[]; version?: string }>('/api/gpt-image/status'),
+  startIma2GptLogin: () => request<{ alreadyConnected?: boolean; status?: string; sessionId?: string; userCode?: string; verificationUrl?: string; expiresIn?: number }>('/api/gpt-image/connect', { method: 'POST', body: '{}' }),
+  pollIma2GptLogin: (sessionId: string) => request<{ status: 'pending' | 'complete' | 'ready' | 'expired' | 'error'; authStatus?: string; error?: string }>(`/api/gpt-image/connect/${encodeURIComponent(sessionId)}`),
   refreshFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/refresh', { method: 'POST' }),
   openFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/open', { method: 'POST' }),
   getAiVideoJob: (id: string, signal?: AbortSignal) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}`, { signal }),

@@ -59,6 +59,21 @@ let flowClientRefresh: Promise<string[]> | undefined;
 const flowImageCreditsByClient = new Map<string, { credits: number; at: number }>();
 const flowImageCreditReads = new Map<string, Promise<number | undefined>>();
 
+function isDisconnectedFlowState(state?: string) {
+  return /unauthorized|disconnected|offline|failed/i.test(String(state || ''));
+}
+
+function flowExtensionConnected(health: FlowAgentHealth) {
+  if (typeof health.extension_connected === 'boolean') return health.extension_connected;
+  if (isDisconnectedFlowState(health.status)) return false;
+  return health.status === 'healthy'
+    || (health.clients || []).some((client) => !isDisconnectedFlowState(client.state));
+}
+
+function flowClientHasUsableSession(client: NonNullable<FlowAgentHealth['clients']>[number]) {
+  return client.has_flow_key === true && !isDisconnectedFlowState(client.state);
+}
+
 async function healthyFlowImageClients(signal?: AbortSignal) {
   const cacheAge = Date.now() - flowClientCache.at;
   if (cacheAge < FLOW_CLIENT_CACHE_MS && flowClientCache.ids.length) return flowClientCache.ids;
@@ -82,9 +97,10 @@ async function healthyFlowImageClients(signal?: AbortSignal) {
         const healthResponse = await fetch(`${baseUrl()}/health`, { signal: requestSignal, headers: headers() });
         if (healthResponse.ok) {
           const health = await healthResponse.json() as FlowAgentHealth;
-          const readyClientIds = [...new Set((health.clients || [])
-            .filter((client) => client.has_flow_key === true && typeof client.client_id === 'string' && client.client_id.trim())
-            .map((client) => client.client_id!.trim()))];
+          const bridgeConnected = flowExtensionConnected(health);
+          const readyClientIds = bridgeConnected ? [...new Set((health.clients || [])
+            .filter((client) => flowClientHasUsableSession(client) && typeof client.client_id === 'string' && client.client_id.trim())
+            .map((client) => client.client_id!.trim()))] : [];
           if (readyClientIds.length) {
             flowIsolatedReadyCount = 0;
             // Every token-ready Flow Agent client is a real browser worker.
@@ -93,6 +109,11 @@ async function healthyFlowImageClients(signal?: AbortSignal) {
             // collapses to only two slots instead of the expected four.
             flowClientCache = { at: Date.now(), ids: readyClientIds };
             return readyClientIds;
+          }
+          if (!bridgeConnected) {
+            flowIsolatedReadyCount = 0;
+            flowClientCache = { at: Date.now(), ids: [] };
+            return [];
           }
         }
 
@@ -497,6 +518,9 @@ async function parseResponse<T>(response: Response): Promise<T> {
     if (/CAPTCHA_FAILED/i.test(detail)) throw new FlowSessionError(`Flow Agent chưa xác minh được phiên Google Flow: ${detail}`, 'CAPTCHA_FAILED');
     if (/FLOW_ACCOUNT_SESSION_UNVERIFIED/i.test(detail)) throw new FlowSessionError('Phiên tài khoản Google Flow chưa được xác minh. Mở tab Google Flow, hoàn tất xác minh rồi bấm tạo lại các ảnh lỗi.', 'FLOW_ACCOUNT_SESSION_UNVERIFIED');
     if (response.status === 402) throw new FlowCreditError(`Tài khoản Google Flow không đủ credit: ${detail}`);
+    if (response.status === 503 && /Google Flow extension is not connected|Open Google Flow in Chrome/i.test(detail)) {
+      throw new FlowSessionError('Worker Google Flow đã mất kết nối trình duyệt. Hãy mở tab Flow trong cùng profile đang cài Flow Agent, sau đó tiếp tục job đã lưu.', 'FLOW_EXTENSION_NOT_CONNECTED');
+    }
     // The bridge can wrap an upstream OAuth rejection in HTTP 400.
     // An existing key does not mean Google still accepts it.
     if (/invalid authentication credentials|expected OAuth 2 access token/i.test(detail)) {
@@ -525,9 +549,10 @@ export async function flowAgentStatus(signal?: AbortSignal) {
       fetch(`${baseUrl()}/health`, { signal: requestSignal, headers: headers() }).then((response) => parseResponse<FlowAgentHealth>(response)),
       listReadyIsolatedFlowWorkers().catch(() => []),
     ]);
-    const linkedReady = (health.clients || []).some((client) => client.has_flow_key === true);
+    const mainBridgeConnected = flowExtensionConnected(health);
+    const linkedReady = mainBridgeConnected && (health.clients || []).some(flowClientHasUsableSession);
     const isolatedReady = isolatedWorkers.length > 0;
-    const extensionConnected = Boolean(health.extension_connected) || (health.clients || []).length > 0 || isolatedReady;
+    const extensionConnected = mainBridgeConnected || isolatedReady;
     // The legacy primary client can legitimately have no token while seven
     // linked same-profile accounts are fully authenticated. Treat the linked
     // pool as the real session source instead of failing preflight because the
@@ -718,6 +743,7 @@ type FlowImageOptions = {
   model?: string;
   size?: string;
   referenceImagePath?: string;
+  referenceImagePaths?: string[];
   signal?: AbortSignal;
   idempotencyKey?: string;
   _creditRotationAttempt?: number;
@@ -826,9 +852,8 @@ export async function generateGoogleFlowImages(prompt: string | string[], output
     // account-scoped media ID for every storyboard beat. This avoids sending a
     // 1-2 MB base64 image through Flow Agent for every generation while still
     // keeping media IDs isolated between Google sessions.
-    let referenceMediaId = options.referenceImagePath
-      ? await uploadReference(options.referenceImagePath, requestSignal, slot.clientId)
-      : undefined;
+    const referenceImagePaths = [...new Set([options.referenceImagePath, ...(options.referenceImagePaths || [])].filter((item): item is string => Boolean(item)))];
+    let referenceMediaIds = await Promise.all(referenceImagePaths.map((reference) => uploadReference(reference, requestSignal, slot.clientId)));
     const buildBody = () => JSON.stringify({
       prompt: flowPrompt,
       model: options.model || 'narwhal',
@@ -840,7 +865,7 @@ export async function generateGoogleFlowImages(prompt: string | string[], output
       // event loop, which is the main bottleneck when several accounts finish
       // at nearly the same time.
       response_format: 'remote_url',
-      ...(referenceMediaId ? { ref_media_ids: [referenceMediaId] } : {}),
+      ...(referenceMediaIds.length ? { ref_media_ids: referenceMediaIds } : {}),
     });
     // A caller may keep the same key across a transport timeout and replay the
     // original paid request. A fresh key remains the default for a new, explicit
@@ -867,13 +892,13 @@ export async function generateGoogleFlowImages(prompt: string | string[], output
       try {
         result = await submit(idempotencyKey);
       } catch (error) {
-        if (!options.referenceImagePath || !staleFlowReferenceError(error)) throw error;
+        if (!referenceImagePaths.length || !staleFlowReferenceError(error)) throw error;
         // Media IDs are scoped to the targeted Google account and can become
         // stale after a tab/session reset. Repair only this account's cached ID,
         // upload the reference once again for that worker, then retry the same
         // storyboard image without poisoning the rest of the pool.
-        await invalidateReferenceUpload(options.referenceImagePath, slot.clientId);
-        referenceMediaId = await uploadReference(options.referenceImagePath, requestSignal, slot.clientId);
+        await Promise.all(referenceImagePaths.map((reference) => invalidateReferenceUpload(reference, slot.clientId)));
+        referenceMediaIds = await Promise.all(referenceImagePaths.map((reference) => uploadReference(reference, requestSignal, slot.clientId)));
         result = await submit(`${idempotencyKey}-refrepair-${randomUUID().replace(/-/g, '').slice(0, 10)}`);
       }
     if (!result.data || result.data.length < outputFiles.length) throw new Error(`Flow Agent chỉ trả về ${result.data?.length || 0}/${outputFiles.length} ảnh.`);

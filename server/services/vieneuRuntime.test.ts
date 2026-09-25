@@ -42,12 +42,15 @@ test('VieNeu short-utterance repair does not flatten multi-sentence narration', 
   assert.equal(usesShortUtteranceQualityPass('Một câu rất dài '.repeat(20)), false);
 });
 
-test('VieNeu speech text keeps expressive punctuation and completes bare cues', () => {
+test('VieNeu speech text keeps expressive punctuation and preserves supported emotion tokens', () => {
   assert.equal(prepareVieneuSpeechText('  Anh đi đâu vậy?  '), 'Anh đi đâu vậy?');
   assert.equal(prepareVieneuSpeechText('Tuyệt quá!'), 'Tuyệt quá!');
   assert.equal(prepareVieneuSpeechText('Xin chào mọi người'), 'Xin chào mọi người.');
   assert.equal(prepareVieneuSpeechText('Chờ một chút…'), 'Chờ một chút…');
-  assert.equal(prepareVieneuSpeechText('[cười] Đây là một câu sạch.'), 'Đây là một câu sạch.');
+  assert.equal(prepareVieneuSpeechText('Đúng như vậy [cười]'), 'Đúng như vậy. [cười]');
+  assert.equal(prepareVieneuSpeechText('Nghe hay quá! [cười]'), 'Nghe hay quá! [cười]');
+  assert.equal(prepareVieneuSpeechText('[thở dài] Rồi mọi chuyện đổi khác.'), '[thở dài] Rồi mọi chuyện đổi khác.');
+  assert.equal(prepareVieneuSpeechText('[chuckle] This alias is not part of the Vietnamese script.'), 'This alias is not part of the Vietnamese script.');
 });
 
 test('VieNeu pause repair removes only the middle of a measured silence', () => {

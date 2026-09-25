@@ -4,7 +4,25 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { run, workdir } from './ffmpeg';
-import { enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, transcodeAnimationRecording, validateAnimationOutput } from './animationRender';
+import { enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, transcodeAnimationRecording, validateAnimationOutput, wavTrailingSilenceMs } from './animationRender';
+
+test('detects a quiet scene ending without mistaking an internal pause for the ending', () => {
+  const sampleRate = 48_000;
+  const frames = sampleRate;
+  const wav = Buffer.alloc(44 + frames * 2);
+  wav.write('RIFF', 0, 'ascii'); wav.writeUInt32LE(wav.length - 8, 4);
+  wav.write('WAVEfmt ', 8, 'ascii'); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(sampleRate, 24); wav.writeUInt32LE(sampleRate * 2, 28);
+  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+  wav.write('data', 36, 'ascii'); wav.writeUInt32LE(frames * 2, 40);
+  for (let frame = 0; frame < frames; frame += 1) {
+    const second = frame / sampleRate;
+    const active = second < .3 || (second >= .48 && second < .82);
+    wav.writeInt16LE(active ? Math.round(9000 * Math.sin(2 * Math.PI * 440 * second)) : 0, 44 + frame * 2);
+  }
+  assert.ok(wavTrailingSilenceMs(wav) >= 170 && wavTrailingSilenceMs(wav) <= 190);
+});
 
 test('transcodes WebM and reuses cache by project fingerprint', async () => {
   const source = path.join(workdir, 'animation-render-test-source.webm');

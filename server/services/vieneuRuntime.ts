@@ -35,9 +35,19 @@ const VIENEU_RETRY_TEMPERATURE = 0.62;
 
 export function prepareVieneuSpeechText(text: string) {
   const content = text.normalize('NFC')
-    .replace(/\[(?:laugh|chuckle|sigh|clear\s+throat|c\u01b0\u1eddi|th\u1edf\s+d\u00e0i|h\u1eafng\s+gi\u1ecdng)\]\s*/giu, '')
+    // VieNeu v3 converts its Vietnamese inline controls to dedicated acoustic
+    // tokens. Keep those controls in the TTS input; remove English aliases that
+    // this app never emits so they cannot accidentally be spoken as text.
+    .replace(/\[(?:laugh|chuckle|sigh|clear\s+throat)\]\s*/giu, '')
     .replace(/\s+/g, ' ')
     .trim();
+  const trailingCue = content.match(/(?:\[(?:c\u01b0\u1eddi|th\u1edf\s+d\u00e0i|h\u1eafng\s+gi\u1ecdng)\]\s*)+$/iu);
+  if (trailingCue) {
+    const spoken = content.slice(0, trailingCue.index).trimEnd();
+    if (!spoken) return content;
+    const cue = trailingCue[0].trim();
+    return /[.!?…]["'’”)]*$/u.test(spoken) ? `${spoken} ${cue}` : `${spoken}. ${cue}`;
+  }
   if (!content || /[.!?…]["'’”)]*$/.test(content)) return content;
   return `${content}.`;
 }

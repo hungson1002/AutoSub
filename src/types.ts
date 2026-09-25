@@ -11,6 +11,7 @@ export type ProviderType =
   | "whisper-local"
   | "edge-tts"
   | "vieneu-local"
+  | "kokoro-local"
   | "hiiu-tts"
   | "capcut-tts"
   | "vbee"

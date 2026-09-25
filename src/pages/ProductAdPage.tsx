@@ -8,7 +8,7 @@ import { AssignmentSummary } from '../components/AssignmentSummary';
 import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
 import { Check, CirclePlay, Download, Image as ImageIcon, LoaderCircle, RefreshCw, ShieldCheck, Trash2, Upload, WandSparkles, X } from '../components/Icons';
-import { loadVoicePreview, primeVoicePreview, VI_VOICE_PREVIEW_TEXT } from '../lib/voicePreview';
+import { loadVoicePreview, primeVoicePreview } from '../lib/voicePreview';
 
 type ProductImageDraft = {
   id: string;
@@ -224,7 +224,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
     const requestId = voicePreviewRequestRef.current;
     setTestingVoice(true);
     try {
-      const blob = await loadVoicePreview(ttsProvider, ttsAssignment.model, voice, voiceSpeed, VI_VOICE_PREVIEW_TEXT);
+      const blob = await loadVoicePreview(ttsProvider, ttsAssignment.model, voice, voiceSpeed);
       if (requestId !== voicePreviewRequestRef.current) return;
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
@@ -368,6 +368,7 @@ export function ProductAdPage({ providers, settings, onNotice }: {
           {outputMode === 'render' && <><CapabilityAssignmentPicker capability="tts" assignments={capabilityAssignments(settings, 'tts')} providers={providers} value={ttsAssignment} onChange={setTtsAssignment} label="TTS · giọng đọc quảng cáo" />
           <AssignmentSummary label="TTS đang dùng" assignment={ttsAssignment} provider={ttsProvider} capability="tts" />
           <div className="field"><span>Voice</span>{voiceItems.length ? <SelectField ariaLabel="Voice quảng cáo" value={voice} onChange={setVoice} options={voiceItems.map((item) => ({ value: item.id, label: item.name || item.id, description: `${item.id}${item.language ? ` · ${item.language}` : ''}` }))} /> : <input value={voice} onChange={(event) => setVoice(event.target.value)} placeholder={ttsProviderType === 'vieneu-local' ? 'Tạo giọng ở mục Clone giọng' : 'Voice ID'} readOnly={ttsProviderType === 'vieneu-local'} />}</div>
+          {ttsProviderType === 'kokoro-local' && <small className="field-help">Chỉ có giọng tiếng Anh (Mỹ/Anh); không phù hợp để đọc nội dung tiếng Việt. Nghe thử sẽ tự phát khi mẫu sẵn sàng.</small>}
           <div className="review-voice-row"><div className="field"><span>Tốc độ <b className="value-badge">{voiceSpeed.toFixed(2)}×</b></span><RangeInput min={0.9} max={1.4} step={0.05} value={voiceSpeed} onChange={(event) => setVoiceSpeed(Number(event.target.value))} /></div><button type="button" className="button ghost" disabled={testingVoice} onClick={() => void testVoice()}>{testingVoice ? <LoaderCircle size={15} className="spin" /> : <CirclePlay size={15} />} Nghe thử</button></div></>}
         </section>
 

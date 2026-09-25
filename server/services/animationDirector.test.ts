@@ -1,42 +1,109 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { allocateLockedSceneDurations, animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, buildVisualDensityPlan, characterReferenceDirective, chooseStoryboardTextBeatIndexes, directorRepairRule, durationSecondsFromBrief, jsonFromDirectorReply, narrationFitWordTargets, normalizeLongAnimationSegments, normalizeResearchPacket, replaceUnavailableGeneratedAssets, researchBlueprintDirective, storyboardShotDirection, visualTextDirective, visualTextLanguage } from './animationDirector';
-import { animationAssetCacheKey, wavDurationMs } from './animationAssets';
+import { allocateTimelineDurations, narrationDurationFitStatus, narrationRewriteChanged } from './animationDirector';
+import { allocateLockedSceneDurations, animationActorPlanIssues, buildBeatPerformances, buildVisualBeatTimeline, buildVisualDensityPlan, characterReferenceDirective, chooseStoryboardTextBeatIndexes, directorRepairRule, directorReviewDirective, durationSecondsFromBrief, jsonFromDirectorReply, narrationFitWordTargets, normalizeLongAnimationSegments, normalizeResearchPacket, normalizeStoryboardEmbeddedText, replaceUnavailableGeneratedAssets, researchBlueprintDirective, storyboardShotDirection, storyToneDirective, storyWorldCastDirective, visualMediumDirective, visualMediumFromText, visualTextDirective, visualTextLanguage } from './animationDirector';
+import { animationAssetCacheKey, narrationCaptionText, wavDurationMs } from './animationAssets';
 import { animationCraftRules } from './directorKnowledge';
 import { animationPerformancePlanIssues } from './animationDirector';
+import { initialIsolatedFlowImageConcurrency, limitVieneuEmotionCueDensity, nonFlowImageConcurrencyPlan, normalizeStoryCharacterRefs, storyCastCharacterIds, storyCastReferenceDirective, storyCastReferencePrompt } from './animationDirector';
 import { evaluateScene } from '../../src/animationStudio/evaluator';
 import { defaultTransform } from '../../shared/animationStudio';
 
-test('visual density stays at an understandable 20-24 changes per minute while narration scenes group atomic shots', () => {
+test('visual density follows the reference films: quick opening, calmer explanation', () => {
   const targets = [
-    { seconds: 60, min: 22, max: 28 },
-    { seconds: 300, min: 100, max: 120 },
-    { seconds: 600, min: 200, max: 230 },
-    { seconds: 900, min: 280, max: 330 },
+    { seconds: 60, count: 22 },
+    { seconds: 300, count: 110 },
+    { seconds: 600, count: 220 },
+    { seconds: 900, count: 330 },
   ];
   for (const target of targets) {
     const plan = buildVisualDensityPlan(target.seconds);
-    assert.ok(plan.visualCount >= target.min && plan.visualCount <= target.max);
+    assert.equal(plan.visualCount, target.count);
     assert.equal(plan.visualsPerScene.reduce((sum, count) => sum + count, 0), plan.visualCount);
-    assert.ok(plan.visualCount / (target.seconds / 60) >= 20 && plan.visualCount / (target.seconds / 60) <= 24);
-    assert.ok(plan.visualsPerScene.every((count) => count >= 1 && count <= 3));
+    assert.ok(plan.visualsPerScene.every((count) => count >= 1 && count <= 4));
     assert.ok(plan.sceneCount < plan.visualCount);
-    assert.ok(plan.visualDurationsSeconds.slice(0, plan.openingVisualCount).every((duration) => duration >= 2 && duration <= 2.5));
+    assert.ok(plan.visualDurationsSeconds.slice(0, plan.openingVisualCount).every((duration) => duration >= 2.2 && duration <= 2.6));
     assert.ok(plan.visualDurationsSeconds.slice(plan.openingVisualCount).every((duration) => duration >= 2.5 && duration <= 3.5));
     assert.ok(Math.abs(plan.sceneDurationsSeconds.reduce((sum, duration) => sum + duration, 0) - target.seconds) < 0.001);
+    assert.equal(plan.sceneCount, Math.ceil(plan.visualCount / 4));
   }
   const firstMinute = buildVisualDensityPlan(60);
-  assert.ok(15 / firstMinute.openingVisualCount >= 2 && 15 / firstMinute.openingVisualCount <= 2.5);
-  assert.ok(firstMinute.visualCount <= 25);
-  assert.ok(firstMinute.sceneCount <= Math.ceil(firstMinute.visualCount / 3));
+  assert.equal(firstMinute.openingVisualCount, 6);
+  assert.equal(firstMinute.visualCount, 22);
 });
 
 test('character reference directive makes the attached image authoritative over storyboard/style drift', () => {
   const rule = characterReferenceDirective(true);
-  assert.match(rule, /single source of truth/i);
-  assert.match(rule, /Ignore any conflicting appearance words/i);
-  assert.match(rule, /hoodie\/shirt\/jacket/i);
-  assert.match(rule, /chibi\/anime/i);
+  assert.match(rule, /defines ONLY the recurring narrator mascot\/presenter/i);
+  assert.match(rule, /Read the mascot's identity directly from the image/i);
+  assert.match(rule, /preserve its recognizable silhouette, face, proportions, exact clothing, accessories and colors/i);
+  assert.match(rule, /occasional narrator\/guide cameo/i);
+  assert.match(rule, /Design secondary characters as distinct people/i);
+  assert.match(rule, /never copy the mascot's identity or outfit onto them/i);
+  assert.match(rule, /If the reference clearly establishes 2D or 3D/i);
+  assert.doesNotMatch(rule, /green\/sage clothing to yellow/i);
+  assert.match(characterReferenceDirective(true, 'Áo xanh sage, không vàng.'), /EXPLICIT OPTIONAL USER OVERRIDE/i);
+  assert.match(characterReferenceDirective(true, 'đổi áo sang xanh dương'), /EXPLICIT OPTIONAL USER OVERRIDE/i);
+  assert.match(characterReferenceDirective(true, 'đổi áo sang xanh dương'), /keep every unspecified feature faithful to the reference/i);
+});
+
+test('cast continuity separates the presenter from a coherent, period-appropriate supporting cast', () => {
+  const rule = storyWorldCastDirective();
+  assert.match(rule, /PRESENTER\/MASCOT and STORY-WORLD CAST sections/i);
+  assert.match(rule, /stable visual IDs/i);
+  assert.match(rule, /Reuse the same ID and appearance/i);
+  assert.match(rule, /the JSON field is required even when empty/i);
+  assert.match(rule, /same plausible time\/place and visual culture/i);
+  assert.match(rule, /Do not assign hunting\/gathering or other roles by gender stereotype/i);
+  assert.match(directorReviewDirective('balanced'), /recurring cast ID changes its visible identity/i);
+});
+
+test('seven isolated Flow workers start at fourteen image lanes while honoring safe limits', () => {
+  const pool = { pendingWorkItems: 242, accountCount: 7, slotsPerAccount: 2, maxConcurrency: 14 };
+  assert.equal(initialIsolatedFlowImageConcurrency(pool), 14);
+  assert.equal(initialIsolatedFlowImageConcurrency({ ...pool, configuredInitial: 10 }), 10);
+  assert.equal(initialIsolatedFlowImageConcurrency({ ...pool, configuredInitial: 20 }), 14);
+  assert.equal(initialIsolatedFlowImageConcurrency({ ...pool, pendingWorkItems: 3 }), 3);
+});
+
+test('GPT Image starts at the verified 24-job local limit without raising other providers', () => {
+  assert.deepEqual(nonFlowImageConcurrencyPlan('ima2-gpt-oauth', Number.NaN), { maxConcurrency: 24, initialConcurrency: 24 });
+  assert.deepEqual(nonFlowImageConcurrencyPlan('ima2-gpt-oauth', 30), { maxConcurrency: 24, initialConcurrency: 24 });
+  assert.deepEqual(nonFlowImageConcurrencyPlan('ima2-gpt-oauth', 12), { maxConcurrency: 12, initialConcurrency: 12 });
+  assert.deepEqual(nonFlowImageConcurrencyPlan('openai-compatible', Number.NaN), { maxConcurrency: 4, initialConcurrency: 3 });
+  assert.deepEqual(nonFlowImageConcurrencyPlan('openai-compatible', 24), { maxConcurrency: 8, initialConcurrency: 3 });
+});
+
+test('VieNeu emotion cues stay sparse, follow a full sentence, and stay out of captions', () => {
+  const segments = [
+    { narration: 'Anh đã [cười] tiết kiệm được tiền.', visualBeats: [{ narrationCue: 'Anh đã [cười] tiết kiệm được tiền.' }] },
+    { narration: 'Nhưng giá cả vẫn leo thang. [thở dài]', visualBeats: [{ narrationCue: 'giá cả vẫn leo thang' }] },
+    { narration: 'Một ngày khác, hóa đơn lại tăng.', visualBeats: [{ narrationCue: 'hóa đơn lại tăng' }] },
+    { narration: 'Bạn nhìn lại khoản chi của mình. [thở dài]', visualBeats: [{ narrationCue: 'khoản chi của mình' }] },
+    { narration: 'Vậy nên, điều quan trọng là sức mua. [thở dài]', visualBeats: [{ narrationCue: 'điều quan trọng là sức mua' }] },
+  ];
+  const limited = limitVieneuEmotionCueDensity(segments);
+  assert.equal(limited[0]?.narration, 'Anh đã tiết kiệm được tiền. [cười]');
+  assert.equal(limited[0]?.visualBeats[0]?.narrationCue, 'Anh đã tiết kiệm được tiền.');
+  assert.doesNotMatch(limited[1]?.narration || '', /\[(?:cười|thở dài|hắng giọng)\]/u);
+  assert.match(limited[4]?.narration || '', /\[thở dài\]$/u);
+  assert.equal(narrationCaptionText('Đúng như vậy. [cười] [thở dài]'), 'Đúng như vậy.');
+  assert.equal(narrationCaptionText('That is funny. [chuckle]'), 'That is funny.');
+});
+
+test('story cast IDs normalize from beat metadata and visual prompts into reusable role anchors', () => {
+  const segments = normalizeLongAnimationSegments({ segments: [{ narration: 'The guide meets the hunter.', visualBeats: [
+    { visual: 'CAST_1, a hunter with a woven coat, enters the camp.', characterRefs: ['CAST_1', 'mascot', 'other'] },
+    { visual: 'CAST_01 speaks beside the fire.' },
+  ] }] }, 1);
+  assert.deepEqual(segments[0]?.visualBeats[0]?.characterRefs, ['CAST_01', 'mascot']);
+  assert.deepEqual(storyCastCharacterIds('', segments), ['CAST_01']);
+  const referenceRule = storyCastReferenceDirective(['mascot', 'CAST_01'], true);
+  assert.match(referenceRule, /reference image 1 is the mascot reference/);
+  assert.match(referenceRule, /reference image 2 is the exact identity reference for CAST_01/);
+  const referencePrompt = storyCastReferencePrompt({ characterId: 'CAST_01', continuity: 'STORY-WORLD CAST: CAST_01 is a hunter.', mediumRule: 'Keep one medium.', languageRule: 'Use Vietnamese.', mascotReferenceAttached: true });
+  assert.match(referencePrompt, /do not copy its face, body, silhouette, clothing/i);
+  assert.match(referencePrompt, /exactly one person/);
 });
 
 test('shot direction rotates composition and carries contextual backgrounds', () => {
@@ -53,6 +120,10 @@ test('research packet normalizes a narrative blueprint with a safe fallback', ()
     thesis: 'Cầu tăng nhanh hơn cung trong ngắn hạn.',
     audiencePromise: 'Người xem hiểu cơ chế bằng một ví dụ đời thường.',
     sourceQueries: ['Tìm số liệu CPI chính thức'],
+    facts: [
+      { claim: 'Cross-checked fact', evidence: 'Evidence in source excerpts.', sources: ['https://one.example/report', 'https://two.example/report'], use: 'use' },
+      { claim: 'Single-source claim', evidence: 'Only one source.', source: 'https://one.example/other', use: 'use' },
+    ],
     narrativeArc: [
       { phase: 'hook', objective: 'Mở bằng một lần đi chợ.' },
       { phase: 'question', objective: 'Đặt câu hỏi về hóa đơn.' },
@@ -63,7 +134,11 @@ test('research packet normalizes a narrative blueprint with a safe fallback', ()
   assert.equal(packet.audiencePromise, 'Người xem hiểu cơ chế bằng một ví dụ đời thường.');
   assert.deepEqual(packet.sourceQueries, ['Tìm số liệu CPI chính thức']);
   assert.equal(packet.narrativeArc.length, 4);
+  assert.equal(packet.facts[0]?.use, 'use');
+  assert.deepEqual(packet.facts[0]?.sourceUrls, ['https://one.example/report', 'https://two.example/report']);
+  assert.equal(packet.facts[1]?.use, 'qualify');
   assert.match(researchBlueprintDirective(packet), /sourceQueries/);
+  assert.match(researchBlueprintDirective(packet), /sourceUrls/);
   const fallback = normalizeResearchPacket({ centralQuestion: 'Một câu hỏi', thesis: 'Một luận đề' });
   assert.equal(fallback.narrativeArc.length, 6);
   assert.equal(fallback.narrativeArc.at(-1)?.phase, 'payoff');
@@ -71,32 +146,65 @@ test('research packet normalizes a narrative blueprint with a safe fallback', ()
 
 test('storyboard text policy keeps normal frames visual-first like the references', () => {
   const rule = visualTextDirective('Vietnamese');
-  assert.match(rule, /AT MOST 20%/i);
-  assert.match(rule, /Default to ZERO text/i);
-  assert.match(rule, /at most ONE prominent text element/i);
-  assert.match(rule, /maximum 4 whitespace-separated words/i);
-  assert.match(rule, /maximum 24 visible characters/i);
-  assert.match(rule, /Never render a complete sentence/i);
-  assert.match(rule, /Never render narration/i);
-  assert.match(rule, /Never make text carry the explanation/i);
-  assert.match(rule, /MUST be Vietnamese/i);
-  assert.match(rule, /If the image works without words, use no words/i);
+  assert.match(rule, /ZERO readable text/i);
+  assert.match(rule, /in any language/i);
+  assert.match(rule, /blank or show only non-linguistic abstract shapes/i);
+  assert.match(rule, /spoken video language is Vietnamese/i);
 });
 
 test('visual text language follows the video language', () => {
   assert.equal(visualTextLanguage('Tại sao mua 2 tặng 1 khiến bạn tiêu nhiều tiền hơn?'), 'Vietnamese');
   assert.equal(visualTextLanguage('Why buy two get one free makes you spend more money'), 'English');
-  assert.match(visualTextDirective('English'), /MUST be English/i);
+  assert.match(visualTextDirective('English'), /spoken video language is English/i);
 });
 
-test('hard text budget selects no more than one fifth of storyboard beats and avoids adjacent text shots', () => {
+test('showrunner review rejects repeated rhetorical hooks and unsupported dopamine claims', () => {
+  const rule = directorReviewDirective('balanced');
+  assert.match(rule, /same rhetorical question or full-price\/buying prompt repeats/i);
+  assert.match(rule, /reject with severity=high/i);
+  assert.match(rule, /at most one concise callback/i);
+  assert.match(rule, /do not describe dopamine as a simple pleasure chemical/i);
+  assert.match(rule, /fetched source URL plus evidence/i);
+  assert.match(rule, /at least two independently fetched publisher URLs plus evidence/i);
+});
+
+test('humorous storytelling requires audible setup and payoff instead of a label only', () => {
+  const rule = storyToneDirective('humorous');
+  assert.match(rule, /HUMOR IS REQUIRED BUT CONTROLLED/i);
+  assert.match(rule, /everyday setup/i);
+  assert.match(rule, /visual\/reaction payoff/i);
+  assert.match(rule, /must be audible/i);
+});
+
+test('visual medium locks 3D or 2D and lets a reference decide when unspecified', () => {
+  assert.equal(visualMediumFromText('Tạo mascot 3D kiểu CGI'), '3D');
+  assert.equal(visualMediumFromText('flat vector 2D, nét vẽ whiteboard'), '2D');
+  assert.equal(visualMediumFromText('Editorial hiện đại'), 'auto');
+  assert.match(visualMediumDirective('3D', true), /NON-NEGOTIABLE 3D MEDIUM LOCK/i);
+  assert.match(visualMediumDirective('2D', true), /NON-NEGOTIABLE 2D MEDIUM LOCK/i);
+  assert.match(visualMediumDirective('auto', true), /inspect the attached mascot reference/i);
+  assert.match(visualMediumDirective('auto', true), /overrides generic editorial\/style presets/i);
+});
+
+test('AI storyboard frames never select on-image text', () => {
   const beats = Array.from({ length: 23 }, (_, index) => ({
     visual: index % 2 === 0 ? `Price sign ${index} with ${index + 10}% discount` : `Mascot walking through aisle ${index}`,
     narrationCue: index % 3 === 0 ? `Giảm giá ${index + 10}%` : 'Nhân vật tiếp tục đi',
   }));
-  const selected = [...chooseStoryboardTextBeatIndexes(beats)].sort((a, b) => a - b);
-  assert.ok(selected.length <= Math.floor(beats.length * .2));
-  assert.ok(selected.every((index, position) => position === 0 || index - selected[position - 1]! > 1));
+  assert.deepEqual([...chooseStoryboardTextBeatIndexes(beats)], []);
+});
+
+test('model-proposed text is removed after storyboard rewrites', () => {
+  const segments = [{
+    title: 'A', narration: 'Một hai ba bốn năm sáu bảy tám chín mười', motionGraphic: 'none' as const,
+    visualBeats: Array.from({ length: 10 }, (_, index) => ({
+      purpose: index === 0 ? 'comparison' : 'explain', visual: index % 2 ? 'Mascot in a room' : `Price sign ${index} 10%`,
+      narrationCue: 'Một hai ba bốn', motion: 'locked' as const, transition: 'cut' as const,
+      onScreenText: index === 0 ? 'Giá tăng' : `Unapproved long label ${index}`,
+    })),
+  }];
+  const normalized = normalizeStoryboardEmbeddedText(segments);
+  assert.ok(normalized[0]!.visualBeats.every((beat) => !beat.onScreenText));
 });
 
 test('explicit duration written in a brief overrides prompt length when auto mode is used', () => {
@@ -108,9 +216,29 @@ test('explicit duration written in a brief overrides prompt length when auto mod
 
 test('locked duration distributes only small proportional breathing room after measured narration', () => {
   const durations = allocateLockedSceneDurations([7_800, 8_100, 7_900, 8_000, 7_700, 8_200, 7_900, 2_900], 60_000);
-  assert.equal(durations.reduce((sum, value) => sum + value, 0), 60_000);
+  assert.ok(Math.abs(durations.reduce((sum, value) => sum + value, 0) - 60_000) < 0.001);
   durations.forEach((duration, index) => assert.ok(duration >= [7_800, 8_100, 7_900, 8_000, 7_700, 8_200, 7_900, 2_900][index]));
   assert.throws(() => allocateLockedSceneDurations([31_000, 31_000], 60_000), /dài hơn timeline/);
+});
+
+test('locked narration timing rejects an overrun and only pads a small shortfall', () => {
+  assert.equal(narrationDurationFitStatus([50_000, 49_500], 100_000), 'fit');
+  assert.equal(narrationDurationFitStatus([50_000, 48_000], 100_000), 'fit');
+  assert.equal(narrationDurationFitStatus([50_000, 47_000], 100_000), 'short');
+  assert.equal(narrationDurationFitStatus([50_000, 50_001], 100_000), 'long');
+});
+
+test('small narration edits are remeasured instead of rejected by a fixed word-count threshold', () => {
+  const current = [{ narration: 'A sentence with a small timing mismatch.' }];
+  assert.equal(narrationDurationFitStatus([302_864], 300_000), 'long');
+  assert.equal(narrationRewriteChanged(current, [{ narration: 'A sentence with a small timing mismatch, trimmed.' }]), true);
+  assert.equal(narrationRewriteChanged(current, current), false);
+});
+
+test('planned scene durations add up exactly on the render frame grid', () => {
+  const durations = allocateTimelineDurations([2_500, 2_500, 2_700, 2_700], 10_400, 30);
+  assert.ok(Math.abs(durations.reduce((sum, value) => sum + value, 0) - 10_400) < 0.001);
+  durations.forEach((duration) => assert.ok(Math.abs(duration / (1000 / 30) - Math.round(duration / (1000 / 30))) < 0.000001));
 });
 
 test('narration word targets respond to real measured TTS instead of a fixed words-per-second guess', () => {
@@ -135,7 +263,7 @@ test('cue timing cannot leave the first storyboard image visible past three seco
       { purpose: 'result', narrationCue: 'kết quả', visual: 'result', motion: 'locked', transition: 'crossfade' },
     ],
   });
-  const secondImageStart = timeline.commands.find((command) => command.id === 'visual-in-0-1')?.startMs;
+  const secondImageStart = timeline.layers[1]?.startMs;
   assert.ok(secondImageStart !== undefined && secondImageStart <= 3_000);
 });
 
@@ -210,7 +338,7 @@ test('missing images preserve the assigned beat instead of shifting later shots'
   const beat = { purpose: 'reveal', visual: 'test', motion: 'locked' as const, transition: 'cut' as const };
   const result = buildVisualBeatTimeline({ sceneIndex: 0, durationMs: 8000, width: 1920, height: 1080, visuals: [undefined, asset], beats: [beat, beat] });
   assert.equal(result.layers[0].id, 'visual-0-1');
-  assert.equal(result.commands.find((item) => item.type === 'FADE_IN')?.startMs, 4000);
+  assert.equal(result.layers[0]?.startMs, 4000);
 });
 
 test('animation craft knowledge rejects static slideshow direction', () => {
@@ -276,7 +404,7 @@ test('auto storyboard stills default to static holds instead of invented Ken Bur
   assert.ok(segment.visualBeats.every((beat) => beat.transition === 'cut'));
 });
 
-test('visual beats create short transitions and independent camera movement', () => {
+test('visual beats create static full-frame cuts without runtime motion', () => {
   const now = new Date().toISOString();
   const visuals = Array.from({ length: 4 }, (_, index) => ({ id: `asset-${index}`, type: 'background' as const, name: `Shot ${index}`, uri: `/shot-${index}.png`, tags: [], createdAt: now }));
   const beats = [
@@ -287,14 +415,12 @@ test('visual beats create short transitions and independent camera movement', ()
   ];
   const timeline = buildVisualBeatTimeline({ sceneIndex: 0, durationMs: 10_000, width: 1920, height: 1080, visuals, beats });
   assert.equal(timeline.layers.length, 4);
-  assert.equal(timeline.commands.filter((command) => command.type === 'FADE_IN').length, 3);
-  assert.equal(timeline.commands.filter((command) => command.type === 'FADE_OUT').length, 3);
-  assert.ok(timeline.commands.some((command) => command.type === 'MOVE'));
-  assert.ok(timeline.commands.some((command) => command.type === 'SCALE'));
-  assert.ok(timeline.commands.every((command) => command.startMs + command.durationMs <= 10_000));
+  assert.equal(timeline.commands.length, 0);
+  assert.ok(timeline.layers.every((layer) => layer.width === 1920 && layer.height === 1080));
+  assert.ok(timeline.layers.every((layer) => layer.transform?.scale?.x === 1 && layer.transform?.scale?.y === 1));
 });
 
-test('long locked storyboard holds receive restrained editorial camera motion', () => {
+test('long locked storyboard holds stay static instead of inventing camera motion', () => {
   const now = new Date().toISOString();
   const visual = { id: 'whiteboard-shot', type: 'background' as const, name: 'Whiteboard shot', uri: '/whiteboard.png', tags: [], createdAt: now };
   const timeline = buildVisualBeatTimeline({
@@ -306,13 +432,14 @@ test('long locked storyboard holds receive restrained editorial camera motion', 
     beats: [{ purpose: 'Explain', visual: 'presenter and cooking fire', motion: 'locked', transition: 'crossfade' }],
   });
   assert.equal(timeline.layers.length, 1);
-  assert.ok(timeline.layers[0].width > 1280);
-  assert.ok(timeline.layers[0].height > 720);
-  assert.ok(timeline.commands.some((command) => command.type === 'MOVE' || command.type === 'SCALE'));
+  assert.equal(timeline.layers[0].width, 1280);
+  assert.equal(timeline.layers[0].height, 720);
+  assert.equal(timeline.commands.length, 0);
 });
 
 test('character references create distinct image cache entries', () => {
   const base = { prompt: 'A cat explores a distant planet', generator: 'flow-agent' as const, model: 'narwhal' };
   assert.notEqual(animationAssetCacheKey({ ...base, referenceUploadId: 'reference-a' }), animationAssetCacheKey({ ...base, referenceUploadId: 'reference-b' }));
   assert.notEqual(animationAssetCacheKey({ ...base, referenceAssetId: 'candidate-a' }), animationAssetCacheKey(base));
+  assert.notEqual(animationAssetCacheKey({ ...base, referenceAssetIds: ['cast-a'] }), animationAssetCacheKey({ ...base, referenceAssetIds: ['cast-b'] }));
 });

@@ -330,18 +330,71 @@ document.getElementById('agent-toggle').addEventListener('click', async () => {
   setTimeout(refreshMonitor, 350);
 });
 document.getElementById('open-flow').addEventListener('click', () => runtimeMessage({ type: 'OPEN_FLOW_TAB' }));
+async function refreshAccountsOneByOne(button) {
+  const { accounts = [] } = await runtimeMessage({ type: 'LIST_FLOW_ACCOUNTS' });
+  const failures = [];
+  let processed = 0;
+  for (const account of accounts) {
+    const tokenAge = Number(account.tokenAge);
+    const tokenFresh = account.connected && account.tokenReady
+      && Number.isFinite(tokenAge) && tokenAge >= 0 && tokenAge < 50 * 60 * 1000;
+    if (tokenFresh || Number(account.activeRequests) > 0) continue;
+    processed++;
+    button.textContent = `Refreshing ${processed}/${accounts.length}…`;
+    try {
+      await runtimeMessage({ type: 'REFRESH_FLOW_ACCOUNT', accountId: account.id });
+    } catch (error) {
+      failures.push({ account: account.email || account.clientId, error: error.message });
+    }
+  }
+  const latest = await runtimeMessage({ type: 'LIST_FLOW_ACCOUNTS' });
+  const ready = (latest.accounts || []).filter((account) => account.connected && account.tokenReady).length;
+  return { total: accounts.length, ready, failed: Math.max(accounts.length - ready, failures.length), legacyFallback: true };
+}
+
 document.getElementById('refresh-token').addEventListener('click', async () => {
   const button = document.getElementById('refresh-token');
-  button.textContent = 'Refreshing…';
+  button.disabled = true;
+  button.textContent = 'Opening accounts…';
+  let legacyFallback = false;
   try {
-    await runtimeMessage({ type: 'REFRESH_TOKEN' });
-    showToast('Flow token refreshed successfully');
+    let result;
+    try {
+      result = await runtimeMessage({ type: 'REFRESH_TOKEN' });
+    } catch (error) {
+      if (!error.message.includes('_openingFlowTab is not defined')) throw error;
+      legacyFallback = true;
+      result = await refreshAccountsOneByOne(button);
+    }
+    if (legacyFallback) {
+      showToast(`Old background detected; ${result.ready}/${result.total} ready. Reload Flow Agent v${chrome.runtime.getManifest().version}.`, 'error');
+    } else if (!result.total) {
+      showToast('Primary token refresh requested; no linked accounts found.');
+    } else if (result.failed) {
+      showToast(`Connected ${result.ready}/${result.total}; ${result.failed} account(s) need attention.`, 'error');
+    } else {
+      showToast(`All ${result.ready}/${result.total} linked Flow accounts are connected.`);
+    }
+    setTimeout(loadFlowAccounts, 300);
   } catch (error) {
     showToast(`Token refresh failed: ${error.message}`, 'error');
   } finally {
+    button.disabled = false;
     button.textContent = 'Refresh Token';
     setTimeout(refreshMonitor, 500);
   }
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== 'FLOW_TOKEN_REFRESH_PROGRESS') return;
+  const button = document.getElementById('refresh-token');
+  if (!button?.disabled) return;
+  const progress = message.progress || {};
+  const done = Number(progress.done) || 0;
+  const total = Number(progress.total) || 0;
+  if (progress.phase === 'opening') button.textContent = `Opening ${done}/${total}…`;
+  else if (progress.phase === 'connecting') button.textContent = `Connecting ${done}/${total}…`;
+  else if (progress.phase === 'complete') button.textContent = `Connected ${progress.ready}/${total}`;
 });
 chrome.storage.local.get(['clientId'], (data) => {
   document.getElementById('setting-server').value = CONFIG.DEFAULT_SERVER_HOST;

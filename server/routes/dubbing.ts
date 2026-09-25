@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
 import type { AIProvider } from '../types';
+import { KOKORO_VOICE_PREVIEW_TEXT } from '../../shared/kokoroVoices';
 import { ProviderError, synthesize } from '../adapters';
 import { resolveProviderType } from '../providers/base';
 import { cachedTtsPreview } from '../services/ttsPreviewCache';
@@ -50,7 +51,8 @@ export async function dubbingRoutes(app: FastifyInstance) {
     if (!body.provider?.baseUrl || !body.model) return reply.code(400).type('application/json').send({ error: 'Test voice cần Provider và Model ID.' });
     if (!body.voice && resolveProviderType(body.provider) !== 'hiiu-tts') return reply.code(400).type('application/json').send({ error: 'Model TTS này yêu cầu Voice ID.' });
     try {
-      const text = body.text?.trim() || 'Xin chào, đây là bản nghe thử để bạn đánh giá màu giọng, độ rõ, nhịp nói và cảm xúc trước khi dùng cho toàn bộ video.';
+      const defaultPreviewText = resolveProviderType(body.provider) === 'kokoro-local' ? KOKORO_VOICE_PREVIEW_TEXT : 'Xin chào, đây là bản nghe thử để bạn đánh giá màu giọng, độ rõ, nhịp nói và cảm xúc trước khi dùng cho toàn bộ video.';
+      const text = body.text?.trim() || defaultPreviewText;
       const speed = Math.round((Number(body.speed) || 1) * 100) / 100;
       const isVieneuPreview = resolveProviderType(body.provider) === 'vieneu-local'
         && body.model === 'vieneu-v3-turbo'

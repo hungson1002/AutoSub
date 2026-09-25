@@ -40,15 +40,17 @@ function progressFromStage(stage: string, previous: AnimationDirectorJob) {
   }
   if (/Đang viết storyboard/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 8), progressLabel: 'Đang viết storyboard' };
   if (/Đang căn kịch bản|Lời đọc còn ngắn|Đã khóa kịch bản/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 15), progressLabel: 'Đang khóa lời đọc theo thời lượng' };
-  const doneNarration = /Đã tạo\s+(\d+)\/(\d+)\s+câu lời đọc/iu.exec(stage);
+  const narrationFit = /Đang chỉnh lời đọc theo timeline cố định \((\d+)\/(\d+)\)/iu.exec(stage);
+  if (narrationFit) return { progressPercent: Math.max(previous.progressPercent || 0, 20), progressLabel: `Đang căn thời lượng lời đọc (${narrationFit[1]}/${narrationFit[2]})` };
+  const doneNarration = /Đã tạo\s+(\d+)\/(\d+)\s+(?:câu|cảnh) lời đọc/iu.exec(stage);
   if (doneNarration) {
     const current = Math.max(0, Number(doneNarration[1]) || 0);
     const total = Math.max(1, Number(doneNarration[2]) || 1);
-    return { progressPercent: Math.min(99, Math.max(previous.progressPercent || 96, Math.round(96 + 3 * current / total))), progressLabel: `${current}/${total} câu lời đọc` };
+    return { progressPercent: Math.min(20, Math.max(previous.progressPercent || 15, Math.round(15 + 5 * current / total))), progressLabel: `${current}/${total} cảnh lời đọc` };
   }
-  const narrationStart = /Lời đọc Turbo:\s*(\d+)\s*câu/iu.exec(stage);
-  if (narrationStart) return { progressPercent: Math.max(previous.progressPercent || 0, 96), progressLabel: `0/${Math.max(1, Number(narrationStart[1]) || 1)} câu lời đọc` };
-  if (/tạo lời đọc/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 96), progressLabel: 'Đang tạo voiceover' };
+  const narrationStart = /Lời đọc Turbo:\s*(\d+)\s*(?:câu|cảnh)/iu.exec(stage);
+  if (narrationStart) return { progressPercent: Math.max(previous.progressPercent || 0, 15), progressLabel: `0/${Math.max(1, Number(narrationStart[1]) || 1)} cảnh lời đọc` };
+  if (/tạo lời đọc/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 15), progressLabel: 'Đang tạo voiceover' };
   if (/Đang hoàn tất project/iu.test(stage)) return { progressPercent: Math.max(previous.progressPercent || 0, 99), progressLabel: 'Đang hoàn tất project' };
   return {};
 }
@@ -134,7 +136,12 @@ export class AnimationDirectorJobStore {
     const safeInput = { ...input, provider: redact(input.provider), assetGeneration: input.assetGeneration && { ...input.assetGeneration, provider: input.assetGeneration.provider && redact(input.assetGeneration.provider) }, narration: input.narration && { ...input.narration, provider: redact(input.narration.provider) } };
     try {
       await this.atomic(this.file(job.id, 'input.json'), safeInput);
-      job = await this.patch(job.id, { status: 'queued', stage: 'Đang xếp tác vụ', error: undefined });
+      job = await this.patch(job.id, {
+        status: 'queued',
+        stage: resumeId ? 'Đang tiếp tục từ checkpoint' : 'Đang xếp tác vụ',
+        error: undefined,
+        ...(resumeId ? { progressPercent: 15, progressLabel: 'Đang tiếp tục từ checkpoint', progressCurrent: undefined, progressTotal: undefined } : {}),
+      });
     }
     catch (error) { this.jobs.delete(job.id); throw error; }
     const snapshot = structuredClone(input);

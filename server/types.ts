@@ -1,5 +1,5 @@
 export type ProviderCapability = 'chat' | 'vision' | 'stt' | 'tts';
-export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'whisper-local' | 'edge-tts' | 'vieneu-local' | 'hiiu-tts' | 'capcut-tts' | 'vbee' | 'custom';
+export type ProviderType = 'auto' | 'openai-compatible' | 'groq' | 'elevenlabs' | 'whisper-local' | 'edge-tts' | 'vieneu-local' | 'kokoro-local' | 'hiiu-tts' | 'capcut-tts' | 'vbee' | 'custom';
 export type ProviderAuthType = 'bearer' | 'xi-api-key' | 'x-api-key' | 'api-key' | 'query-param' | 'none' | 'custom-header';
 export type ProviderCapabilities = Partial<Record<ProviderCapability, boolean>>;
 export interface ProviderEndpoints { models?: string; voices?: string; chat?: string; vision?: string; stt?: string; tts?: string; }

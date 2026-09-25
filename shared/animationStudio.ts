@@ -139,6 +139,8 @@ export interface AnimationBeatContract {
   cueText?: string;
   cueOccurrence?: number;
   subjectIds: string[];
+  /** Visual character identities that must be present in this beat, e.g. mascot or CAST_01. */
+  characterRefs?: string[];
   focusSubjectId?: string;
   action?: { description: string; actorId?: string; beforeState?: string; afterState?: string; targetId?: string };
   technique: AnimationProductionTechnique;
@@ -151,13 +153,27 @@ export interface AnimationBeatContract {
   failureConditions: string[];
 }
 
+export interface AnimationResearchReference {
+  claim: string;
+  evidence?: string;
+  sourceUrl?: string;
+  supportingSourceUrls?: string[];
+  confidence: 'high' | 'medium' | 'low';
+  use: 'use' | 'qualify' | 'avoid';
+}
+
 export interface AnimationProductionPlan {
   version: 1;
   source: 'director' | 'manual';
   status: 'draft' | 'ready' | 'warning';
+  targetDurationMs?: number;
   continuityBible?: string;
   narrationUnits: AnimationNarrationUnit[];
   beats: AnimationBeatContract[];
+  research?: {
+    sources: Array<{ title: string; url: string; domain: string }>;
+    claims: AnimationResearchReference[];
+  };
   diagnostics?: string[];
 }
 
@@ -194,6 +210,8 @@ export interface AnimationProject {
   createdAt: string;
   updatedAt: string;
   assets: AnimationAsset[];
+  /** AI-generated identity anchors for recurring story-world supporting characters. */
+  storyCastReferenceAssetIds?: string[];
   scenes: AnimationScene[];
   /** Default visual transition applied to every scene boundary unless a scene explicitly overrides it. */
   transitionPreset?: SceneTransition;
@@ -385,6 +403,7 @@ export function validateAnimationProject(value: unknown): ValidationIssue[] {
       if (plan.version !== 1) issues.push({ path: 'productionPlan.version', message: 'Only production plan version 1 is supported.' });
       if (!isNonEmptyString(plan.source) || !['director', 'manual'].includes(plan.source)) issues.push({ path: 'productionPlan.source', message: 'Production plan source is invalid.' });
       if (!isNonEmptyString(plan.status) || !['draft', 'ready', 'warning'].includes(plan.status)) issues.push({ path: 'productionPlan.status', message: 'Production plan status is invalid.' });
+      if (plan.targetDurationMs !== undefined && (!isFiniteNumber(plan.targetDurationMs) || plan.targetDurationMs <= 0)) issues.push({ path: 'productionPlan.targetDurationMs', message: 'Locked target duration must be a positive number.' });
       const narrationIds = new Set<string>();
       const sceneDurations = new Map<string, number>();
       if (Array.isArray(value.scenes)) value.scenes.forEach((scene) => { if (isRecord(scene) && isNonEmptyString(scene.id) && isFiniteNumber(scene.durationMs)) sceneDurations.set(scene.id, scene.durationMs); });

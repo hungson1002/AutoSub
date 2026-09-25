@@ -18,6 +18,8 @@ let selectedFlowAccount = null;
 let selectedFlowUrl = null;
 let sessionUpdates = Promise.resolve();
 const pendingTabTokens = new Map();
+let _openingFlowTab = false;
+let linkedAccountsRefreshTask = null;
 
 // Multi-account image workers. Each linked Flow tab is exposed to Flow Agent as
 // its own virtual browser client, so AutoSub can target it with X-Client-Id.
@@ -28,6 +30,7 @@ const linkedPollTimers = new Map();
 const linkedPollBusy = new Set();
 const linkedCommandQueues = new Map();
 const linkedTabRepairTasks = new Map();
+const linkedTabEnsureLocks = new Map();
 let linkedTabHealthSweepRunning = false;
 // Each linked account is backed by its own isolated Flow worker. Keep two
 // commands in flight so one account can use both image lanes safely.
@@ -759,7 +762,7 @@ function isTokenFresh() {
   return ageMs < 50 * 60 * 1000; // 50 minutes
 }
 
-async function captureTokenFromFlowTab(force = false, allowCreate = true) {
+async function captureTokenFromFlowTab(force = false, allowCreate = true, preferredTabId = null) {
   // Skip if token is still fresh â€” no need to open/refresh anything
   if (!force && isTokenFresh()) {
     console.log('[Flow Agent] Token still fresh, skipping tab refresh');
@@ -772,9 +775,15 @@ async function captureTokenFromFlowTab(force = false, allowCreate = true) {
   }
   _openingFlowTab = true;
   try {
-    const tab = await getOrOpenFlowTab(allowCreate);
+    const tab = preferredTabId === null
+      ? await getOrOpenFlowTab(allowCreate)
+      : await chrome.tabs.get(preferredTabId).catch(() => null);
     if (!tab) {
       console.log('[Flow Agent] No normal Flow tab is open; skipped non-interactive token refresh');
+      return;
+    }
+    if (linkedAccountForTab(tab.id)) {
+      console.log('[Flow Agent] Skipped primary token refresh on a linked-account tab');
       return;
     }
     if (force) await invalidateFlowSession();
@@ -1447,15 +1456,73 @@ function linkedFlowRecoveryUrl(account) {
   return 'https://flow.google.com/';
 }
 
-async function ensureLinkedFlowAccountTab(account, active = false, create = true) {
+async function findExistingLinkedFlowAccountTab(account) {
   if (!account) return null;
+  const expectedAccount = canonicalFlowAccount(account.flowAccount || flowAccountFromUrl(account.flowUrl) || '');
+  const expectedEmail = normalizeStoredFlowEmail(account.email);
+  const tabs = (await chrome.tabs.query({ url: FLOW_TAB_URLS })).filter((tab) =>
+    tab.id !== captchaTabId
+      && tab.id !== accountSyncTabId
+      && !tab.incognito
+      && !linkedFlowAccounts.some((other) => other !== account && other.tabId === tab.id)
+      && tab.url
+      && isFlowUrl(tab.url)
+  );
+
+  if (expectedAccount) {
+    const matching = tabs.filter((tab) =>
+      canonicalFlowAccount(flowAccountFromUrl(tab.url)) === expectedAccount
+    );
+    for (const tab of matching) {
+      if (!expectedEmail) return tab;
+      const identity = await readFlowIdentity(tab.id).catch(() => ({}));
+      const email = normalizeFlowEmail(identity?.email);
+      if (!email || email === expectedEmail) return tab;
+    }
+  }
+
+  if (expectedEmail) {
+    for (const tab of tabs) {
+      const identity = await readFlowIdentity(tab.id).catch(() => ({}));
+      if (normalizeFlowEmail(identity?.email) === expectedEmail) return tab;
+    }
+  }
+  return null;
+}
+
+async function ensureLinkedFlowAccountTabUnlocked(account, active = false, create = true) {
+  if (!account) return null;
+  const expectedAccount = canonicalFlowAccount(account.flowAccount || flowAccountFromUrl(account.flowUrl) || '');
   if (account.tabId) {
     try {
       const tab = await chrome.tabs.get(account.tabId);
-      if (tab?.url && isFlowUrl(tab.url) && !tab.incognito) return tab;
+      if (!tab?.id) throw new Error('FLOW_TAB_MISSING');
+      const assignedElsewhere = linkedFlowAccounts.some((other) => other !== account && other.tabId === tab.id);
+      const routeMatches = !expectedAccount
+        || canonicalFlowAccount(flowAccountFromUrl(tab.url)) === expectedAccount;
+      let emailMatches = true;
+      if (tab?.url && !expectedAccount && normalizeStoredFlowEmail(account.email)) {
+        const identity = await readFlowIdentity(tab.id).catch(() => ({}));
+        const email = normalizeFlowEmail(identity?.email);
+        emailMatches = !email || email === normalizeStoredFlowEmail(account.email);
+      }
+      if (tab?.url && isFlowUrl(tab.url) && !tab.incognito && !assignedElsewhere && routeMatches && emailMatches) return tab;
     } catch {}
     account.tabId = null;
   }
+
+  // tabIds can become stale after extension/browser restarts. Adopt an already
+  // open tab for this exact Google account before creating another Flow tab.
+  const existing = await findExistingLinkedFlowAccountTab(account);
+  if (existing?.id) {
+    account.tabId = existing.id;
+    account.flowUrl = existing.url;
+    account.flowAccount = flowAccountFromUrl(existing.url) || account.flowAccount || null;
+    await persistLinkedAccounts();
+    console.info('[Flow Agent] Reusing existing linked Flow tab:', account.clientId, existing.id);
+    return existing;
+  }
+
   if (!create) {
     await persistLinkedAccounts();
     return null;
@@ -1464,7 +1531,24 @@ async function ensureLinkedFlowAccountTab(account, active = false, create = true
   account.tabId = tab.id;
   account.flowUrl = tab.url && isFlowUrl(tab.url) ? tab.url : linkedFlowRecoveryUrl(account);
   await persistLinkedAccounts();
+  console.info('[Flow Agent] Opened linked Flow tab:', account.clientId, tab.id);
   return tab;
+}
+
+async function ensureLinkedFlowAccountTab(account, active = false, create = true) {
+  if (!account) return null;
+  const previous = linkedTabEnsureLocks.get(account.id) || Promise.resolve();
+  let unlock;
+  const current = new Promise((resolve) => { unlock = resolve; });
+  const tail = previous.catch(() => {}).then(() => current);
+  linkedTabEnsureLocks.set(account.id, tail);
+  await previous.catch(() => {});
+  try {
+    return await ensureLinkedFlowAccountTabUnlocked(account, active, create);
+  } finally {
+    unlock();
+    if (linkedTabEnsureLocks.get(account.id) === tail) linkedTabEnsureLocks.delete(account.id);
+  }
 }
 
 async function pingLinkedFlowTab(tabId) {
@@ -1499,13 +1583,19 @@ async function ensureHealthyLinkedFlowTab(account, forceRepair = false) {
       } catch {}
     }
 
+    console.info('[Flow Agent] Replacing linked Flow tab during recovery:', account.clientId, tab.id);
     try { if (tab.id) await chrome.tabs.remove(tab.id); } catch {}
     account.tabId = null;
+    // A second tab for the same account may already be open. Reuse it first;
+    // only create a fresh tab after the broken tab is closed and no match exists.
+    tab = await findExistingLinkedFlowAccountTab(account);
     const recoveryUrl = linkedFlowRecoveryUrl(account);
-    tab = await chrome.tabs.create({ url: recoveryUrl, active: false });
+    if (!tab) tab = await chrome.tabs.create({ url: recoveryUrl, active: false });
     account.tabId = tab.id;
-    account.flowUrl = recoveryUrl;
+    account.flowUrl = tab.url && isFlowUrl(tab.url) ? tab.url : recoveryUrl;
+    account.flowAccount = flowAccountFromUrl(account.flowUrl) || account.flowAccount || null;
     await persistLinkedAccounts();
+    console.info('[Flow Agent] Recovered linked Flow tab:', account.clientId, tab.id);
     await waitForTabComplete(tab.id, 20000).catch(() => {});
     await sleep(500);
     const healthy = await pingLinkedFlowTab(tab.id);
@@ -2070,9 +2160,9 @@ async function focusLinkedFlowAccount(account) {
   await chrome.tabs.update(tab.id, { active: true });
 }
 
-async function refreshLinkedFlowAccount(account) {
+async function refreshLinkedFlowAccount(account, { active = true } = {}) {
   if (!account) throw new Error('FLOW_ACCOUNT_NOT_FOUND');
-  const tab = await ensureLinkedFlowAccountTab(account, true);
+  const tab = await ensureLinkedFlowAccountTab(account, active);
   if (!tab?.id) throw new Error('FLOW_ACCOUNT_TAB_UNAVAILABLE');
   account.flowKey = null;
   account.flowKeySource = null;
@@ -2093,6 +2183,93 @@ async function refreshLinkedFlowAccount(account) {
   await connectLinkedAccount(account, true);
   broadcastStatus();
   return { ready: !!account.flowKey, status: sync?.status || null };
+}
+
+function isLinkedAccountTokenFresh(account) {
+  const capturedAt = Number(account?.tokenCapturedAt);
+  return !!account?.flowKey && Number.isFinite(capturedAt)
+    && Date.now() - capturedAt >= 0
+    && Date.now() - capturedAt < 50 * 60 * 1000;
+}
+
+function reportLinkedRefreshProgress(progress) {
+  try {
+    chrome.runtime.sendMessage({ type: 'FLOW_TOKEN_REFRESH_PROGRESS', progress }, () => {
+      // Consume the expected "no receiving end" error when the popup is closed.
+      void chrome.runtime.lastError;
+    });
+  } catch {}
+}
+
+async function refreshAllLinkedFlowAccounts() {
+  if (linkedAccountsRefreshTask) return linkedAccountsRefreshTask;
+  linkedAccountsRefreshTask = (async () => {
+    const accounts = [...linkedFlowAccounts];
+    const total = accounts.length;
+    const tabs = new Map();
+    const tabErrors = new Map();
+    reportLinkedRefreshProgress({ phase: 'opening', done: 0, total });
+
+    // Open/reuse one normal Flow tab per linked account first. Never reuse an
+    // incognito or another account's assigned tab, and keep these tabs inactive.
+    for (const [index, account] of accounts.entries()) {
+      try {
+        const tab = await ensureLinkedFlowAccountTab(account, false);
+        if (!tab?.id) throw new Error('FLOW_ACCOUNT_TAB_UNAVAILABLE');
+        tabs.set(account.id, tab);
+      } catch (error) {
+        tabErrors.set(account.id, error?.message || 'FLOW_ACCOUNT_TAB_UNAVAILABLE');
+      }
+      reportLinkedRefreshProgress({
+        phase: 'opening', done: index + 1, total,
+        account: account.email || account.clientId || `Account ${index + 1}`,
+      });
+    }
+
+    // Preserve the original button behavior for the primary account, but do
+    // not create an extra default Flow tab if the primary tab is not open.
+    const primaryTabId = selectedFlowTabId;
+    if (primaryTabId !== null && !linkedAccountForTab(primaryTabId)) {
+      await captureTokenFromFlowTab(true, false, primaryTabId);
+    }
+
+    const results = [];
+    for (const [index, account] of accounts.entries()) {
+      const label = account.email || account.clientId || `Account ${index + 1}`;
+      reportLinkedRefreshProgress({ phase: 'connecting', done: index, total, account: label });
+      try {
+        if (tabErrors.has(account.id) || !tabs.has(account.id)) {
+          throw new Error(tabErrors.get(account.id) || 'FLOW_ACCOUNT_TAB_UNAVAILABLE');
+        }
+
+        let result;
+        if (Number(account.activeRequests) > 0) {
+          if (account.flowKey && !account.httpConnected) await connectLinkedAccount(account, true);
+          result = {
+            ready: !!account.flowKey && !!account.httpConnected,
+            status: 'busy_skipped',
+          };
+        } else if (isLinkedAccountTokenFresh(account)) {
+          if (!account.httpConnected) await connectLinkedAccount(account, true);
+          result = { ready: !!account.flowKey && !!account.httpConnected, status: 'already_fresh' };
+        } else {
+          result = await refreshLinkedFlowAccount(account, { active: false });
+        }
+        results.push({ id: account.id, account: label, ...result });
+      } catch (error) {
+        results.push({ id: account.id, account: label, ready: false, error: error?.message || 'REFRESH_FAILED' });
+      }
+      reportLinkedRefreshProgress({ phase: 'connecting', done: index + 1, total, account: label });
+    }
+
+    const ready = results.filter((result) => result.ready).length;
+    const summary = { total, ready, failed: total - ready, results };
+    reportLinkedRefreshProgress({ phase: 'complete', done: total, total, ready, failed: total - ready });
+    return summary;
+  })().finally(() => {
+    linkedAccountsRefreshTask = null;
+  });
+  return linkedAccountsRefreshTask;
 }
 
 async function removeLinkedFlowAccount(account) {
@@ -2322,8 +2499,8 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   }
 
   if (msg.type === 'REFRESH_TOKEN') {
-    captureTokenFromFlowTab(true)
-      .then(() => reply({ ok: true }))
+    refreshAllLinkedFlowAccounts()
+      .then((summary) => reply({ ok: true, ...summary }))
       .catch((e) => reply({ error: e.message }));
     return true;
   }

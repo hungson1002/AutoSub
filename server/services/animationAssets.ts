@@ -11,7 +11,8 @@ import type { AnimationProject } from '../../shared/animationStudio';
 import { generateGoogleFlowImage, generateGoogleFlowImages } from './googleFlow';
 import { resolveUpload } from './uploads';
 import { writeJsonFileResilient } from './resilientFileWrite';
-import { allocateNarrationTimings, createSentenceTimeMapper, splitNarrationUnits } from './animationTiming';
+import { allocateNarrationTimings, buildNarrationSceneTasks, createSentenceTimeMapper } from './animationTiming';
+import { generateWithIma2Gpt } from './ima2GptImage';
 
 const file = path.join(workdir, 'animation-assets', 'library.json');
 let libraryWrites: Promise<unknown> = Promise.resolve();
@@ -53,8 +54,8 @@ async function writeLibrary(assets: AnimationAsset[]) {
 }
 
 const words = (value: string) => value.toLocaleLowerCase('vi').normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
-const vieneuEmotionCuePattern = /\[(?:cười|thở dài|hắng giọng)\]\s*/giu;
-const narrationCaptionText = (value: string) => value.replace(vieneuEmotionCuePattern, '').replace(/\s+/gu, ' ').trim();
+const vieneuEmotionCuePattern = /\[(?:laugh|chuckle|sigh|clear\s+throat|cười|thở dài|hắng giọng)\]\s*/giu;
+export const narrationCaptionText = (value: string) => value.replace(vieneuEmotionCuePattern, '').replace(/\s+/gu, ' ').trim();
 
 export async function listAnimationAssets(query = '') {
   const assets = await readLibrary(); const terms = words(query);
@@ -121,17 +122,38 @@ export async function getAnimationAssetFile(id: string) {
   throw new Error('Không tìm thấy file asset.');
 }
 
-export type AnimationAssetGenerationInput = { prompt: string; name?: string; type?: AnimationAsset['type']; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number; referenceUploadId?: string; referenceAssetId?: string };
+export type AnimationAssetGenerationInput = { prompt: string; name?: string; type?: AnimationAsset['type']; tags?: string[]; style?: string; provider?: AIProvider; model?: string; generator?: 'flow-agent'; width?: number; height?: number; referenceUploadId?: string; referenceAssetId?: string; referenceAssetIds?: string[] };
+
+export async function resolveAnimationGenerationReferencePaths(input: Pick<AnimationAssetGenerationInput, 'referenceUploadId' | 'referenceAssetId' | 'referenceAssetIds'>) {
+  const paths: string[] = [];
+  if (input.referenceUploadId) paths.push((await resolveUpload(input.referenceUploadId)).absolutePath);
+  else if (input.referenceAssetId) paths.push((await getAnimationAssetFile(input.referenceAssetId)).path);
+  for (const id of input.referenceAssetIds || []) paths.push((await getAnimationAssetFile(id)).path);
+  return [...new Set(paths)];
+}
 
 export async function resolveAnimationGenerationReferencePath(input: Pick<AnimationAssetGenerationInput, 'referenceUploadId' | 'referenceAssetId'>) {
-  if (input.referenceUploadId) return (await resolveUpload(input.referenceUploadId)).absolutePath;
-  if (input.referenceAssetId) return (await getAnimationAssetFile(input.referenceAssetId)).path;
-  return undefined;
+  return (await resolveAnimationGenerationReferencePaths(input))[0];
 }
 
 export function animationAssetCacheKey(input: AnimationAssetGenerationInput) {
   const prompt = String(input.prompt || '').trim().slice(0, 4000);
-  return createHash('sha256').update(JSON.stringify({ geometryVersion: 3, prompt, name: String(input.name || '').trim().slice(0, 160), type: input.type || 'image', style: String(input.style || '').trim().slice(0, 80), generator: input.generator || 'provider', provider: input.provider?.id || '', model: input.model || '', width: Number(input.width) || 1024, height: Number(input.height) || 1024, referenceUploadId: input.referenceUploadId || '', referenceAssetId: input.referenceAssetId || '' })).digest('hex');
+  const cacheInput = {
+    geometryVersion: 3,
+    prompt,
+    name: String(input.name || '').trim().slice(0, 160),
+    type: input.type || 'image',
+    style: String(input.style || '').trim().slice(0, 80),
+    generator: input.generator || 'provider',
+    provider: input.provider?.id || '',
+    model: input.model || '',
+    width: Number(input.width) || 1024,
+    height: Number(input.height) || 1024,
+    referenceUploadId: input.referenceUploadId || '',
+    referenceAssetId: input.referenceAssetId || '',
+    ...(input.referenceAssetIds?.length ? { referenceAssetIds: input.referenceAssetIds } : {}),
+  };
+  return createHash('sha256').update(JSON.stringify(cacheInput)).digest('hex');
 }
 
 export async function findCachedAnimationAsset(cacheKey: string) {
@@ -155,13 +177,16 @@ async function generateAnimationAssetUncached(input: AnimationAssetGenerationInp
   const prompt = String(input.prompt || '').trim().slice(0, 4000); if (prompt.length < 8) throw new Error('Mô tả asset cần ít nhất 8 ký tự.');
   const id = randomUUID(); await mkdir(path.dirname(generatedFile(id)), { recursive: true });
   if (input.generator === 'flow-agent') {
-    const referenceImagePath = await resolveAnimationGenerationReferencePath(input);
+    const referenceImagePaths = await resolveAnimationGenerationReferencePaths(input);
     // Use a fresh top-level idempotency key for every explicit retry. googleFlow.ts
     // still reuses that key for transport replays inside the same attempt, but a
     // previously wedged Flow Agent request can no longer poison all later retries
     // merely because the visual cache key is identical.
-    await generateGoogleFlowImage(prompt, generatedFile(id), { model: input.model || 'narwhal', size: `${input.width || 1024}x${input.height || 1024}`, referenceImagePath });
+    await generateGoogleFlowImage(prompt, generatedFile(id), { model: input.model || 'narwhal', size: `${input.width || 1024}x${input.height || 1024}`, referenceImagePaths });
+  } else if (input.provider?.id === 'ima2-gpt-oauth') {
+    await writeFile(generatedFile(id), await generateWithIma2Gpt(input));
   } else {
+    if (input.referenceAssetIds?.length) throw new Error('This image provider does not support multiple reference images. Use Nano Banana 2 to preserve character identity.');
     if (input.referenceUploadId || input.referenceAssetId) throw new Error('Provider tạo ảnh này chưa hỗ trợ ảnh tham chiếu. Hãy chọn Nano Banana 2 để giữ nhân vật nhất quán.');
     if (!input.provider || !input.model) throw new Error('Thiếu provider/model tạo ảnh.');
     const url = withAuthQuery(`${providerBase(input.provider)}/images/generations`, input.provider); const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...buildAuthHeaders(input.provider) }, body: JSON.stringify({ model: input.model, prompt, n: 1, size: '1024x1024', response_format: 'b64_json' }) });
@@ -194,7 +219,8 @@ export async function generateFlowAnimationAssetBatch(inputs: AnimationAssetGene
   if (inputs.some((input) => input.generator !== 'flow-agent')) return Promise.all(inputs.map(generateAnimationAsset));
   const firstReferenceUploadId = inputs[0]?.referenceUploadId || '';
   const firstReferenceAssetId = inputs[0]?.referenceAssetId || '';
-  const sharedReference = inputs.every((input) => (input.referenceUploadId || '') === firstReferenceUploadId && (input.referenceAssetId || '') === firstReferenceAssetId);
+  const firstReferenceAssetIds = JSON.stringify(inputs[0]?.referenceAssetIds || []);
+  const sharedReference = inputs.every((input) => (input.referenceUploadId || '') === firstReferenceUploadId && (input.referenceAssetId || '') === firstReferenceAssetId && JSON.stringify(input.referenceAssetIds || []) === firstReferenceAssetIds);
   if (!sharedReference) return Promise.all(inputs.map(generateAnimationAsset));
   const cacheKeys = inputs.map(animationAssetCacheKey);
   const resolved = await Promise.all(cacheKeys.map(findCachedAnimationAsset));
@@ -204,11 +230,11 @@ export async function generateFlowAnimationAssetBatch(inputs: AnimationAssetGene
   const outputFiles = ids.map(generatedFile);
   await mkdir(path.dirname(outputFiles[0]), { recursive: true });
   const first = inputs[missingIndexes[0]];
-  const referenceImagePath = await resolveAnimationGenerationReferencePath(first);
+  const referenceImagePaths = await resolveAnimationGenerationReferencePaths(first);
   const flowPrompts = Array.isArray(batchPrompt)
     ? batchPrompt.map((prompt) => String(prompt || '').trim().slice(0, 4000))
     : String(batchPrompt || '').trim().slice(0, 4000);
-  await generateGoogleFlowImages(flowPrompts, outputFiles, { model: first.model || 'narwhal', size: `${first.width || 1024}x${first.height || 1024}`, referenceImagePath, signal });
+  await generateGoogleFlowImages(flowPrompts, outputFiles, { model: first.model || 'narwhal', size: `${first.width || 1024}x${first.height || 1024}`, referenceImagePaths, signal });
   const created = await Promise.all(missingIndexes.map((inputIndex, batchIndex) => normalizeAndRegisterGeneratedAsset(ids[batchIndex], inputs[inputIndex], cacheKeys[inputIndex])));
   missingIndexes.forEach((inputIndex, batchIndex) => { resolved[inputIndex] = created[batchIndex]; });
   return resolved as AnimationAsset[];
@@ -258,7 +284,7 @@ async function mapConcurrentOrdered<T, R>(items: T[], limit: number, task: (item
   return results;
 }
 
-const narrationEdgeRepairFilter = 'silenceremove=start_periods=1:start_duration=0.04:start_threshold=-42dB,aresample=48000,loudnorm=I=-16:TP=-1.5:LRA=7';
+const narrationEdgeRepairFilter = 'silenceremove=start_periods=1:start_duration=0.04:start_threshold=-42dB:stop_periods=-1:stop_duration=0.22:stop_threshold=-42dB:stop_silence=0.12,aresample=48000,loudnorm=I=-16:TP=-1.5:LRA=7';
 
 /** Remove only leading provider padding; keep sentence-final pauses for natural narration. */
 async function normalizeNarrationAudio(audio: Buffer) {
@@ -316,20 +342,21 @@ async function joinNarrationAssets(units: Array<{ asset: AnimationAsset; duratio
 export async function generateAnimationNarration(input: { project: AnimationProject; provider: AIProvider; model: string; voice: string; speed?: number; preservePlannedDuration?: boolean; strictSceneDurations?: boolean; includeSubtitles?: boolean }, onStage: (stage: string) => Promise<void> = async () => {}) {
   let project = input.project;
   const speed = Math.max(.5, Math.min(2, Number(input.speed) || 1));
-  const sentenceTasks = input.project.scenes.flatMap((scene) => scene.renderMode !== 'composite' || !scene.narration.trim()
-    ? []
-    : splitNarrationUnits(scene.narration).map((text, sentenceIndex) => ({ sceneId: scene.id, sceneName: scene.name, text, sentenceIndex })));
-  if (!sentenceTasks.length) return project;
+  // Keep each scene's complete narration in one TTS request. Splitting every
+  // sentence into a separate request resets prosody at each boundary; a tiny
+  // audio crossfade cannot make those resets sound like one continuous read.
+  const sceneTasks = buildNarrationSceneTasks(input.project.scenes);
+  if (!sceneTasks.length) return project;
 
   const configuredConcurrency = Number(process.env.AUTOSUB_ANIMATION_TTS_CONCURRENCY);
   const requestedConcurrency = Math.max(1, Math.min(8, Number.isFinite(configuredConcurrency) && configuredConcurrency > 0 ? Math.round(configuredConcurrency) : 6));
   const ttsConcurrency = input.provider.providerType === 'capcut-tts' || input.provider.baseUrl.trim().toLowerCase() === 'local://capcut-tts'
     ? 1
     : input.provider.providerType === 'vieneu-local' ? Math.min(3, requestedConcurrency) : requestedConcurrency;
-  const prepareSentence = async (task: typeof sentenceTasks[number], renderSpeed: number) => {
+  const prepareScene = async (task: typeof sceneTasks[number], renderSpeed: number) => {
     const normalizedSpeed = Math.max(.5, Math.min(2, Number(renderSpeed) || 1));
-    const sourceCacheKey = createHash('sha256').update(JSON.stringify({ version: 3, kind: 'narration', text: task.text, provider: input.provider.id, model: input.model, voice: input.voice, speed: normalizedSpeed, expressiveVieneu: input.provider.providerType === 'vieneu-local' ? 'vieneu-3.8.1-performance-v2-temperature-0.82' : undefined })).digest('hex');
-    const cacheKey = createHash('sha256').update(JSON.stringify({ version: 3, kind: 'narration-smooth-cue', sourceCacheKey, edgeRepair: narrationEdgeRepairFilter })).digest('hex');
+    const sourceCacheKey = createHash('sha256').update(JSON.stringify({ version: 4, kind: 'scene-narration', text: task.text, provider: input.provider.id, model: input.model, voice: input.voice, speed: normalizedSpeed, expressiveVieneu: input.provider.providerType === 'vieneu-local' ? 'vieneu-3.8.1-emotion-cues-temperature-0.82-v1' : undefined })).digest('hex');
+    const cacheKey = createHash('sha256').update(JSON.stringify({ version: 4, kind: 'scene-narration-normalized', sourceCacheKey, edgeRepair: narrationEdgeRepairFilter })).digest('hex');
     let asset = await findCachedAnimationAsset(cacheKey);
     let audio: Buffer | undefined;
     if (asset) audio = await readFile((await getAnimationAssetFile(asset.id)).path);
@@ -353,19 +380,19 @@ export async function generateAnimationNarration(input: { project: AnimationProj
             const retryable = !Number.isFinite(status) || status >= 500 || status === 429;
             if (!retryable || attempt >= maxAttempts) break;
             const delayMs = Math.min(2500, 400 * Math.pow(2, attempt - 1));
-            await onStage(`${localVieNeu ? 'VieNeu Local' : 'TTS'} lỗi tạm thời ở cảnh “${task.sceneName}”, câu ${task.sentenceIndex + 1} · tự thử lại ${attempt + 1}/${maxAttempts}`);
+            await onStage(`${localVieNeu ? 'VieNeu Local' : 'TTS'} lỗi tạm thời ở cảnh “${task.sceneName}” · tự thử lại ${attempt + 1}/${maxAttempts}`);
             await new Promise((resolve) => setTimeout(resolve, delayMs));
           }
         }
         if (!audio) {
           const detail = String((lastError as { detail?: unknown })?.detail || (lastError instanceof Error ? lastError.message : lastError || 'Không rõ lỗi')).replace(/\s+/g, ' ').trim().slice(0, 300);
-          throw new Error(`${localVieNeu ? 'VieNeu Local' : 'TTS'} không tạo được cảnh “${task.sceneName}”, câu ${task.sentenceIndex + 1} sau ${maxAttempts} lần thử.${detail ? ` Chi tiết: ${detail}` : ''}`);
+          throw new Error(`${localVieNeu ? 'VieNeu Local' : 'TTS'} không tạo được lời đọc cảnh “${task.sceneName}” sau ${maxAttempts} lần thử.${detail ? ` Chi tiết: ${detail}` : ''}`);
         }
       }
       audio = await normalizeNarrationAudio(audio);
     }
     const measuredMs = await audioDurationMs(audio);
-    if (!(measuredMs > 0)) throw new Error(`Không đo được audio câu ${task.sentenceIndex + 1} của cảnh “${task.sceneName}”. Đã giữ các tài nguyên tạo trước đó.`);
+    if (!(measuredMs > 0)) throw new Error(`Không đo được audio cảnh “${task.sceneName}”. Đã giữ các tài nguyên tạo trước đó.`);
     const durationMs = Math.ceil(measuredMs * project.fps / 1000) * 1000 / project.fps;
     if (!asset) {
       const id = randomUUID();
@@ -373,13 +400,13 @@ export async function generateAnimationNarration(input: { project: AnimationProj
       const target = path.join(workdir, 'animation-assets', 'files', `${id}.${extension}`);
       await mkdir(path.dirname(target), { recursive: true });
       await writeFile(target, audio);
-      asset = await registerAnimationAsset({ id, type: 'audio', name: `Voiceover · ${task.sceneName} · ${task.sentenceIndex + 1}`, uri: `/api/animation-studio/assets/${id}/file`, tags: ['voiceover', 'narration', 'smooth-cue'], createdAt: new Date().toISOString(), source: 'generated', cacheKey, generationPrompt: task.text });
+      asset = await registerAnimationAsset({ id, type: 'audio', name: `Voiceover · ${task.sceneName}`, uri: `/api/animation-studio/assets/${id}/file`, tags: ['voiceover', 'narration', 'scene-track'], createdAt: new Date().toISOString(), source: 'generated', cacheKey, generationPrompt: task.text });
     }
     return { ...task, asset, durationMs, speed: normalizedSpeed };
   };
-  await onStage(`Lời đọc Turbo: ${sentenceTasks.length} câu · tối đa ${Math.min(ttsConcurrency, sentenceTasks.length)} câu song song`);
-  const prepared = await mapConcurrentOrdered(sentenceTasks, ttsConcurrency, (task) => prepareSentence(task, speed), (completed, total) => onStage(`Đã tạo ${completed}/${total} câu lời đọc`));
-  await onStage(`Đã tạo ${prepared.length}/${sentenceTasks.length} câu lời đọc · đang ráp timeline`);
+  await onStage(`Lời đọc Turbo: ${sceneTasks.length} cảnh · tối đa ${Math.min(ttsConcurrency, sceneTasks.length)} cảnh song song`);
+  const prepared = await mapConcurrentOrdered(sceneTasks, ttsConcurrency, (task) => prepareScene(task, speed), (completed, total) => onStage(`Đã tạo ${completed}/${total} cảnh lời đọc`));
+  await onStage(`Đã tạo ${prepared.length}/${sceneTasks.length} cảnh lời đọc · đang ráp timeline`);
 
   const preparedByScene = new Map<string, typeof prepared>();
   for (const item of prepared) preparedByScene.set(item.sceneId, [...(preparedByScene.get(item.sceneId) || []), item]);
@@ -387,7 +414,7 @@ export async function generateAnimationNarration(input: { project: AnimationProj
     const frameMs = 1000 / Math.max(1, project.fps);
     for (const sourceScene of input.project.scenes) {
       if (sourceScene.renderMode !== 'composite' || !sourceScene.narration.trim()) continue;
-      const units = (preparedByScene.get(sourceScene.id) || []).sort((a, b) => a.sentenceIndex - b.sentenceIndex);
+      const units = preparedByScene.get(sourceScene.id) || [];
       const measured = units.reduce((total, item) => total + item.durationMs, 0);
       if (measured > sourceScene.durationMs + frameMs) throw new Error(`Lời đọc cảnh “${sourceScene.name}” dài hơn timeline đã khóa (${Math.round(measured / 100) / 10}s > ${Math.round(sourceScene.durationMs / 100) / 10}s). Hãy rút gọn kịch bản; hệ thống không tăng tốc giọng đọc để ép khớp.`);
     }
@@ -397,19 +424,12 @@ export async function generateAnimationNarration(input: { project: AnimationProj
     if (sourceScene.renderMode !== 'composite' || !sourceScene.narration.trim()) continue;
     const scene = project.scenes.find((item) => item.id === sourceScene.id);
     if (!scene || scene.renderMode !== 'composite') continue;
-    const units = (preparedByScene.get(scene.id) || []).sort((a, b) => a.sentenceIndex - b.sentenceIndex);
-    const captions: NonNullable<SceneLayer['captionTimings']> = [];
+    const units = preparedByScene.get(scene.id) || [];
     const newAssets: AnimationAsset[] = [];
     const joined = await joinNarrationAssets(units, scene.name);
     const audioLayers: SceneLayer[] = [{ id: `voiceover-${scene.id}`, type: 'audio', name: `Voiceover · ${scene.name} · smooth cue track`, assetId: joined.asset.id, visible: true, locked: true, zIndex: 999, width: 1, height: 1, startMs: 0, durationMs: joined.durationMs, volume: 1, transform: defaultTransform() }];
     newAssets.push(...units.map((item) => item.asset), joined.asset);
-    let cursor = 0;
-    for (const [index, item] of units.entries()) {
-      const visibleDurationMs = index === units.length - 1 ? item.durationMs : Math.max(1, item.durationMs - joined.crossfadeMs);
-      const endMs = index === units.length - 1 ? joined.durationMs : cursor + visibleDurationMs;
-      captions.push({ id: `sentence-${scene.id}-${item.sentenceIndex + 1}`, text: narrationCaptionText(item.text), startMs: cursor, endMs: Math.max(cursor + 1, endMs), source: 'measured-sentence' });
-      cursor += visibleDurationMs;
-    }
+    const captions: NonNullable<SceneLayer['captionTimings']> = allocateNarrationTimings(scene.narration, joined.durationMs, `sentence-${scene.id}`).map((caption) => ({ ...caption, text: narrationCaptionText(caption.text) }));
     const measuredDurationMs = joined.durationMs;
     const durationMs = input.preservePlannedDuration ? Math.max(scene.durationMs, measuredDurationMs) : measuredDurationMs;
     const oldCaptions = scene.layers.find((layer) => layer.name === 'Voiceover · Subtitle')?.captionTimings || allocateNarrationTimings(scene.narration, scene.durationMs);
@@ -427,7 +447,7 @@ export async function generateAnimationNarration(input: { project: AnimationProj
     const replacement: typeof scene = { ...scene, durationMs, layers: [...scene.layers.filter((layer) => !((layer.type === 'audio' || layer.type === 'text') && layer.name.startsWith('Voiceover ·'))).map((layer) => layer.type !== 'audio' ? layer : { ...layer, startMs: retime(layer.startMs || 0), durationMs: layer.durationMs === undefined ? undefined : Math.min(layer.durationMs, durationMs - retime(layer.startMs || 0)) }), ...audioLayers, ...(input.includeSubtitles === false ? [] : [subtitle])], commands: scene.commands.filter((command) => !command.parameters?.autoVoiceover).map(retimeCommand), camera: { ...scene.camera, commands: scene.camera.commands.map(retimeCommand) } };
     const productionPlan = project.productionPlan ? {
       ...project.productionPlan,
-      narrationUnits: project.productionPlan.narrationUnits.map((unit) => unit.sceneId === scene.id ? { ...unit, startMs: 0, endMs: measuredDurationMs, timingSource: 'measured-sentence' as const } : unit),
+      narrationUnits: project.productionPlan.narrationUnits.map((unit) => unit.sceneId === scene.id ? { ...unit, startMs: 0, endMs: measuredDurationMs, timingSource: 'sentence-proportional' as const } : unit),
       beats: project.productionPlan.beats.map((beat) => beat.sceneId === scene.id && retimeVisuals ? { ...beat, startMs: retime(beat.startMs || 0), endMs: retime(beat.endMs ?? scene.durationMs) } : beat),
     } : undefined;
     project = { ...project, assets: [...new Map([...project.assets, ...newAssets].map((asset) => [asset.id, asset])).values()], productionPlan, assetManifest: undefined, scenes: project.scenes.map((item) => item.id === scene.id ? replacement : item), updatedAt: new Date().toISOString(), generationWarnings: (project.generationWarnings || []).filter((warning) => !warning.startsWith('Phụ đề đang ở mức câu') && !warning.startsWith('Timing được đo theo từng câu TTS')) };

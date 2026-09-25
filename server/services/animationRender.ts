@@ -128,6 +128,77 @@ async function resolveLocalAnimationAsset(asset: AnimationAsset) {
   return undefined;
 }
 
+/** Measure only the quiet tail of a generated PCM voice track. Internal pauses stay intact. */
+export function wavTrailingSilenceMs(wav: Buffer) {
+  if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') return 0;
+  let channels = 0, sampleRate = 0, blockAlign = 0, dataStart = 0, dataEnd = 0;
+  for (let offset = 12; offset + 8 <= wav.length;) {
+    const size = wav.readUInt32LE(offset + 4);
+    const next = offset + 8 + size + (size % 2);
+    if (next > wav.length + 1) break;
+    const kind = wav.toString('ascii', offset, offset + 4);
+    if (kind === 'fmt ' && size >= 16) {
+      if (wav.readUInt16LE(offset + 8) !== 1 || wav.readUInt16LE(offset + 22) !== 16) return 0;
+      channels = wav.readUInt16LE(offset + 10);
+      sampleRate = wav.readUInt32LE(offset + 12);
+      blockAlign = wav.readUInt16LE(offset + 20);
+    } else if (kind === 'data') {
+      dataStart = offset + 8;
+      dataEnd = Math.min(wav.length, dataStart + size);
+    }
+    offset = next;
+  }
+  if (!channels || !sampleRate || blockAlign !== channels * 2 || dataEnd <= dataStart) return 0;
+  const windowBytes = Math.max(blockAlign, Math.round(sampleRate * .01) * blockAlign);
+  const lowerBound = Math.max(dataStart, dataEnd - Math.round(sampleRate * .4) * blockAlign);
+  const threshold = Math.pow(10, -35 / 20) * 32768;
+  let quietBytes = 0;
+  for (let end = dataEnd; end - windowBytes >= lowerBound; end -= windowBytes) {
+    let energy = 0, samples = 0;
+    for (let index = end - windowBytes; index + 1 < end; index += 2) {
+      const sample = wav.readInt16LE(index);
+      energy += sample * sample;
+      samples += 1;
+    }
+    if (Math.sqrt(energy / Math.max(1, samples)) > threshold) break;
+    quietBytes += windowBytes;
+  }
+  return Math.round(quietBytes / (sampleRate * blockAlign) * 1000);
+}
+
+/** Shorten only generated voiceover tails at scene boundaries for the export copy. */
+export async function compactNarrationSceneTails(project: AnimationProject): Promise<AnimationProject> {
+  const ordered = [...project.scenes].sort((a, b) => a.order - b.order);
+  const shortened = new Map<string, CompositeScene>();
+  for (let index = 0; index < ordered.length - 1; index += 1) {
+    const scene = ordered[index], next = ordered[index + 1];
+    if (scene.renderMode !== 'composite' || next.renderMode !== 'composite') continue;
+    const audioLayers = scene.layers.filter((layer) => layer.visible && layer.type === 'audio');
+    if (audioLayers.length !== 1 || !audioLayers[0].name.startsWith('Voiceover') ||
+        !next.layers.some((layer) => layer.visible && layer.type === 'audio' && layer.name.startsWith('Voiceover'))) continue;
+    const voice = audioLayers[0];
+    if ((voice.startMs || 0) !== 0 || Math.abs((voice.durationMs || 0) - scene.durationMs) > 2) continue;
+    const asset = project.assets.find((item) => item.id === voice.assetId);
+    if (!asset?.uri.startsWith('/api/animation-studio/assets/')) continue;
+    const file = await resolveLocalAnimationAsset(asset);
+    if (!file?.toLowerCase().endsWith('.wav')) continue;
+    const silenceMs = wavTrailingSilenceMs(await readFile(file));
+    if (silenceMs < 120) continue;
+    const frameMs = 1000 / Math.max(1, project.fps);
+    const trimMs = Math.round(Math.min(200, silenceMs - 70) / frameMs) * frameMs;
+    if (trimMs < frameMs || scene.durationMs - trimMs < 1000) continue;
+    const durationMs = Math.round(scene.durationMs - trimMs);
+    const layers = scene.layers.map((layer) => {
+      if (layer.id === voice.id) return { ...layer, durationMs };
+      if (layer.type !== 'image' || layer.startMs === undefined || layer.durationMs === undefined) return layer;
+      return { ...layer, durationMs: Math.max(1, Math.min(layer.durationMs, durationMs - layer.startMs)) };
+    });
+    shortened.set(scene.id, { ...scene, durationMs, layers });
+  }
+  if (!shortened.size) return project;
+  return normalizeAnimationProjectForRender({ ...project, scenes: project.scenes.map((scene) => shortened.get(scene.id) || scene) });
+}
+
 function sceneImageWindows(scene: CompositeScene, layers: SceneLayer[]) {
   const ordered = [...layers].sort((a, b) => a.zIndex - b.zIndex);
   const hasExplicitTiming = ordered.some((layer) => layer.startMs !== undefined || layer.durationMs !== undefined);
@@ -323,6 +394,7 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
   if (!project.scenes.length) throw new Error('Project chưa có cảnh để xuất.');
   const missingVideo = project.scenes.find((scene) => scene.renderMode === 'generated-video' && !scene.source?.uri);
   if (missingVideo) throw new Error(`Cảnh “${missingVideo.name}” chưa có video nguồn. Không thể xuất bản đầy đủ.`);
+  if (!project.productionPlan?.targetDurationMs) project = await compactNarrationSceneTails(project);
   const renderProject: AnimationProject = {
     ...project,
     transitionPreset: { type: 'cut', durationMs: 0 },
@@ -339,7 +411,7 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
   // but never pass its commands/layers to the renderer.
   const staticTimeline = await buildStaticImageTimeline(project).catch(() => undefined);
   // A client key must never override the actual project/subtitle/engine fingerprint.
-  const hash = createHash('sha256').update(JSON.stringify({ project: normalized, showSubtitles, engine: staticTimeline ? 'ffmpeg-static-image-v3-single-pass-audio-normalized' : 'remotion-v5-audio-normalized', requestedCacheKey })).digest('hex');
+  const hash = createHash('sha256').update(JSON.stringify({ project: normalized, showSubtitles, engine: staticTimeline ? 'ffmpeg-static-image-v4-tight-voice-boundaries' : 'remotion-v6-tight-voice-boundaries', requestedCacheKey })).digest('hex');
   const cacheDirectory = path.join(workdir, 'animation-render-cache');
   const cached = path.join(cacheDirectory, `${hash}.mp4`);
   try {

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import type { AnimationAsset, AnimationProject, CompositeScene, SceneLayer } from '../../shared/animationStudio';
 import { ANIMATION_PROJECT_VERSION, defaultTransform } from '../../shared/animationStudio';
+import { isLikelyVietnamese } from '../../shared/kokoroVoices';
 import { AnimationCanvas } from '../animationStudio/AnimationCanvas';
-import { BookOpen, ChevronDown, Download, Image, Layers3, Maximize, Pause, Play, Plus, RefreshCw, Save, Settings2, Sparkles, Trash2, X } from '../components/Icons';
+import { BookOpen, ChevronDown, CirclePlay, Download, Image, Layers3, LoaderCircle, Maximize, Pause, Play, Plus, RefreshCw, Save, Settings2, Sparkles, Trash2, X } from '../components/Icons';
 import { animationAssetUrl, animationProjectRenderCacheKey, api, friendlyErrorMessage, type AnimationDirectorJobStatus, type AnimationProjectSummary } from '../lib/api';
+import { loadVoicePreview } from '../lib/voicePreview';
 import { capabilityAssignments } from '../lib/settings';
 import type { AIProvider, AppSettings } from '../types';
 import { buildRenderTimeline } from '../remotion/timeline';
@@ -11,6 +13,11 @@ import './AnimationStudioPage.css';
 
 const now = () => new Date().toISOString();
 const makeId = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
+const GPT_IMAGE_PROVIDER: AIProvider = {
+  id: 'ima2-gpt-oauth', name: 'GPT Image · ChatGPT', baseUrl: 'local://ima2-gpt-oauth', enabled: true,
+  models: [{ id: 'gpt-5.6-luna', name: 'GPT Image · gpt-5.6-luna' }], providerType: 'custom', authType: 'none', capabilities: {},
+};
+const GPT_IMAGE_MODEL = 'gpt-5.6-luna';
 
 const VISUAL_STYLE_PRESETS = [
   {
@@ -134,6 +141,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [targetMinutes, setTargetMinutes] = useState('1');
   const [durationMode, setDurationMode] = useState<'auto' | 'fixed'>('fixed');
   const [characterReference, setCharacterReference] = useState<{ uploadId: string; name: string }>();
+  const [characterAppearanceLock, setCharacterAppearanceLock] = useState('');
   const [characterOptions, setCharacterOptions] = useState<AnimationAsset[]>([]);
   const [selectedCharacterAssetId, setSelectedCharacterAssetId] = useState('');
   const [characterPreview, setCharacterPreview] = useState<{ id?: string; name: string; uri: string }>();
@@ -199,8 +207,10 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [assetQuery, setAssetQuery] = useState('');
   const [assetPrompt, setAssetPrompt] = useState('');
   const [imageModel, setImageModel] = useState('narwhal');
+  const [gptImageModel, setGptImageModel] = useState(GPT_IMAGE_MODEL);
   const [imageProviderId, setImageProviderId] = useState('flow-agent');
   const [flowAgent, setFlowAgent] = useState<Awaited<ReturnType<typeof api.flowAgentStatus>>>();
+  const [ima2GptStatus, setIma2GptStatus] = useState<Awaited<ReturnType<typeof api.ima2GptImageStatus>>>();
   const [generatingAsset, setGeneratingAsset] = useState(false);
   const [generatingThumbnails, setGeneratingThumbnails] = useState(false);
   const [autoGenerateAssets, setAutoGenerateAssets] = useState(true);
@@ -209,6 +219,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [qualityIssues, setQualityIssues] = useState<Array<{ severity: 'error' | 'warning'; code: string; sceneId: string; layerId?: string; message: string }>>([]);
   const [ttsVoice, setTtsVoice] = useState('');
   const [ttsVoices, setTtsVoices] = useState<Array<{ id: string; name?: string; language?: string }>>([]);
+  const [testingTtsVoice, setTestingTtsVoice] = useState(false);
   const [presentationOpen, setPresentationOpen] = useState(false);
   const [creatingVoiceover, setCreatingVoiceover] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -219,6 +230,9 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [versions, setVersions] = useState<Array<{ id: string; createdAt: string; name: string; sceneCount: number }>>([]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement[]>([]);
+  const ttsTestAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsTestUrlRef = useRef<string | null>(null);
+  const ttsTestRequestRef = useRef(0);
   const sceneRef = useRef<CompositeScene | undefined>(undefined);
   const sequencePlayheadRef = useRef<HTMLElement | null>(null);
   const sequenceScrubRef = useRef<{ pointerId: number; active: boolean }>({ pointerId: -1, active: false });
@@ -231,12 +245,15 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const selectedLayer = scene?.layers.find((layer) => layer.id === selectedLayerId);
   const selectedAsset = selectedLayer?.assetId ? project.assets.find((asset) => asset.id === selectedLayer.assetId) : undefined;
   const selectedCharacter = characterOptions.find((asset) => asset.id === selectedCharacterAssetId);
+  const storyCastReferenceAssets = (project.storyCastReferenceAssetIds || []).map((id) => project.assets.find((asset) => asset.id === id)).filter((asset): asset is AnimationAsset => Boolean(asset));
   const thumbnailAssets = project.assets.filter((asset) => asset.tags?.includes('youtube-thumbnail'));
   const videoHasNarration = project.scenes.some((item) => item.renderMode === 'composite' && Boolean(String(item.narration || '').trim()));
   const directorAssignment = capabilityAssignments(settings, 'translation')[0];
   const directorProvider = providers.find((item) => item.id === directorAssignment?.providerId);
   const usingFlowAgentAssets = imageProviderId === 'flow-agent';
-  const imageProvider = usingFlowAgentAssets ? undefined : providers.find((item) => item.id === imageProviderId)
+  const gptImageModelChoices = ima2GptStatus?.modelChoices?.length ? ima2GptStatus.modelChoices : [GPT_IMAGE_MODEL];
+  const selectedGptImageModel = gptImageModelChoices.includes(gptImageModel) ? gptImageModel : gptImageModelChoices[0] || GPT_IMAGE_MODEL;
+  const imageProvider = usingFlowAgentAssets ? undefined : imageProviderId === GPT_IMAGE_PROVIDER.id ? GPT_IMAGE_PROVIDER : providers.find((item) => item.id === imageProviderId)
     || providers.find((item) => item.enabled && item.models.some((model) => model.id === imageModel))
     || directorProvider;
   const ttsAssignment = capabilityAssignments(settings, 'tts')[0]; const ttsProvider = providers.find((item) => item.id === ttsAssignment?.providerId);
@@ -250,6 +267,12 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     let mounted = true;
     const refresh = () => void api.flowAgentStatus().then((status) => { if (mounted) setFlowAgent(status); }).catch(() => { if (mounted) setFlowAgent(undefined); });
     refresh(); const timer = window.setInterval(refresh, 5000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
+  useEffect(() => {
+    let mounted = true;
+    const refresh = () => void api.ima2GptImageStatus().then((status) => { if (mounted) setIma2GptStatus(status); }).catch(() => { if (mounted) setIma2GptStatus(undefined); });
+    refresh(); const timer = window.setInterval(refresh, 8000);
     return () => { mounted = false; window.clearInterval(timer); };
   }, []);
   useEffect(() => { if (!persisted) return; const timer = setTimeout(() => { void api.saveAnimationProject(project).catch(() => undefined); }, 1500); return () => clearTimeout(timer); }, [persisted, project]);
@@ -289,6 +312,24 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     void api.listVoices(ttsProvider, controller.signal).then(({ voices }) => { if (voices.length) setTtsVoices(voices); }).catch(() => undefined);
     return () => controller.abort();
   }, [ttsProvider]);
+
+  useEffect(() => {
+    ttsTestRequestRef.current += 1;
+    const audio = ttsTestAudioRef.current;
+    ttsTestAudioRef.current = null;
+    if (audio) { audio.onended = null; audio.onerror = null; audio.pause(); audio.removeAttribute('src'); audio.load(); }
+    if (ttsTestUrlRef.current) URL.revokeObjectURL(ttsTestUrlRef.current);
+    ttsTestUrlRef.current = null;
+    setTestingTtsVoice(false);
+    return () => {
+      ttsTestRequestRef.current += 1;
+      const current = ttsTestAudioRef.current;
+      if (current) { current.onended = null; current.onerror = null; current.pause(); current.removeAttribute('src'); current.load(); }
+      if (ttsTestUrlRef.current) URL.revokeObjectURL(ttsTestUrlRef.current);
+      ttsTestAudioRef.current = null;
+      ttsTestUrlRef.current = null;
+    };
+  }, [ttsProvider?.id, ttsAssignment?.model, ttsVoice]);
 
   useEffect(() => { const firstVoice = ttsVoices[0]; if (firstVoice && !ttsVoices.some((voice) => voice.id === ttsVoice)) setTtsVoice(firstVoice.id); }, [ttsVoices, ttsVoice]);
 
@@ -333,7 +374,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     const timers: number[] = []; const audioElements = audioEntries.flatMap(({ layer, scene: audioScene, startMs }) => {
       const asset = project.assets.find((item) => item.id === layer.assetId);
       if (!asset) return [];
-      const audio = new Audio(asset.uri); const isMusic = asset.tags.some((tag) => /^(?:music|bgm|nhac)$/i.test(tag)); const hasVoiceover = audioScene.layers.some((item) => item.type === 'audio' && item.name.startsWith('Voiceover ·')); audio.volume = Math.max(0, Math.min(1, (layer.volume ?? layer.transform.opacity) * (isMusic && hasVoiceover ? .3 : 1))); const play = () => { audio.currentTime = Math.max(0, (previewTimeMs - startMs) / 1000); void audio.play().catch(() => undefined); }; if (previewTimeMs >= startMs) play(); else timers.push(window.setTimeout(play, startMs - previewTimeMs)); return [audio];
+      const audio = new Audio(); audio.preload = 'auto'; audio.src = asset.uri; audio.load(); const isMusic = asset.tags.some((tag) => /^(?:music|bgm|nhac)$/i.test(tag)); const hasVoiceover = audioScene.layers.some((item) => item.type === 'audio' && item.name.startsWith('Voiceover ·')); audio.volume = Math.max(0, Math.min(1, (layer.volume ?? layer.transform.opacity) * (isMusic && hasVoiceover ? .3 : 1))); const play = () => { audio.currentTime = Math.max(0, (previewTimeMs - startMs) / 1000); void audio.play().catch(() => undefined); }; if (previewTimeMs >= startMs) play(); else timers.push(window.setTimeout(play, startMs - previewTimeMs)); return [audio];
     });
     previewAudioRef.current = audioElements;
     return () => { timers.forEach(clearTimeout); audioElements.forEach((audio) => audio.pause()); };
@@ -401,7 +442,8 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     const reference = characterReference?.uploadId
       ? { referenceUploadId: characterReference.uploadId }
       : selectedCharacterAssetId ? { referenceAssetId: selectedCharacterAssetId } : {};
-    return usingFlowAgentAssets ? { generator: 'flow-agent' as const, model: 'narwhal', ...reference } : imageProvider ? { provider: imageProvider, model: imageModel, ...reference } : undefined;
+    const appearance = Object.keys(reference).length && characterAppearanceLock.trim() ? { characterAppearanceLock: characterAppearanceLock.trim() } : {};
+    return usingFlowAgentAssets ? { generator: 'flow-agent' as const, model: 'narwhal', ...reference, ...appearance } : imageProvider ? { provider: imageProvider, model: imageModel, ...reference, ...appearance } : undefined;
   };
   const uploadCharacterReference = async (file?: File) => {
     if (!file?.type.startsWith('image/')) return;
@@ -415,9 +457,10 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   };
   const prepareCharacterOptions = async () => {
     if (!directorProvider || !directorAssignment?.model) { setDirectorError('Hãy cấu hình provider/model AI trước.'); return; }
+    if (imageProviderId === GPT_IMAGE_PROVIDER.id && !ima2GptStatus?.connected) { setDirectorError('GPT Image chưa kết nối. Vào Cài đặt → GPT Image để đăng nhập ChatGPT trước.'); return; }
     const generation = selectedAssetGeneration();
     if (!generation) { setDirectorError('Hãy chọn provider tạo ảnh.'); return; }
-    if (!usingFlowAgentAssets) { setDirectorError('Hãy chọn Nano Banana 2 để tạo và giữ nhân vật nhất quán từ ảnh tham chiếu.'); return; }
+    if (!usingFlowAgentAssets && imageProviderId !== GPT_IMAGE_PROVIDER.id) { setDirectorError('Hiện chức năng tạo bộ lựa chọn nhân vật cần Nano Banana 2 hoặc GPT Image đã kết nối.'); return; }
     characterGenerationRef.current?.abort();
     const controller = new AbortController();
     characterGenerationRef.current = controller;
@@ -433,6 +476,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     if (!directorProvider || !directorAssignment?.model) { setDirectorError('Hãy cấu hình provider/model AI trước khi tạo thumbnail.'); return; }
     const generation = selectedAssetGeneration();
     if (!generation) { setDirectorError('Hãy chọn provider tạo ảnh trước khi tạo thumbnail.'); return; }
+    if (imageProviderId === GPT_IMAGE_PROVIDER.id && !ima2GptStatus?.connected) { setDirectorError('GPT Image chưa kết nối. Vào Cài đặt → GPT Image để đăng nhập ChatGPT trước.'); return; }
     if (usingFlowAgentAssets && !flowAgent?.connected) { setDirectorError('Nano Banana 2 chưa sẵn sàng. Hãy mở Google Flow rồi thử lại.'); return; }
     if (!videoHasNarration) { setDirectorError('Hãy dựng video có narration trước để AI hiểu toàn bộ nội dung và tạo thumbnail.'); return; }
     setGeneratingThumbnails(true); setDirectorError('');
@@ -524,7 +568,9 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       setDirectorError(message);
       return;
     }
+    if (autoGenerateAssets && imageProviderId === GPT_IMAGE_PROVIDER.id && !ima2GptStatus?.connected) { setDirectorError('GPT Image chưa kết nối. Vào Cài đặt → GPT Image để đăng nhập ChatGPT trước.'); return; }
     if (!ttsProvider || !ttsAssignment?.model) { setDirectorError('Hãy cấu hình provider/model TTS để tool tự tạo voiceover.'); return; }
+    if (ttsProvider.providerType === 'kokoro-local' && isLikelyVietnamese(brief)) { setDirectorError('Kokoro hiện có giọng tiếng Anh. Ý tưởng đang viết bằng tiếng Việt; hãy dùng VieNeu Local hoặc đổi brief sang tiếng Anh.'); return; }
     if (autoGenerateAssets && !characterReference && !selectedCharacterAssetId) { await prepareCharacterOptions(); return; }
     const selectedVoice = ttsVoice || ttsProvider.voices?.[0]?.id || '';
     setDirectorError(''); setDirectorWarning(''); setDirecting(true);
@@ -539,6 +585,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const retryMissingImages = async () => {
     const generation = selectedAssetGeneration();
     if (!generation || !directorProvider || !directorAssignment?.model) { setDirectorError('Thiếu cấu hình AI hoặc provider tạo ảnh để tạo lại ảnh lỗi.'); return; }
+    if (imageProviderId === GPT_IMAGE_PROVIDER.id && !ima2GptStatus?.connected) { setDirectorError('GPT Image chưa kết nối. Vào Cài đặt → GPT Image để đăng nhập ChatGPT trước.'); return; }
     setRetryingMissingImages(true); setDirectorError('');
     try {
       const result = await api.retryMissingAnimationImages({ project, assetGeneration: generation, provider: directorProvider, model: directorAssignment.model });
@@ -564,7 +611,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     if (directorJob.status === 'interrupted' && !window.confirm('Backend đã dừng giữa chừng. Hãy kiểm tra Flow không còn tác vụ đang chạy hoặc kết quả chưa được tải về. Chỉ tiếp tục sau khi kiểm tra để tránh tạo trùng. Bạn đã kiểm tra chưa?')) return;
     try {
       const input = await api.animationDirectorInput(directorJob.id);
-      const currentProvider = (id: string) => { const found = providers.find((item) => item.id === id && item.enabled); if (!found) throw new Error('Provider của job không còn sẵn sàng. Kiểm tra Cài đặt.'); return found; };
+      const currentProvider = (id: string) => { if (id === GPT_IMAGE_PROVIDER.id) return GPT_IMAGE_PROVIDER; const found = providers.find((item) => item.id === id && item.enabled); if (!found) throw new Error('Provider của job không còn sẵn sàng. Kiểm tra Cài đặt.'); return found; };
       input.provider = currentProvider(input.provider.id);
       if (input.narration) input.narration.provider = currentProvider(input.narration.provider.id);
       if (input.assetGeneration?.provider) input.assetGeneration.provider = currentProvider(input.assetGeneration.provider.id);
@@ -589,7 +636,35 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const fixQuality = async () => { try { const result = await api.fixAnimationQuality(project); setProject(result.project); setQualityIssues(result.remaining); onNotice(`Đã tự sửa ${result.fixed} vấn đề; còn ${result.remaining.length}.`, result.remaining.some((item) => item.severity === 'error') ? 'error' : 'success'); } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tự sửa project.'), 'error'); } };
   const editWholeProject = async () => { if (!directorProvider || !directorAssignment?.model || editInstruction.trim().length < 4) return; setEditingWithAi(true); try { const edited = await api.editAnimationProject({ instruction: editInstruction, project, provider: directorProvider, model: directorAssignment.model }); setProject(edited); setEditInstruction(''); setSelectedLayerId(''); onNotice('AI đã áp dụng lệnh cho toàn bộ composite scene.'); } catch (error) { onNotice(friendlyErrorMessage(error, 'AI không thể sửa toàn project.'), 'error'); } finally { setEditingWithAi(false); } };
   const relayout = (width: number, height: number) => { const ratioX = width / project.width, ratioY = height / project.height, objectScale = Math.min(ratioX, ratioY); setProject((current) => ({ ...current, width, height, scenes: current.scenes.map((item) => item.renderMode !== 'composite' ? item : { ...item, layers: item.layers.map((layer) => layer.type === 'audio' ? layer : { ...layer, width: layer.type === 'image' && layer.locked ? width : Math.max(1, Math.round(layer.width * (layer.type === 'text' || layer.type === 'chart' ? ratioX : objectScale))), height: layer.type === 'image' && layer.locked ? height : Math.max(1, Math.round(layer.height * objectScale)), fontSize: layer.fontSize ? Math.max(12, Math.round(layer.fontSize * objectScale)) : layer.fontSize, transform: { ...layer.transform, position: { x: Math.round(layer.transform.position.x * ratioX), y: Math.round(layer.transform.position.y * ratioY) } } }), commands: item.commands.map((command) => command.type === 'MOVE' && typeof command.from === 'object' && typeof command.to === 'object' ? { ...command, from: { x: command.from.x * ratioX, y: command.from.y * ratioY }, to: { x: command.to.x * ratioX, y: command.to.y * ratioY } } : command) }), updatedAt: now() })); setSelectedLayerId(''); setTimeMs(0); onNotice(`Đã smart re-layout project sang ${width}:${height}.`); };
-  const createVoiceover = async () => { if (!ttsProvider || !ttsAssignment?.model) { onNotice('Hãy cấu hình TTS provider/model.', 'error'); return; } setCreatingVoiceover(true); try { const narrated = await api.generateAnimationNarration({ project, provider: ttsProvider, model: ttsAssignment.model, voice: ttsVoice, speed: 1 }); setProject(narrated); onNotice('Đã tạo voiceover và gắn audio layer cho từng scene.'); } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo voiceover.'), 'error'); } finally { setCreatingVoiceover(false); } };
+  const createVoiceover = async () => { if (!ttsProvider || !ttsAssignment?.model) { onNotice('Hãy cấu hình TTS provider/model.', 'error'); return; } if (ttsProvider.providerType === 'kokoro-local' && project.scenes.some((item) => isLikelyVietnamese(String(item.narration || '')))) { onNotice('Kokoro chỉ có giọng tiếng Anh; narration hiện có vẻ là tiếng Việt. Hãy chọn VieNeu Local hoặc một giọng Việt.', 'error'); return; } setCreatingVoiceover(true); try { const narrated = await api.generateAnimationNarration({ project, provider: ttsProvider, model: ttsAssignment.model, voice: ttsVoice, speed: 1 }); setProject(narrated); onNotice('Đã tạo voiceover và gắn audio layer cho từng scene.'); } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể tạo voiceover.'), 'error'); } finally { setCreatingVoiceover(false); } };
+  const testTtsVoice = async () => {
+    if (!ttsProvider || !ttsAssignment?.model || !ttsVoice) { onNotice('Hãy chọn provider, model và giọng đọc trước.', 'error'); return; }
+    const requestId = ++ttsTestRequestRef.current;
+    setTestingTtsVoice(true);
+    try {
+      const blob = await loadVoicePreview(ttsProvider, ttsAssignment.model, ttsVoice, 1);
+      if (requestId !== ttsTestRequestRef.current) return;
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      ttsTestAudioRef.current = audio;
+      ttsTestUrlRef.current = url;
+      const release = () => {
+        if (ttsTestAudioRef.current !== audio) return;
+        ttsTestAudioRef.current = null;
+        ttsTestUrlRef.current = null;
+        URL.revokeObjectURL(url);
+        setTestingTtsVoice(false);
+      };
+      audio.onended = release;
+      audio.onerror = release;
+      await audio.play();
+    } catch (error) {
+      if (requestId === ttsTestRequestRef.current) {
+        setTestingTtsVoice(false);
+        onNotice(friendlyErrorMessage(error, 'Không thể tạo bản nghe thử.'), 'error');
+      }
+    }
+  };
   const toggleHistory = async () => { if (!persisted) { onNotice('Hãy lưu project lần đầu để sử dụng lịch sử.', 'error'); return; } const next = !historyOpen; setHistoryOpen(next); if (next) setVersions(await api.listAnimationProjectVersions(project.id)); };
   const restoreVersion = async (versionId: string) => { try { const restored = await api.restoreAnimationProjectVersion(project.id, versionId); setProject(restored); setSceneId(restored.scenes[0]?.id || ''); setSelectedLayerId(''); setTimeMs(0); setHistoryOpen(false); onNotice('Đã khôi phục version project.'); } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể khôi phục version.'), 'error'); } };
   const exportJson = () => { const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${project.name.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'animation-project'}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); };
@@ -786,12 +861,43 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         <fieldset className="animation-duration-mode"><legend>Thời lượng</legend><label className={durationMode === 'fixed' ? 'selected' : ''}><input type="radio" checked={durationMode === 'fixed'} onChange={() => setDurationMode('fixed')} /><span className="animation-duration-choice-copy"><strong>Khóa theo thời lượng</strong><small>Bám sát mốc bạn chọn</small></span></label><label className={durationMode === 'auto' ? 'selected' : ''}><input type="radio" checked={durationMode === 'auto'} onChange={() => setDurationMode('auto')} /><span className="animation-duration-choice-copy"><strong>Tự động theo nội dung</strong><small>AI tự suy ra độ dài phù hợp</small></span></label></fieldset>
         {durationMode === 'fixed' && <label className="animation-duration"><span>Thời lượng video</span><input aria-label="Thời lượng video tính bằng phút" type="number" min="0.1" step="0.25" value={targetMinutes} onChange={(event) => setTargetMinutes(event.target.value)} /><span>phút</span><small>Director sẽ tạo TTS thử, đo thời lượng thật và tự viết lại narration trước khi tạo ảnh cho tới khi lời đọc gần đầy timeline đã chọn.</small></label>}
         {durationMode === 'auto' && <small className="animation-reference-note">Tự động sẽ suy ra độ dài từ nội dung. Nếu prompt có ghi rõ “60 giây”, “90 seconds”, “2 phút”… Director sẽ ưu tiên mốc đó thay vì tính theo độ dài prompt.</small>}
-        <label className="animation-director-voice"><span>Giọng đọc</span>{ttsVoices.length ? <select aria-label="Chọn giọng đọc" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} title={ttsProvider?.name}>{ttsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name || voice.id}{voice.language ? ` · ${voice.language}` : ''}</option>)}</select> : <input aria-label="Voice ID" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} placeholder={ttsProvider ? 'Nhập Voice ID' : 'Chưa cấu hình TTS'} disabled={!ttsProvider} />}</label>
+        <div className="animation-director-voice"><label htmlFor="animation-director-voice">Giọng đọc</label>{ttsVoices.length ? <select id="animation-director-voice" aria-label="Chọn giọng đọc" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} title={ttsProvider?.name}>{ttsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name || voice.id}{voice.language ? ` · ${voice.language}` : ''}</option>)}</select> : <input id="animation-director-voice" aria-label="Voice ID" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} placeholder={ttsProvider ? 'Nhập Voice ID' : 'Chưa cấu hình TTS'} disabled={!ttsProvider} />}<button type="button" className="button ghost small" disabled={testingTtsVoice || !ttsProvider || !ttsAssignment?.model || !ttsVoice} onClick={() => void testTtsVoice()}>{testingTtsVoice ? <LoaderCircle size={14} className="spin" /> : <CirclePlay size={14} />} {testingTtsVoice ? 'Đang tạo/phát…' : 'Nghe thử'}</button></div>
+        {ttsProvider?.providerType === 'kokoro-local' && <small className="animation-reference-note">Kokoro hiện chỉ có giọng tiếng Anh (Mỹ/Anh). Lần nghe thử đầu tải model khoảng 354 MB và cài runtime; audio sẽ tự phát ngay khi tạo xong.</small>}
         <label className="animation-auto-assets"><input type="checkbox" checked={autoGenerateAssets} onChange={(event) => setAutoGenerateAssets(event.target.checked)} /><span>Tạo ảnh theo từng nhịp giải thích</span></label>
-        {autoGenerateAssets && <><select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => { const value = event.target.value; setImageProviderId(value); setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1'); setCharacterOptions([]); setSelectedCharacterAssetId(''); }}><option value="flow-agent">Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : flowAgent?.extensionConnected ? ' · đang xác thực' : ' · chưa kết nối'}</option>{providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{!usingFlowAgentAssets && <small className="animation-reference-note">Ảnh tham chiếu nhân vật hiện cần Nano Banana 2.</small>}</>}
+        {autoGenerateAssets && <>
+          <select className="animation-image-provider" aria-label="Provider tạo ảnh" value={usingFlowAgentAssets ? 'flow-agent' : imageProvider?.id || ''} onChange={(event) => {
+            const value = event.target.value;
+            setImageProviderId(value);
+            if (value === GPT_IMAGE_PROVIDER.id) {
+              setGptImageModel(selectedGptImageModel);
+              setImageModel(selectedGptImageModel);
+            } else {
+              setImageModel(value === 'flow-agent' ? 'narwhal' : providers.find((item) => item.id === value)?.models[0]?.id || 'gpt-image-1');
+            }
+            setCharacterOptions([]); setSelectedCharacterAssetId('');
+          }}>
+            <option value="flow-agent">Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : flowAgent?.extensionConnected ? ' · đang xác thực' : ' · chưa kết nối'}</option>
+            {providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            <option value={GPT_IMAGE_PROVIDER.id}>GPT Image · ChatGPT{ima2GptStatus?.connected ? ' · sẵn sàng' : ' · cần đăng nhập'}</option>
+          </select>
+          {imageProviderId === GPT_IMAGE_PROVIDER.id ? <>
+            <label className="animation-gpt-model-choice" htmlFor="animation-gpt-image-model">
+              <span>Model tạo ảnh</span>
+              <select id="animation-gpt-image-model" className="animation-image-provider" value={selectedGptImageModel} onChange={(event) => {
+                setGptImageModel(event.target.value);
+                setImageModel(event.target.value);
+              }}>
+                {gptImageModelChoices.map((model) => <option key={model} value={model}>{model}{model === GPT_IMAGE_MODEL ? ' · mặc định' : ''}</option>)}
+              </select>
+            </label>
+            <small className="animation-reference-note">GPT Image dùng đăng nhập ChatGPT trong Cài đặt; hỗ trợ ảnh tham chiếu để giữ nhân vật. Model đã chọn áp dụng cho ảnh tạo mới.</small>
+          </> : !usingFlowAgentAssets && <small className="animation-reference-note">Ảnh tham chiếu nhân vật hiện cần Nano Banana 2.</small>}
+        </>}
         {autoGenerateAssets && <div className="animation-character-picker">
           <div className="animation-character-picker-head"><span>Nhân vật và phong cách</span>{(characterReference || selectedCharacterAssetId) && <button type="button" onClick={() => { setCharacterReference(undefined); setSelectedCharacterAssetId(''); }}>Đổi lựa chọn</button>}</div>
           {characterReference ? <div className="animation-character-reference"><button type="button" aria-label="Xem lớn ảnh nhân vật tham chiếu" onClick={() => setCharacterPreview({ name: characterReference.name, uri: animationAssetUrl(characterReference.uploadId) })}><img src={animationAssetUrl(characterReference.uploadId)} alt="" /></button><span><b>Ảnh của bạn</b>{characterReference.name}</span></div> : selectedCharacter ? <div className="animation-character-reference"><button type="button" aria-label={`Xem lớn ${selectedCharacter.name}`} onClick={() => setCharacterPreview({ id: selectedCharacter.id, name: selectedCharacter.name, uri: selectedCharacter.uri })}><img src={selectedCharacter.uri} alt="" /></button><span><b>Đã chọn</b>{selectedCharacter.name}</span></div> : <label className="animation-character-upload"><Image size={16} aria-hidden="true" /><span>Tải ảnh nhân vật của bạn</span><input type="file" accept="image/png,image/jpeg,image/webp" disabled={preparingCharacters} onChange={(event) => { void uploadCharacterReference(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label>}
+          {(characterReference || selectedCharacterAssetId) && <label className="animation-character-appearance" htmlFor="animation-character-appearance-lock"><span>Ghi chú thêm cho mascot (không bắt buộc)</span><textarea id="animation-character-appearance-lock" aria-describedby="animation-character-appearance-help" rows={3} value={characterAppearanceLock} onChange={(event) => setCharacterAppearanceLock(event.target.value)} placeholder="Ví dụ: đổi áo mascot sang xanh dương; giữ nguyên các đặc điểm còn lại." /><small id="animation-character-appearance-help">AI dùng trực tiếp ảnh tham chiếu làm chuẩn nhận diện. Để trống để bám ảnh; chỉ nhập nếu muốn ghi đè chi tiết cụ thể. Ghi chú này chỉ áp dụng cho mascot, không áp lên nhân vật phụ.</small></label>}
+          {storyCastReferenceAssets.length > 0 && <section className="animation-story-cast-references" aria-label="Ảnh tham chiếu nhân vật phụ"><div><strong>Dàn nhân vật phụ · ảnh tham chiếu AI</strong><small>Mỗi ảnh khóa riêng nhận diện nhân vật; mascot không bị dùng làm mẫu cho họ.</small></div><div className="animation-story-cast-grid">{storyCastReferenceAssets.map((asset) => <button key={asset.id} type="button" aria-label={`Xem lớn ảnh tham chiếu ${asset.name}`} onClick={() => setCharacterPreview({ name: asset.name, uri: asset.uri })}><img src={asset.uri} alt="" /><span>{asset.name}</span></button>)}</div></section>}
           {!characterReference && characterOptions.length === 0 && <button className="button quiet" type="button" disabled={!preparingCharacters && (brief.trim().length < 10 || (usingFlowAgentAssets && !flowAgent?.connected))} onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng tạo 4 nhân vật' : 'Không có ảnh? Tạo 4 nhân vật để chọn'}</button>}
           {!characterReference && characterOptions.length > 0 && <><div className="animation-character-options" role="radiogroup" aria-label="Chọn nhân vật">{characterOptions.map((asset) => <article className={selectedCharacterAssetId === asset.id ? 'selected' : ''} key={asset.id}><button className="animation-character-thumb" type="button" aria-label={`Xem lớn ${asset.name}`} onClick={() => setCharacterPreview({ id: asset.id, name: asset.name, uri: asset.uri })}><img src={asset.uri} alt="" /><span>{asset.name}</span></button><button className="animation-character-select" type="button" role="radio" aria-checked={selectedCharacterAssetId === asset.id} onClick={() => setSelectedCharacterAssetId(asset.id)}>{selectedCharacterAssetId === asset.id ? 'Đã chọn' : 'Chọn'}</button></article>)}</div><button className="animation-character-regenerate" type="button" onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng lượt tạo mới' : 'Tạo lại 4 phương án'}</button></>}
         </div>}
@@ -829,7 +935,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         },
         updatedAt: now(),
       }))} placeholder="Mô tả art direction, nhân vật, màu sắc, nét vẽ…" /></label>}
-      <label>Giọng kể<select aria-label="Chọn giọng kể" value={project.styleProfile?.tone || 'balanced'} onChange={(event) => setProject((current) => ({
+      <label>Phong cách kể chuyện<select aria-label="Chọn phong cách kể chuyện" value={project.styleProfile?.tone || 'balanced'} onChange={(event) => setProject((current) => ({
         ...current,
         styleProfile: {
           ...(current.styleProfile || { name: 'AI Storyboard', style: VISUAL_STYLE_PRESETS[0].prompt, pacing: 'balanced' as const }),
@@ -837,13 +943,14 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         },
         updatedAt: now(),
       }))}>{STORY_TONE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-      <small className="animation-reference-note">“Hài hước thông minh” thêm ví dụ dí dỏm và visual gag vừa phải để đỡ nhàm chán, nhưng không được bẻ cong dữ kiện hay nhét trò đùa vào chủ đề nghiêm trọng.</small>
+      <small className="animation-reference-note">Phong cách này điều khiển cách viết kịch bản, không đổi voice đã chọn. “Hài hước thông minh” phải có setup, câu quan sát dí dỏm và cú chốt nghe được; vẫn giữ giọng đọc 1.00x, không đọc nhanh hoặc chèn [cười].</small>
       <small className="animation-reference-note">Video dùng ảnh AI tĩnh, cắt thẳng theo từng cue và voiceover nối liên tục. Không thêm chuyển động camera hay lớp hiệu ứng.</small>
+      <small className="animation-reference-note">Luật nhất quán: prompt tiếng Việt thì chữ trong ảnh phải là tiếng Việt; mascot mẫu 3D sẽ khóa toàn bộ ảnh 3D, mascot 2D sẽ khóa toàn bộ ảnh 2D.</small>
       <span>Tỷ lệ khung hình</span><div className="animation-ratio-buttons">{([[1080, 1920, '9:16'], [1920, 1080, '16:9'], [1080, 1080, '1:1']] as const).map(([width, height, label]) => <button key={label} type="button" aria-pressed={project.width === width && project.height === height} onClick={() => relayout(width, height)}>{label}</button>)}</div>
       <div className="animation-voiceover"><button type="button" disabled={creatingVoiceover} onClick={() => void createVoiceover()}>{creatingVoiceover ? 'Đang tạo…' : 'Tạo lại voiceover'}</button></div>
     </div>
     <div className="animation-director-actions-bottom" aria-label="Hành động tạo video">
-      <button className={`button primary${directing ? ' is-loading' : ''}`} type="button" disabled={directing || preparingCharacters || brief.trim().length < 10 || (autoGenerateAssets && !usingFlowAgentAssets) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang dựng video…' : autoGenerateAssets && !characterReference && !selectedCharacterAssetId ? 'Chuẩn bị nhân vật' : 'Bắt đầu tạo video'}</button>
+      <button className={`button primary${directing ? ' is-loading' : ''}`} type="button" disabled={directing || preparingCharacters || brief.trim().length < 10 || (autoGenerateAssets && !usingFlowAgentAssets && imageProviderId !== GPT_IMAGE_PROVIDER.id) || Boolean(ttsProvider && ttsProvider.providerType !== 'hiiu-tts' && !ttsVoice.trim())} onClick={() => void direct()}>{directing ? 'Đang dựng video…' : autoGenerateAssets && !characterReference && !selectedCharacterAssetId ? 'Chuẩn bị nhân vật' : 'Bắt đầu tạo video'}</button>
       {directorJob && <div className="animation-director-job">
         <p role="status" aria-live="polite">{directorJob.stage}</p>
         {directorJob.error && <small className="animation-director-job-error" role="alert">{directorJob.error}</small>}
@@ -874,7 +981,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         <details className="animation-asset-library">
           <summary><span>Kho tài nguyên</span><small>{libraryAssets.length}</small><ChevronDown size={14} aria-hidden="true" /></summary>
           <div className="animation-asset-search"><input aria-label="Tìm tài nguyên" value={assetQuery} onChange={(event) => setAssetQuery(event.target.value)} placeholder="Tìm theo tên hoặc tag…" /></div>
-          <details className="animation-asset-create"><summary><Plus size={13} aria-hidden="true" /> Tạo ảnh bằng AI</summary><div className="animation-asset-generator"><textarea aria-label="Mô tả ảnh" value={assetPrompt} onChange={(event) => setAssetPrompt(event.target.value)} placeholder="Mô tả ảnh AI cần tạo…" /><input value={imageModel} onChange={(event) => setImageModel(event.target.value)} aria-label="Image model" readOnly={usingFlowAgentAssets} /><button type="button" disabled={generatingAsset || assetPrompt.trim().length < 8 || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void generateAsset()}>{generatingAsset ? 'Đang tạo…' : usingFlowAgentAssets ? 'Tạo bằng Flow' : 'Tạo ảnh'}</button></div></details>
+          <details className="animation-asset-create"><summary><Plus size={13} aria-hidden="true" /> Tạo ảnh bằng AI</summary><div className="animation-asset-generator"><textarea aria-label="Mô tả ảnh" value={assetPrompt} onChange={(event) => setAssetPrompt(event.target.value)} placeholder="Mô tả ảnh AI cần tạo…" /><input value={imageModel} onChange={(event) => setImageModel(event.target.value)} aria-label="Image model" readOnly={usingFlowAgentAssets || imageProviderId === GPT_IMAGE_PROVIDER.id} /><button type="button" disabled={generatingAsset || assetPrompt.trim().length < 8 || (usingFlowAgentAssets && !flowAgent?.connected) || (imageProviderId === GPT_IMAGE_PROVIDER.id && !ima2GptStatus?.connected)} onClick={() => void generateAsset()}>{generatingAsset ? 'Đang tạo…' : usingFlowAgentAssets ? 'Tạo bằng Flow' : 'Tạo ảnh'}</button></div></details>
           <div className="animation-asset-list">{libraryAssets.filter((asset) => ['image', 'background', 'audio'].includes(asset.type)).map((asset) => <button type="button" key={asset.id} onClick={() => reuseAsset(asset)} title="Thêm ảnh hoặc audio vào scene"><span>{asset.name}</span><small>{asset.type} · {asset.tags.slice(0, 2).join(', ') || 'chưa có tag'}</small></button>)}</div>
         </details>
       </aside>

@@ -209,6 +209,41 @@ test('Flow image generation uploads a recurring reference only once and reuses i
   }
 });
 
+test('Flow image generation attaches distinct mascot and supporting-character references in order', async () => {
+  const originalFetch = globalThis.fetch;
+  const directory = await mkdtemp(path.join(tmpdir(), 'autosub-flow-multiple-references-'));
+  const mascot = path.join(directory, 'mascot.png');
+  const cast = path.join(directory, 'cast.png');
+  const output = path.join(directory, 'shot.png');
+  await Promise.all([writeFile(mascot, Buffer.alloc(271, 43)), writeFile(cast, Buffer.alloc(277, 47))]);
+  let uploads = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/health')) return Response.json({ status: 'healthy', extension_connected: true, has_flow_key: true });
+    if (url.endsWith('/v1/credits')) return Response.json({ clients: [{ ok: true }] });
+    if (url.endsWith('/v1/upload')) {
+      const body = JSON.parse(String(init?.body || '{}')) as { image_base64?: string };
+      const identity = Buffer.from(body.image_base64 || '', 'base64')[0] === 43 ? 'mascot-media' : 'cast-media';
+      uploads += 1;
+      return Response.json({ media_id: identity });
+    }
+    if (url.endsWith('/v1/images/generations')) {
+      const body = JSON.parse(String(init?.body || '{}')) as { ref_media_ids?: string[] };
+      assert.deepEqual(body.ref_media_ids, ['mascot-media', 'cast-media']);
+      return Response.json({ data: [{ b64_json: Buffer.alloc(128, 8).toString('base64') }] });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  try {
+    await generateGoogleFlowImage('A prehistoric hunter beside the narrator mascot', output, { referenceImagePaths: [mascot, cast] });
+    assert.equal(uploads, 2);
+    assert.equal((await readFile(output)).length, 128);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('stale cached Flow reference is re-uploaded and repaired inside the same image attempt', async () => {
   const originalFetch = globalThis.fetch;
   const directory = await mkdtemp(path.join(tmpdir(), 'autosub-flow-reference-repair-'));

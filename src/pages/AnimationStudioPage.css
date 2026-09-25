@@ -79,6 +79,18 @@
 .animation-character-reference img { width: 100%; height: 100%; object-fit: cover; }
 .animation-character-reference span { display: grid; gap: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .animation-character-reference b { color: #ffad7a; font-size: 10px; font-weight: 650; text-transform: uppercase; }
+.animation-character-appearance { display: grid; gap: 6px; min-width: 0; color: #c7d0db; font-size: 11px; line-height: 1.4; }
+.animation-character-appearance textarea { width: 100%; min-width: 0; min-height: 64px; box-sizing: border-box; padding: 8px 10px; border: 1px solid #334150; border-radius: 7px; background: #111820; color: #e4ebf2; font: inherit; line-height: 1.45; resize: vertical; }
+.animation-character-appearance textarea:focus-visible { outline: 2px solid #ff8a45; outline-offset: 2px; }
+.animation-character-appearance small { color: #8795a4; font-size: 10px; line-height: 1.45; }
+.animation-story-cast-references { display: grid; gap: 8px; padding-top: 9px; border-top: 1px solid #293441; }
+.animation-story-cast-references > div:first-child { display: grid; gap: 3px; }
+.animation-story-cast-references strong { color: #dce4ec; font-size: 11px; font-weight: 650; }
+.animation-story-cast-references small { color: #8795a4; font-size: 10px; line-height: 1.4; }
+.animation-story-cast-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.animation-story-cast-grid button { display: grid; gap: 5px; min-width: 0; padding: 5px; border: 1px solid #334150; border-radius: 7px; background: #111820; color: #c7d0db; cursor: zoom-in; text-align: left; }
+.animation-story-cast-grid img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border-radius: 4px; background: #0d131a; }
+.animation-story-cast-grid span { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .animation-character-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .animation-character-options article { display: grid; gap: 5px; min-width: 0; padding: 5px; border: 1px solid var(--studio-line); border-radius: 7px; background: #101821; }
 .animation-character-options article:hover, .animation-character-options article.selected { border-color: #ff8a45; box-shadow: 0 0 0 1px rgba(255,138,69,.22); }
@@ -95,6 +107,10 @@
 .animation-character-preview-dialog > img { width: 100%; min-height: 0; max-height: calc(92dvh - 126px); border-radius: 8px; object-fit: contain; background: #080d12; }
 .animation-character-preview-dialog > .button { justify-self: end; width: auto !important; min-width: 170px; }
 .animation-reference-note { margin-top: -8px; color: #d9a47f; font-size: 10px; line-height: 1.4; }
+.animation-gpt-model-choice { display: grid; gap: 5px; min-width: 150px; color: #b6c1cd; font-size: 11px; }
+.animation-gpt-model-choice .animation-image-provider { width: 100%; min-width: 0; height: 38px; padding: 0 10px; border-color: #303b49; border-radius: 6px; background: #0e141c; color: #dce5ee; font-size: 12px; }
+.animation-gpt-model-choice .animation-image-provider:focus-visible { outline: 2px solid #ff8a45; outline-offset: 2px; }
+.studio-preview-first .animation-gpt-model-choice { width: 100%; min-width: 0; }
 .studio-preview-first .animation-director-voice { display: grid !important; gap: 8px !important; font-size: 12px; }
 .studio-preview-first .animation-director-voice select, .studio-preview-first .animation-director-voice input, .studio-preview-first .animation-image-provider { width: 100%; min-width: 0; font-size: 12px; }
 .studio-preview-first .animation-auto-assets, .studio-preview-first .animation-subtitle-toggle { font-size: 12px; min-height: 26px; }

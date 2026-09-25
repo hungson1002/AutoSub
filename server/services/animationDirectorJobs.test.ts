@@ -57,6 +57,26 @@ test('job exposes completed-image progress instead of treating a retry task numb
   assert.equal((await terminal(store, job.id)).progressPercent, 100);
 });
 
+test('job reports scene-level narration progress after TTS is grouped by scene', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'animation-jobs-'));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const store = new AnimationDirectorJobStore(root, async (value, stage) => {
+    await stage('Lời đọc Turbo: 2 cảnh · tối đa 2 cảnh song song');
+    await stage('Đã tạo 1/2 cảnh lời đọc');
+    await stage('Đang chỉnh lời đọc theo timeline cố định (1/3)');
+    await gate;
+    return value.project;
+  });
+  await store.initialize();
+  const job = await store.start(input());
+  for (let i = 0; i < 200 && store.get(job.id).progressLabel !== 'Đang căn thời lượng lời đọc (1/3)'; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(store.get(job.id).progressLabel, 'Đang căn thời lượng lời đọc (1/3)');
+  assert.ok((store.get(job.id).progressPercent || 0) <= 20);
+  release();
+  assert.equal((await terminal(store, job.id)).status, 'completed');
+});
+
 test('restart marks interrupted instead of automatically resubmitting generation', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'animation-jobs-'));
   const store = new AnimationDirectorJobStore(root, async (value) => value.project);
@@ -64,12 +84,17 @@ test('restart marks interrupted instead of automatically resubmitting generation
   const value = input(); const job = await store.start(value); await terminal(store, job.id);
   const file = path.join(root, job.id, 'job.json');
   const saved = JSON.parse(await readFile(file, 'utf8'));
-  await writeFile(file, JSON.stringify({ ...saved, status: 'running' }));
+  await writeFile(file, JSON.stringify({ ...saved, status: 'running', progressPercent: 99, progressLabel: '28/28 cảnh lời đọc' }));
   let calls = 0;
-  const restarted = new AnimationDirectorJobStore(root, async (value) => { calls++; return value.project; });
+  let releaseResume!: () => void;
+  const resumeGate = new Promise<void>((resolve) => { releaseResume = resolve; });
+  const restarted = new AnimationDirectorJobStore(root, async (value) => { calls++; await resumeGate; return value.project; });
   await restarted.initialize();
   assert.equal(restarted.get(job.id).status, 'interrupted'); assert.equal(calls, 0);
-  await restarted.start(value, job.id);
+  const resumed = await restarted.start(value, job.id);
+  assert.equal(resumed.progressPercent, 15);
+  assert.equal(resumed.progressLabel, 'Đang tiếp tục từ checkpoint');
+  releaseResume();
   assert.equal((await terminal(restarted, job.id)).status, 'completed'); assert.equal(calls, 1);
 });
 test('cancel stops scheduling at next stage and retains already returned result', async () => {

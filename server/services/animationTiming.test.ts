@@ -1,10 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { allocateNarrationTimings, buildAnimationBeatWindows, splitNarrationUnits } from './animationTiming';
+import { allocateNarrationTimings, buildAnimationBeatWindows, buildNarrationSceneTasks, splitNarrationUnits } from './animationTiming';
 
 test('splits Vietnamese narration at sentence boundaries without rewriting text', () => {
   const text = 'Mặt Trăng biến mất. Trái Đất vẫn quay! Điều gì xảy ra?';
   assert.deepEqual(splitNarrationUnits(text), ['Mặt Trăng biến mất.', 'Trái Đất vẫn quay!', 'Điều gì xảy ra?']);
+});
+
+test('keeps a scene as one continuous TTS task while leaving sentence splitting for captions', () => {
+  const narration = 'Bạn thấy món này rẻ hơn. Nhưng tổng hóa đơn lại cao hơn! Vì sao?';
+  const tasks = buildNarrationSceneTasks([
+    { id: 'scene-1', name: 'Cảnh 1', renderMode: 'composite', narration },
+    { id: 'video-1', name: 'Video', renderMode: 'generated-video', narration: 'Không đưa clip ngoài vào TTS.' },
+    { id: 'scene-2', name: 'Cảnh rỗng', renderMode: 'composite', narration: '  ' },
+  ]);
+  assert.deepEqual(tasks, [{ sceneId: 'scene-1', sceneName: 'Cảnh 1', text: narration }]);
+  assert.equal(splitNarrationUnits(tasks[0]!.text).length, 3);
 });
 
 test('allocates contiguous sentence captions over measured duration', () => {
@@ -47,4 +58,16 @@ test('partial and reversed cues never create overlapping beat windows', () => {
     windows.slice(1).forEach((window, index) => assert.equal(window.startMs, windows[index].endMs));
     assert.equal(windows.at(-1)?.endMs, 6000);
   }
+});
+
+test('keeps fractional frame-aligned scene duration as the exact beat boundary', () => {
+  const durationMs = 9866.666666666668;
+  const windows = buildAnimationBeatWindows({
+    beats: [{ narrationCue: 'Alpha' }, { narrationCue: 'beta' }, { narrationCue: 'gamma' }, { narrationCue: 'delta' }],
+    narration: 'Alpha beta gamma delta',
+    durationMs,
+  });
+
+  assert.equal(windows.at(-1)?.endMs, durationMs);
+  assert.ok(windows.every((window) => window.startMs >= 0 && window.startMs < window.endMs && window.endMs <= durationMs));
 });

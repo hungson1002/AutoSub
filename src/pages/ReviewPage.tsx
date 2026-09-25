@@ -8,7 +8,7 @@ import { AssignmentSummary } from '../components/AssignmentSummary';
 import { SelectField } from '../components/SelectField';
 import { RangeInput } from '../components/RangeInput';
 import { Check, CirclePlay, FileVideo, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Upload, WandSparkles, X } from '../components/Icons';
-import { loadVoicePreview, primeVoicePreview, VI_VOICE_PREVIEW_TEXT } from '../lib/voicePreview';
+import { loadVoicePreview, primeVoicePreview } from '../lib/voicePreview';
 
 type YouTubeConnection = { connected: boolean; channelId?: string; channelTitle?: string; error?: string };
 type MediaAction = 'idle' | 'uploading' | 'picking';
@@ -194,7 +194,7 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
     const requestId = voicePreviewRequestRef.current;
     setTestingVoice(true);
     try {
-      const blob = await loadVoicePreview(ttsProvider, ttsAssignment.model, voice, voiceSpeed, VI_VOICE_PREVIEW_TEXT);
+      const blob = await loadVoicePreview(ttsProvider, ttsAssignment.model, voice, voiceSpeed);
       if (requestId !== voicePreviewRequestRef.current) return;
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
@@ -332,6 +332,7 @@ export function ReviewPage({ providers, settings, initialAsset, onAssetChange, o
           <CapabilityAssignmentPicker capability="tts" assignments={capabilityAssignments(settings, 'tts')} providers={providers} value={ttsAssignment} onChange={setTtsAssignment} label="TTS · giọng đọc tiếng Việt" />
           <AssignmentSummary label="TTS đang dùng" assignment={ttsAssignment} provider={ttsProvider} capability="tts" />
           <div className="field"><span>Voice</span>{voiceItems.length ? <SelectField ariaLabel="Voice lồng tiếng" value={voice} onChange={setVoice} options={voiceItems.map((item) => ({ value: item.id, label: item.name || item.id, description: `${item.id}${item.language ? ` · ${item.language}` : ''}` }))} /> : <input value={voice} onChange={(event) => setVoice(event.target.value)} placeholder={ttsProviderType === 'vieneu-local' ? 'Chưa có giọng · tạo ở mục Clone giọng' : 'Ví dụ: alloy hoặc Voice ID'} readOnly={ttsProviderType === 'vieneu-local'} />}</div>
+          {ttsProviderType === 'kokoro-local' && <small className="field-help">Kokoro hiện có giọng tiếng Anh (Mỹ/Anh), không dùng cho lời thoại tiếng Việt. Bấm “Nghe thử” sẽ tự phát khi tạo xong.</small>}
           {ttsProviderType === 'vieneu-local' && !voiceItems.length && <div className="review-safety-note"><ShieldCheck size={15} /><span>Chưa có hồ sơ VieNeu. Mở mục Clone giọng ở thanh bên, tạo mẫu rồi quay lại đây.</span></div>}
           <div className="review-voice-row"><div className="field"><span>Tốc độ <b className="value-badge">{voiceSpeed.toFixed(2)}×</b></span><RangeInput min={0.9} max={1.5} step={0.05} value={voiceSpeed} onChange={(event) => setVoiceSpeed(Number(event.target.value))} /><small className="field-help">Mặc định 1.15× cho nhịp kể gọn hơn; pipeline đo chính giọng đã chọn trước khi viết kịch bản.</small></div><button className="button ghost" disabled={testingVoice} onClick={() => void testVoice()}>{testingVoice ? <LoaderCircle size={15} className="spin" /> : <CirclePlay size={15} />} Nghe thử</button></div>
         </section>

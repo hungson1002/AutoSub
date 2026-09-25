@@ -35,6 +35,13 @@ export function splitNarrationUnits(text: string) {
   return units.length ? units : [normalized];
 }
 
+/** TTS jobs stay continuous for the full scene; sentence boundaries are used only for captions. */
+export function buildNarrationSceneTasks(scenes: Array<{ id: string; name: string; renderMode: string; narration: string }>) {
+  return scenes.flatMap((scene) => scene.renderMode !== 'composite' || !scene.narration.trim()
+    ? []
+    : [{ sceneId: scene.id, sceneName: scene.name, text: scene.narration.trim() }]);
+}
+
 function contentWeight(value: string) {
   const letters = value.replace(/[^\p{L}\p{N}]/gu, '');
   return Math.max(1, letters.length);
@@ -81,7 +88,9 @@ function findOccurrence(text: string, cue: string, occurrence: number) {
  */
 export function buildAnimationBeatWindows(input: { beats: Array<{ narrationCue?: string }>; narration?: string; durationMs: number }): AnimationBeatWindow[] {
   const { beats, narration = '' } = input;
-  const duration = Math.max(1, Math.round(Number(input.durationMs) || 0));
+  // Scene durations can be fractional milliseconds when allocated on frame
+  // boundaries. Preserve that exact endpoint instead of rounding beats past it.
+  const duration = Math.max(1, Number(input.durationMs) || 0);
   if (!beats.length) return [];
   const occurrences = new Map<string, number>();
   const matches = beats.map((beat, index) => {
@@ -94,7 +103,7 @@ export function buildAnimationBeatWindows(input: { beats: Array<{ narrationCue?:
   // Partial or out-of-order cue sets cannot safely mix cue windows with
   // independently allocated fallback windows: that causes overlapping visuals.
   const ordered = matches.every((match, index) => match.position >= 0 && (index === 0 || match.position > matches[index - 1].position));
-  const starts = beats.map((_beat, index) => index === 0 ? 0 : Math.round(duration * (ordered ? matches[index].position / Math.max(1, narration.length) : index / beats.length)));
+  const starts = beats.map((_beat, index) => index === 0 ? 0 : duration * (ordered ? matches[index].position / Math.max(1, narration.length) : index / beats.length));
   return starts.map((startMs, index) => ({
     startMs,
     endMs: index + 1 < starts.length ? starts[index + 1] : duration,

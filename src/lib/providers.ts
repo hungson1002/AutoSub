@@ -1,8 +1,10 @@
 import type { AIModel, AIProvider, ProviderAuthType, ProviderCapabilities, ProviderEndpoints, ProviderType } from '../types';
+import { KOKORO_ENGLISH_VOICES } from '../../shared/kokoroVoices';
 
 export const providerTypeOptions: Array<[ProviderType, string]> = [
   ['auto', 'Auto detect'],
   ['vieneu-local', 'VieNeu Local Clone (giọng Việt)'],
+  ['kokoro-local', 'Kokoro TTS Local (giọng tiếng Anh)'],
   ['openai-compatible', 'OpenAI-compatible'],
   ['groq', 'Groq'],
   ['elevenlabs', 'ElevenLabs'],
@@ -34,7 +36,7 @@ export function resolvedProviderType(provider: Pick<AIProvider, 'providerType' |
 }
 
 export function isPresetProvider(providerType: ProviderType) {
-  return providerType === 'groq' || providerType === 'elevenlabs' || providerType === 'whisper-local' || providerType === 'edge-tts' || providerType === 'vieneu-local' || providerType === 'hiiu-tts' || providerType === 'capcut-tts';
+  return providerType === 'groq' || providerType === 'elevenlabs' || providerType === 'whisper-local' || providerType === 'edge-tts' || providerType === 'vieneu-local' || providerType === 'kokoro-local' || providerType === 'hiiu-tts' || providerType === 'capcut-tts';
 }
 
 export function hasKnownPreset(provider: Pick<AIProvider, 'providerType' | 'baseUrl'>) {
@@ -47,13 +49,14 @@ export function presetCapabilities(providerType: ProviderType): ProviderCapabili
   if (providerType === 'whisper-local') return { stt: true };
   if (providerType === 'edge-tts') return { tts: true };
   if (providerType === 'vieneu-local') return { tts: true };
+  if (providerType === 'kokoro-local') return { tts: true };
   if (providerType === 'hiiu-tts') return { tts: true };
   if (providerType === 'capcut-tts') return { tts: true };
   return {};
 }
 
 export function presetAuthType(providerType: ProviderType): ProviderAuthType {
-  return providerType === 'elevenlabs' ? 'custom-header' : providerType === 'whisper-local' || providerType === 'edge-tts' || providerType === 'vieneu-local' || providerType === 'hiiu-tts' || providerType === 'capcut-tts' ? 'none' : 'bearer';
+  return providerType === 'elevenlabs' ? 'custom-header' : providerType === 'whisper-local' || providerType === 'edge-tts' || providerType === 'vieneu-local' || providerType === 'kokoro-local' || providerType === 'hiiu-tts' || providerType === 'capcut-tts' ? 'none' : 'bearer';
 }
 
 export function presetAuth(providerType: ProviderType) {
@@ -61,6 +64,7 @@ export function presetAuth(providerType: ProviderType) {
   if (providerType === 'whisper-local') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
   if (providerType === 'edge-tts') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
   if (providerType === 'vieneu-local') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
+  if (providerType === 'kokoro-local') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
   if (providerType === 'hiiu-tts') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
   if (providerType === 'capcut-tts') return { authType: 'none' as const, authHeaderName: undefined, authPrefix: undefined };
   return { authType: 'bearer' as const, authHeaderName: undefined, authPrefix: 'Bearer' };
@@ -71,6 +75,7 @@ export function presetEndpoints(providerType: ProviderType): ProviderEndpoints {
   if (providerType === 'whisper-local') return {};
   if (providerType === 'edge-tts') return {};
   if (providerType === 'vieneu-local') return {};
+  if (providerType === 'kokoro-local') return {};
   if (providerType === 'hiiu-tts') return { models: '/tts/models', tts: '/audio/speech' };
   if (providerType === 'capcut-tts') return { models: '/models', voices: '/voices', tts: '/audio/speech' };
   if (providerType === 'groq' || providerType === 'openai-compatible' || providerType === 'vbee') return { models: '/models', chat: '/chat/completions', stt: '/audio/transcriptions', tts: '/audio/speech' };
@@ -83,6 +88,7 @@ export function presetBaseUrl(providerType: ProviderType, current = '') {
   if (providerType === 'whisper-local') return 'local://whisper.cpp';
   if (providerType === 'edge-tts') return 'local://edge-tts';
   if (providerType === 'vieneu-local') return 'local://vieneu';
+  if (providerType === 'kokoro-local') return 'local://kokoro';
   if (providerType === 'hiiu-tts') return 'https://hiiu-tts.netlify.app/v1';
   if (providerType === 'capcut-tts') return 'local://capcut-tts';
   return current;
@@ -136,11 +142,26 @@ export function createVieneuLocalProvider(): AIProvider {
   });
 }
 
+export function createKokoroLocalProvider(): AIProvider {
+  return normalizeProvider({
+    id: 'kokoro-local',
+    name: 'Kokoro TTS Local',
+    baseUrl: 'local://kokoro',
+    enabled: true,
+    models: [{ id: 'kokoro-v1.0', name: 'Kokoro 82M · ONNX · CPU', capabilities: { tts: true } }],
+    providerType: 'kokoro-local',
+    authType: 'none',
+    capabilities: { tts: true },
+    voices: KOKORO_ENGLISH_VOICES,
+  });
+}
+
 export function ensureBuiltInProviders(providers: AIProvider[]) {
   const output = [...providers];
   if (!output.some((provider) => provider.providerType === 'whisper-local' || provider.id === 'whisper-local')) output.push(createWhisperLocalProvider());
   if (!output.some((provider) => provider.providerType === 'edge-tts' || provider.id === 'edge-tts-local')) output.push(createEdgeTtsProvider());
   if (!output.some((provider) => provider.providerType === 'vieneu-local' || provider.id === 'vieneu-local')) output.push(createVieneuLocalProvider());
+  if (!output.some((provider) => provider.providerType === 'kokoro-local' || provider.id === 'kokoro-local')) output.push(createKokoroLocalProvider());
   if (!output.some((provider) => provider.providerType === 'capcut-tts' || provider.id === 'capcut-tts-local')) output.push(createCapCutTtsProvider());
   return output;
 }

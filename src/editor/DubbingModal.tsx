@@ -9,6 +9,7 @@ import { RangeInput } from '../components/RangeInput';
 import { announceDropdownOpen, listenForOtherDropdowns, type DropdownId } from '../lib/dropdowns';
 import { CapabilityAssignmentPicker } from '../components/CapabilityAssignmentPicker';
 import { EN_VOICE_PREVIEW_TEXT, hasVoicePreview, loadVoicePreview as loadCachedVoicePreview, primeVoicePreview, VI_VOICE_PREVIEW_TEXT } from '../lib/voicePreview';
+import { KOKORO_VOICE_PREVIEW_TEXT } from '../../shared/kokoroVoices';
 
 const groups: VoiceGroup[] = ['G1', 'G2', 'G3'];
 export type VoiceConfig = { assignment: ProviderAssignment; voice: string; speed: number; volume: number };
@@ -48,7 +49,12 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const previewRequestRef = useRef(0);
-  const assignmentOptions = availableAssignments.length ? availableAssignments : [assignments.G1];
+  const kokoroProvider = providers.find((item) => item.enabled && resolvedProviderType(item) === 'kokoro-local');
+  const configuredAssignmentOptions = availableAssignments.length ? availableAssignments : [assignments.G1];
+  const kokoroAssignment = kokoroProvider ? { providerId: kokoroProvider.id, model: kokoroProvider.models[0]?.id || 'kokoro-v1.0' } : undefined;
+  const assignmentOptions = kokoroAssignment && !configuredAssignmentOptions.some((item) => item.providerId === kokoroAssignment.providerId && item.model === kokoroAssignment.model)
+    ? [...configuredAssignmentOptions, kokoroAssignment]
+    : configuredAssignmentOptions;
   const current = configs[active];
   const currentProvider = providers.find((item) => item.id === current.assignment.providerId);
   const providerType = currentProvider ? resolvedProviderType(currentProvider) : undefined;
@@ -58,6 +64,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const isCapCutTts = providerType === 'capcut-tts';
   const isEdgeTts = providerType === 'edge-tts';
   const isVieneuLocal = providerType === 'vieneu-local';
+  const isKokoroLocal = providerType === 'kokoro-local';
   const voiceItems = (isHiiuTts ? (currentProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id })) : currentProvider ? loadedVoices[currentProvider.id] || currentProvider.voices || [] : []) as VoiceItem[];
   const voiceSource = (voice: VoiceItem) => voice.source || (isVieneuLocal ? (voice.id.startsWith('preset:') ? 'preset' : 'clone') : undefined);
   const voiceBookmarkKey = (voiceId: string) => `${currentProvider?.id || ''}::${voiceId}`;
@@ -133,7 +140,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   }, []);
   useEffect(() => listenForOtherDropdowns(voiceDropdownId.current, () => setVoiceOpen(false)), []);
 
-  const previewText = () => isGroq ? EN_VOICE_PREVIEW_TEXT : VI_VOICE_PREVIEW_TEXT;
+  const previewText = () => isKokoroLocal ? KOKORO_VOICE_PREVIEW_TEXT : isGroq ? EN_VOICE_PREVIEW_TEXT : VI_VOICE_PREVIEW_TEXT;
   const previewModel = (voiceId: string) => isHiiuTts ? voiceId : current.assignment.model;
   const loadVoicePreview = (voiceId: string) => {
     if (!currentProvider) return Promise.reject(new Error('Chưa chọn TTS provider.'));
@@ -191,10 +198,10 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
       <div className="voice-tabs">{groups.map((group) => <button className={active === group ? 'active' : ''} key={group} onClick={() => setActive(group)}><strong>{group}</strong><small>{cues.filter((cue) => cue.voiceGroup === group).length} cue</small></button>)}</div>
       <div className="voice-config">
         <div className="voice-heading"><div className="voice-avatar">{active}</div><div><h3>Voice group {active}</h3><p>Ưu tiên video · giữ nguyên thời lượng gốc</p></div></div>
-        <CapabilityAssignmentPicker capability="tts" assignments={assignmentOptions} providers={providers} value={current.assignment} onChange={(assignment) => { const nextProvider = providers.find((item) => item.id === assignment.providerId); patchCurrent({ assignment, voice: nextProvider && resolvedProviderType(nextProvider) === 'hiiu-tts' ? assignment.model : '' }); }} label="TTS Provider + Model" />
+        <CapabilityAssignmentPicker capability="tts" assignments={assignmentOptions} providers={providers} value={current.assignment} onChange={(assignment) => { const nextProvider = providers.find((item) => item.id === assignment.providerId); const nextType = nextProvider ? resolvedProviderType(nextProvider) : undefined; patchCurrent({ assignment, voice: nextType === 'hiiu-tts' ? assignment.model : nextType === 'kokoro-local' ? nextProvider?.voices?.[0]?.id || '' : '' }); }} label="TTS Provider + Model" />
         <AssignmentSummary label="TTS Provider đang dùng" assignment={current.assignment} provider={currentProvider} capability="tts" />
-        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : isEdgeTts ? 'Giọng đọc · Microsoft Edge TTS' : isVieneuLocal ? 'Giọng đọc · VieNeu Local' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
-          {(isElevenLabs || isHiiuTts || isCapCutTts || isEdgeTts || isVieneuLocal) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
+        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : isEdgeTts ? 'Giọng đọc · Microsoft Edge TTS' : isVieneuLocal ? 'Giọng đọc · VieNeu Local' : isKokoroLocal ? 'Giọng đọc · Kokoro English' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
+          {(isElevenLabs || isHiiuTts || isCapCutTts || isEdgeTts || isVieneuLocal || isKokoroLocal) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
             <div className="voice-picker-control">
               <button type="button" className={`voice-picker-trigger ${voiceOpen ? 'active' : ''}`} onClick={() => { if (!voiceOpen) announceDropdownOpen(voiceDropdownId.current); setVoiceOpen((value) => !value); }}>
                 <span className="voice-picker-selected"><strong>{selectedVoice?.name || current.voice || 'Chọn giọng đọc'}</strong><small>{selectedVoice?.id || 'Mở danh sách voice'}</small></span><ChevronDown size={15} className={voiceOpen ? 'rotated' : ''} />
@@ -212,6 +219,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
             </div>}
           </div> : isEdgeTts ? <div className="provider-readonly-value"><span>Đang tải danh sách giọng Việt của Edge TTS.</span></div> : isVieneuLocal ? <div className="provider-readonly-value"><span>Chưa có giọng clone. Hãy tạo một hồ sơ trong mục Clone giọng ở thanh bên.</span></div> : isHiiuTts || isCapCutTts ? <div className="provider-readonly-value"><span>Chưa có danh sách giọng. Hãy bấm “Lấy models” ở Cài đặt để tải voice {isCapCutTts ? 'CapCut TTS' : 'HiiuTTS'}.</span></div> : <input value={current.voice} onChange={(event) => patchCurrent({ voice: event.target.value })} placeholder={isGroq ? 'Ví dụ: troy, hannah, austin' : 'Nhập Voice ID của provider'} />}
           {isGroq && <small className="field-help">Groq Orpheus hiện dành cho giọng English/Arabic; test voice dùng câu tiếng Anh.</small>}
+          {isKokoroLocal && <small className="field-help">Kokoro chỉ đọc tiếng Anh. Lần nghe thử đầu tiên cần cài runtime và tải model; các lần sau dùng model đã lưu cục bộ.</small>}
           {isElevenLabs && !voiceItems.length && <small className="field-help">Chưa có voice cache. Hãy lấy voices trong Cài đặt hoặc nhập Voice ID thủ công.</small>}
         </div>
         <div className="two-fields"><div className="field"><span>Tốc độ TTS <b className="value-badge">{slowVideoToMatchSpeech ? '1.00' : current.speed.toFixed(2)}x</b></span><RangeInput min={0.9} max={1.2} step={0.05} value={slowVideoToMatchSpeech ? 1 : current.speed} disabled={slowVideoToMatchSpeech} onChange={(event) => patchCurrent({ speed: Number(event.target.value) })} /></div><div className="field"><span>Âm lượng <b className="value-badge">{Math.round(current.volume * 100)}%</b></span><RangeInput min={0} max={2} step={0.05} value={current.volume} onChange={(event) => patchCurrent({ volume: Number(event.target.value) })} /><small className="field-help">100% là mức chuẩn hóa; có thể tăng đến 200% cho riêng nhóm giọng này.</small></div></div>
