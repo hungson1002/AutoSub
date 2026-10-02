@@ -4,6 +4,7 @@ import { buildAnimationBeatWindows } from './animationTiming';
 type PlanBeat = {
   narrationCue?: string;
   characterRefs?: string[];
+  onScreenText?: string;
   action?: string;
   visual?: string;
   objects?: unknown[];
@@ -12,6 +13,19 @@ type PlanBeat = {
 };
 
 type PlanSegment = { title: string; narration: string; visualBeats: PlanBeat[] };
+
+function narrationCueOccurrenceCount(text: string, cue: string) {
+  if (!cue) return 0;
+  let count = 0;
+  let from = 0;
+  while (from <= text.length) {
+    const index = text.indexOf(cue, from);
+    if (index < 0) break;
+    count += 1;
+    from = index + Math.max(1, cue.length);
+  }
+  return count;
+}
 
 /** Compile the director's normalized beats into a small, inspectable production contract. */
 export function compileAnimationProductionPlan(input: {
@@ -34,8 +48,12 @@ export function compileAnimationProductionPlan(input: {
     const occurrences = new Map<string, number>();
     segment.visualBeats.forEach((beat, beatIndex) => {
       const cueText = beat.narrationCue?.trim() || undefined;
-      const cueOccurrence = cueText ? (occurrences.get(cueText) || 0) : undefined;
-      if (cueText) occurrences.set(cueText, (cueOccurrence || 0) + 1);
+      const requestedCueOccurrence = cueText ? (occurrences.get(cueText) || 0) : undefined;
+      const availableCueOccurrences = cueText ? narrationCueOccurrenceCount(segment.narration, cueText) : 0;
+      const cueOccurrence = cueText
+        ? Math.max(0, Math.min(requestedCueOccurrence || 0, Math.max(0, availableCueOccurrences - 1)))
+        : undefined;
+      if (cueText) occurrences.set(cueText, (requestedCueOccurrence || 0) + 1);
       const actor = beat.actors?.[0];
       const subjectIds = [...new Set((beat.actors || []).map((item) => item.assetId).filter(Boolean))];
       const technique = beat.actors?.length ? 'sprite' : beat.objects?.length ? 'object-composite' : beat.diagram?.steps?.length ? 'diagram' : beat.visual ? 'image-camera' : 'hold';
@@ -48,6 +66,7 @@ export function compileAnimationProductionPlan(input: {
         ...(cueText ? { cueText, cueOccurrence } : {}),
         subjectIds,
         ...(beat.characterRefs?.length ? { characterRefs: [...new Set(beat.characterRefs)] } : {}),
+        ...(beat.onScreenText?.trim() ? { onScreenText: beat.onScreenText.trim() } : {}),
         ...(action ? { action } : {}),
         technique,
         ...(window ? { startMs: window.startMs, endMs: window.endMs } : {}),

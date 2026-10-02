@@ -141,6 +141,8 @@ export interface AnimationBeatContract {
   subjectIds: string[];
   /** Visual character identities that must be present in this beat, e.g. mascot or CAST_01. */
   characterRefs?: string[];
+  /** Optional short text intentionally baked into the AI image for this beat. */
+  onScreenText?: string;
   focusSubjectId?: string;
   action?: { description: string; actorId?: string; beforeState?: string; afterState?: string; targetId?: string };
   technique: AnimationProductionTechnique;
@@ -434,6 +436,7 @@ export function validateAnimationProject(value: unknown): ValidationIssue[] {
         if (!Array.isArray(beat.failureConditions) || beat.failureConditions.some((condition) => typeof condition !== 'string' || !condition.trim())) issues.push({ path: `${beatPath}.failureConditions`, message: 'Beat failureConditions must contain text.' });
         if (beat.action !== undefined && (!isRecord(beat.action) || !isNonEmptyString(beat.action.description))) issues.push({ path: `${beatPath}.action`, message: 'Beat action must contain a description.' });
         if (beat.cueText !== undefined && typeof beat.cueText !== 'string') issues.push({ path: `${beatPath}.cueText`, message: 'Beat cueText must be a string.' });
+        if (beat.onScreenText !== undefined && (typeof beat.onScreenText !== 'string' || beat.onScreenText.length > 24)) issues.push({ path: `${beatPath}.onScreenText`, message: 'Beat onScreenText must be a short string.' });
         if (beat.cueOccurrence !== undefined && (!isFiniteNumber(beat.cueOccurrence) || !Number.isInteger(beat.cueOccurrence) || beat.cueOccurrence < 0)) issues.push({ path: `${beatPath}.cueOccurrence`, message: 'Beat cueOccurrence must be a non-negative integer.' });
         const unit = Array.isArray(plan.narrationUnits) ? plan.narrationUnits.find((candidate) => isRecord(candidate) && candidate.id === beat.narrationUnitId) : undefined;
         if (typeof beat.cueText === 'string' && beat.cueText.trim() && isRecord(unit) && typeof unit.text === 'string' && !unit.text.includes(beat.cueText)) issues.push({ path: `${beatPath}.cueText`, message: 'Beat cueText is not present in its narration unit.' });

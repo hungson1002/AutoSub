@@ -9,7 +9,8 @@ import {
   listAnimationProjectVersions,
   restoreAnimationProjectVersion,
 } from '../services/animationProjects';
-import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene, generateAnimationCharacterOptions, generateAnimationThumbnailOptions, retryMissingAnimationImages } from '../services/animationDirector';
+import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene, generateAnimationCharacterOptions, retryMissingAnimationImages } from '../services/animationDirector';
+import { generateAnimationThumbnailOptions } from '../services/animationThumbnail';
 import { enqueueAnimationProjectRender, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
 import { generateAnimationAsset, generateAnimationNarration, getAnimationAssetFile, listAnimationAssets, registerAnimationAsset, resolveAnimationAssets, updateAnimationAsset } from '../services/animationAssets';
 import { autoFixAnimationQuality, checkAnimationQuality } from '../services/animationQuality';

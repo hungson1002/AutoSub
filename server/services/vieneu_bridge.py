@@ -21,6 +21,29 @@ _tts = None
 _voice_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
+def model_cache_complete() -> bool:
+    from huggingface_hub import try_to_load_from_cache
+
+    artifacts = {
+        "pnnbao-ump/VieNeu-TTS-v3-Turbo": [
+            "onnx_update/" + filename for filename in (
+                "vieneu_prefill.onnx", "vieneu_decode_step.onnx",
+                "vieneu_acoustic_cached.onnx", "vieneu_backbone_shared.data",
+                "vieneu_v3_heads.npz", "config.json", "tokenizer.json",
+            )
+        ],
+        "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX": [
+            "moss_audio_tokenizer_decode_full.onnx", "moss_audio_tokenizer_decode_shared.data",
+            "moss_audio_tokenizer_encode.onnx", "moss_audio_tokenizer_encode.data",
+        ],
+    }
+    return all(
+        isinstance(cached := try_to_load_from_cache(repo, filename), str)
+        and Path(cached).is_file()
+        for repo, filenames in artifacts.items() for filename in filenames
+    )
+
+
 def emit(value: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(value, ensure_ascii=True) + "\n")
     sys.stdout.flush()
@@ -35,7 +58,16 @@ def get_tts():
 
             # VieNeu >= 3.6 has a torch-free ONNX speaker encoder. Its audio
             # frontend is part of the model pipeline and must not be replaced.
-            _tts = Vieneu(backend="onnx", precision="fp32", threads=threads)
+            # A fully cached local model must not wait on Hub metadata requests.
+            # Incomplete caches keep VieNeu's normal download path.
+            from huggingface_hub import constants
+            was_offline = constants.HF_HUB_OFFLINE
+            try:
+                if model_cache_complete():
+                    constants.HF_HUB_OFFLINE = True
+                _tts = Vieneu(backend="onnx", precision="fp32", threads=threads)
+            finally:
+                constants.HF_HUB_OFFLINE = was_offline
     return _tts
 
 
@@ -47,6 +79,8 @@ def enrolled_voice(reference_path: str) -> dict[str, Any]:
     modified = reference.stat().st_mtime
     cached = _voice_cache.get(key)
     if cached and cached[0] == modified:
+        _voice_cache.pop(key)
+        _voice_cache[key] = cached
         return cached[1]
     tts = get_tts()
     with contextlib.redirect_stdout(sys.stderr):
@@ -54,8 +88,10 @@ def enrolled_voice(reference_path: str) -> dict[str, Any]:
         # reference codes. Keeping both is important for timbre and prosody.
         speaker_emb, codes = tts.encode_reference(reference, denoise=True)
     voice = {"speaker_emb": speaker_emb, "codes": codes}
-    _voice_cache.clear()
+    _voice_cache.pop(key, None)
     _voice_cache[key] = (modified, voice)
+    while len(_voice_cache) > 4:
+        _voice_cache.pop(next(iter(_voice_cache)))
     return voice
 
 

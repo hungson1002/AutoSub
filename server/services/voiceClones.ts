@@ -8,8 +8,8 @@ import { run, workdir } from './ffmpeg';
 export const VIENEU_VOICE_ROOT = path.join(workdir, 'voice-clones', 'vieneu');
 export const MAX_VOICE_REFERENCE_BYTES = 25 * 1024 * 1024;
 export const MIN_VOICE_REFERENCE_SECONDS = 3;
-export const VOICE_CLONE_SAMPLE_SECONDS = 10;
-export const VOICE_REFERENCE_VERSION = 4;
+export const VOICE_CLONE_SAMPLE_SECONDS = 8;
+export const VOICE_REFERENCE_VERSION = 5;
 export const VOICE_REFERENCE_SAMPLE_RATE = 48_000;
 export const VOICE_REFERENCE_FILTER = 'silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.10:start_threshold=-45dB,areverse';
 
@@ -22,6 +22,7 @@ export interface VoiceCloneProfile {
   sourceName: string;
   authorized: true;
   referenceVersion?: number;
+  sourceStartSeconds?: number;
 }
 
 const validProfileId = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
@@ -74,14 +75,16 @@ export async function resolveVoiceCloneReference(id: string) {
   return { profile, referencePath: path.join(directory, 'reference.wav') };
 }
 
-export async function createVoiceCloneProfile(input: { name: string; sourcePath: string; sourceName: string; authorized: boolean }) {
+export async function createVoiceCloneProfile(input: { name: string; sourcePath: string; sourceName: string; authorized: boolean; startSeconds?: number }) {
   if (input.authorized !== true) throw new ProviderError('Bạn phải xác nhận sở hữu giọng hoặc đã được người nói cho phép.', 400);
   const name = cleanProfileName(input.name);
+  const startSeconds = input.startSeconds ?? 0;
+  if (!Number.isFinite(startSeconds) || startSeconds < 0) throw new ProviderError('Vị trí bắt đầu mẫu giọng phải là số không âm.', 400);
   const sourceInfo = await stat(input.sourcePath).catch(() => undefined);
   if (!sourceInfo?.isFile()) throw new ProviderError('Thiếu file mẫu giọng.', 400);
   if (sourceInfo.size > MAX_VOICE_REFERENCE_BYTES) throw new ProviderError('File mẫu giọng tối đa 25 MB.', 413);
   const sourceDuration = await probeDurationSeconds(input.sourcePath);
-  if (sourceDuration < MIN_VOICE_REFERENCE_SECONDS) throw new ProviderError('Mẫu giọng phải dài ít nhất 3 giây.', 400);
+  if (sourceDuration - startSeconds < MIN_VOICE_REFERENCE_SECONDS) throw new ProviderError('Mẫu giọng phải dài ít nhất 3 giây.', 400);
   await mkdir(VIENEU_VOICE_ROOT, { recursive: true });
   const id = randomUUID();
   const staging = path.join(VIENEU_VOICE_ROOT, `.${id}.tmp`);
@@ -90,7 +93,7 @@ export async function createVoiceCloneProfile(input: { name: string; sourcePath:
   await mkdir(staging, { recursive: true });
   try {
     await run('ffmpeg', [
-      '-y', '-v', 'error', '-t', String(VOICE_CLONE_SAMPLE_SECONDS), '-i', input.sourcePath,
+      '-y', '-v', 'error', '-ss', String(startSeconds), '-t', String(VOICE_CLONE_SAMPLE_SECONDS), '-i', input.sourcePath,
       '-vn', '-filter:a', VOICE_REFERENCE_FILTER,
       '-ac', '1', '-ar', String(VOICE_REFERENCE_SAMPLE_RATE), '-c:a', 'pcm_s16le', referencePath,
     ]);
@@ -105,6 +108,7 @@ export async function createVoiceCloneProfile(input: { name: string; sourcePath:
       sourceName: path.basename(input.sourceName || 'voice-reference'),
       authorized: true,
       referenceVersion: VOICE_REFERENCE_VERSION,
+      sourceStartSeconds: startSeconds,
     };
     await writeFile(path.join(staging, 'profile.json'), JSON.stringify(profile, null, 2), 'utf8');
     await rename(staging, destination);

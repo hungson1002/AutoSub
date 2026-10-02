@@ -60,12 +60,14 @@ export async function voiceCloneRoutes(app: FastifyInstance) {
     await mkdir(UPLOAD_ROOT, { recursive: true });
     const temporary = path.join(UPLOAD_ROOT, `${randomUUID()}.upload`);
     let name = '';
+    let startSeconds = 0;
     let consent = false;
     let sourceName = 'voice-reference';
     let stored = false;
     try {
       for await (const part of request.parts()) {
         if (part.type === 'field') {
+          if (part.fieldname === 'startSeconds') startSeconds = Number(part.value);
           if (part.fieldname === 'name') name = String(part.value || '');
           if (part.fieldname === 'consent') consent = String(part.value || '').toLowerCase() === 'true';
           continue;
@@ -79,7 +81,7 @@ export async function voiceCloneRoutes(app: FastifyInstance) {
         stored = true;
       }
       if (!stored) throw new ProviderError('Hãy chọn file mẫu giọng 3–8 giây.', 400);
-      const profile = await createVoiceCloneProfile({ name, sourcePath: temporary, sourceName, authorized: consent });
+      const profile = await createVoiceCloneProfile({ name, sourcePath: temporary, sourceName, authorized: consent, startSeconds });
       return reply.code(201).send({ profile, voice: voiceProfileToVoice(profile) });
     } catch (error) {
       return routeError(reply, error);

@@ -5,6 +5,37 @@ let accountSyncTabId = null;
 let linkedAccountSyncTargetId = null;
 let lastAccountSignIn = { email: null, at: 0 };
 let flowSessionStatus = { status: 'unverified', email: null };
+const ACCOUNT_SYNC_STORAGE_KEY = 'flowLinkedAccountSyncTab';
+
+async function persistLinkedAccountSyncTab() {
+  if (accountSyncTabId === null) {
+    await chrome.storage.local.remove(ACCOUNT_SYNC_STORAGE_KEY).catch(() => {});
+    return;
+  }
+  await chrome.storage.local.set({
+    [ACCOUNT_SYNC_STORAGE_KEY]: {
+      tabId: accountSyncTabId,
+      ownerAccountId: linkedAccountSyncTargetId || null,
+      createdAt: Date.now(),
+    },
+  }).catch(() => {});
+}
+
+async function cleanupOrphanedLinkedAccountSyncTab() {
+  const stored = await chrome.storage.local.get(ACCOUNT_SYNC_STORAGE_KEY).catch(() => ({}));
+  const state = stored?.[ACCOUNT_SYNC_STORAGE_KEY];
+  const tabId = Number(state?.tabId);
+  if (Number.isInteger(tabId) && tabId > 0) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (tab?.url && /^(?:https:\/\/accounts\.google\.com\/|https:\/\/labs\.google\/)/i.test(tab.url)) {
+      await chrome.tabs.remove(tabId).catch(() => {});
+      console.info('[Flow Agent] Closed orphaned OAuth sync tab from previous service-worker lifetime:', tabId);
+    }
+  }
+  accountSyncTabId = null;
+  linkedAccountSyncTargetId = null;
+  await chrome.storage.local.remove(ACCOUNT_SYNC_STORAGE_KEY).catch(() => {});
+}
 
 function normalizeFlowEmail(value) {
   return typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())
@@ -39,11 +70,24 @@ async function fetchLabsSession() {
   return response.json();
 }
 
-async function openMatchingLabsSignIn(email, flowUrl, active = true) {
+async function openMatchingLabsSignIn(email, flowUrl, active = true, ownerAccountId = null) {
   // One normal OAuth navigation, not a retry loop or automated consent.
+  // A single browser profile has one Labs cookie session, so an OAuth tab may
+  // only belong to one linked account at a time. Never let a second refresh
+  // silently reuse/hijack the first account's in-flight sign-in tab.
   if (accountSyncTabId !== null) {
-    try { await chrome.tabs.get(accountSyncTabId); return; }
-    catch { accountSyncTabId = null; }
+    try {
+      await chrome.tabs.get(accountSyncTabId);
+      if (ownerAccountId && linkedAccountSyncTargetId && linkedAccountSyncTargetId !== ownerAccountId) {
+        throw new Error('LABS_SIGNIN_BUSY');
+      }
+      return;
+    } catch (error) {
+      if (error?.message === 'LABS_SIGNIN_BUSY') throw error;
+      accountSyncTabId = null;
+      linkedAccountSyncTargetId = null;
+      await persistLinkedAccountSyncTab();
+    }
   }
   if (lastAccountSignIn.email === email && Date.now() - lastAccountSignIn.at < 120000) return;
   lastAccountSignIn = { email, at: Date.now() };
@@ -70,6 +114,7 @@ async function openMatchingLabsSignIn(email, flowUrl, active = true) {
   // Allocate before navigating, so the callback tab cannot steal selection.
   const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
   accountSyncTabId = tab.id;
+  await persistLinkedAccountSyncTab();
   await chrome.tabs.update(tab.id, { url: destination.href, active });
 }
 
@@ -78,6 +123,7 @@ async function closeLinkedAccountSyncTab(accountId) {
   const syncId = accountSyncTabId;
   accountSyncTabId = null;
   linkedAccountSyncTargetId = null;
+  await persistLinkedAccountSyncTab();
   await chrome.tabs.remove(syncId).catch(() => {});
 }
 
@@ -120,8 +166,18 @@ async function refreshLinkedAccountSession(account, allowSignIn = false) {
     // Labs owns one cookie session per browser profile. Switch that session to
     // this Google account only long enough to obtain its access token, then keep
     // the token bound to the linked account object while moving to the next one.
+    // Do not overwrite another account's in-flight OAuth owner.
+    if (linkedAccountSyncTargetId && linkedAccountSyncTargetId !== account.id) {
+      return { status: 'sync_busy', email };
+    }
     linkedAccountSyncTargetId = account.id;
-    await openMatchingLabsSignIn(email, account.flowUrl, false);
+    try {
+      await openMatchingLabsSignIn(email, account.flowUrl, false, account.id);
+    } catch (error) {
+      if (error?.message === 'LABS_SIGNIN_BUSY') return { status: 'sync_busy', email };
+      linkedAccountSyncTargetId = null;
+      throw error;
+    }
     return { status: 'sign_in_started', email };
   } catch (error) {
     return {
@@ -161,6 +217,8 @@ async function refreshSelectedAccountSession(allowSignIn = false) {
         if (accountSyncTabId !== null) {
           const syncId = accountSyncTabId;
           accountSyncTabId = null;
+          linkedAccountSyncTargetId = null;
+          await persistLinkedAccountSyncTab();
           // Only close the tab this sync created, after successful verification.
           await chrome.tabs.remove(syncId).catch(() => {});
         }

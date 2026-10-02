@@ -6,7 +6,7 @@ import { addFlowWorkerAccount, listFlowWorkerAccounts, openFlowBrowser, openFlow
 import { composeExistingAiVideoJob } from '../services/aiVideoJobs';
 import { listFilmVideoAdapters } from '../services/filmVideoAdapter';
 import { configureFilmReviewer, type FilmReviewer } from '../services/filmContentReview';
-import { ensureIsolatedFlowWorker, listIsolatedFlowWorkers, restartIsolatedFlowWorker } from '../services/flowWorkerSupervisor';
+import { ensureIsolatedFlowWorker, listIsolatedFlowWorkers, restartIsolatedFlowWorker, syncIsolatedFlowWorkers } from '../services/flowWorkerSupervisor';
 export async function aiVideoRoutes(app: FastifyInstance) {
   app.post('/api/ai-video/jobs/:id/reviewer', async (request, reply) => {
     const id = String((request.params as { id: string }).id);
@@ -20,10 +20,11 @@ export async function aiVideoRoutes(app: FastifyInstance) {
   app.get('/api/ai-video/flow-agent/status', async () => flowAgentStatus());
   app.post('/api/ai-video/flow-agent/refresh', async (_request, reply) => { try { return await refreshGoogleFlowSession(); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không thể đồng bộ lại tài khoản Google Flow.' }); } });
   app.post('/api/ai-video/flow-agent/open', async (_request, reply) => { try { const opened = await openFlowBrowser(); return { ...await flowAgentStatus(), openedUrl: opened.url }; } catch (error) { return reply.code(500).send({ error: error instanceof Error ? error.message : 'Không thể mở Google Flow cùng extension Flow Agent.' }); } });
-  app.get('/api/ai-video/flow-workers', async (_request, reply) => { try { return { workers: await listIsolatedFlowWorkers() }; } catch (error) { return reply.code(500).send({ error: error instanceof Error ? error.message : 'Không thể đọc Flow worker pool.' }); } });
+  app.get('/api/ai-video/flow-workers', async (_request, reply) => { try { const workers = await listIsolatedFlowWorkers(); return { workers: workers.map((worker) => ({ ...worker, imageReady: worker.extensionConnected && worker.tokenReady })) }; } catch (error) { return reply.code(500).send({ error: error instanceof Error ? error.message : 'Không thể đọc Flow worker pool.' }); } });
   app.post('/api/ai-video/flow-workers/ensure', async (request, reply) => {
     try {
-      const body = request.body as { clientId?: string; workerPort?: number };
+      const body = request.body as { clientId?: string; workerPort?: number; activeClientIds?: string[] };
+      if (Array.isArray(body?.activeClientIds)) await syncIsolatedFlowWorkers(body.activeClientIds);
       return { worker: await ensureIsolatedFlowWorker(String(body?.clientId || ''), Number(body?.workerPort) || undefined) };
     } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Không thể tạo Flow worker.' }); }
   });

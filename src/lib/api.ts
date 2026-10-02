@@ -1,3 +1,4 @@
+import { deleteStorageInBatches, type StorageDeleteResult } from './storageDeletion';
 import type {
   AIModel,
   AiVideoScene,
@@ -23,13 +24,14 @@ import type {
 } from "../types";
 import { cuesToAss } from "./subtitles";
 import type { AnimationAsset, AnimationProject } from "../../shared/animationStudio";
+import type { CanvasStudioProject } from "../../shared/canvasAnimationStudio";
 
 // Large media bypasses Vite's development proxy. JSON requests remain relative.
 const MEDIA_BACKEND_ORIGIN = "http://127.0.0.1:8787";
 export const MAX_BROWSER_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 
 export async function animationProjectRenderCacheKey(project: AnimationProject, showSubtitles: boolean) {
-  const renderState = { ...project, createdAt: "", updatedAt: "", assets: project.assets.map((asset) => ({ ...asset, createdAt: "" })), showSubtitles, engine: "remotion-v1" };
+  const renderState = { ...project, createdAt: "", updatedAt: "", assets: project.assets.map((asset) => ({ ...asset, createdAt: "" })), showSubtitles, engine: "hybrid-remotion-v2" };
   const encoded = new TextEncoder().encode(JSON.stringify(renderState));
   const digest = await crypto.subtle.digest("SHA-256", encoded);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -45,7 +47,7 @@ export interface TranslationMemoryItem {
   source: string;
   translation: string;
 }
-type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent'; referenceUploadId?: string; referenceAssetId?: string; characterAppearanceLock?: string };
+type AnimationAssetGeneration = { provider?: AIProvider; model?: string; generator?: 'flow-agent'; referenceUploadId?: string; referenceAssetId?: string; referenceUploadIds?: string[]; supportingCastReferenceUploadIds?: string[]; characterAppearanceLock?: string };
 export interface AnimationDirectorJobStatus { id: string; projectId: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'; stage: string; error?: string; hasResult?: boolean; progressPercent?: number; progressLabel?: string; progressCurrent?: number; progressTotal?: number }
 export interface AnimationDirectorInput { brief: string; project: AnimationProject; provider: AIProvider; model: string; targetDurationSeconds?: number; narration?: { provider: AIProvider; model: string; voice: string; speed?: number }; assetGeneration?: AnimationAssetGeneration }
 export interface AnimationProjectSummary { id: string; name: string; width: number; height: number; fps: number; sceneCount: number; createdAt: string; updatedAt: string }
@@ -206,10 +208,10 @@ export function buildRequestInit(init?: RequestInit): RequestInit {
   return { ...init, headers };
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function request<T>(url: string, init?: RequestInit, acceptedStatus?: number): Promise<T> {
   const response = await fetch(url, buildRequestInit(init));
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  if (!response.ok && response.status !== acceptedStatus) {
     const genericFastifyError =
       data.error === "Bad Request" || data.error === "Internal Server Error";
     const rawMessage =
@@ -271,6 +273,56 @@ function decodeBase64Json<T>(value: string | null): T | undefined {
 }
 
 export const api = {
+  generateCanvasAnimationVideo: (input: {
+    brief: string;
+    provider: AIProvider;
+    model: string;
+    narration: { provider: AIProvider; model: string; voice: string; speed?: number };
+    audioProduction?: { enabled?: boolean; autoSound?: boolean };
+    targetDurationSeconds?: number;
+    visualMode?: 'procedural' | 'ai-fallback';
+    assetGeneration?: {
+      enabled: true;
+      quality: 'professional';
+      provider?: AIProvider;
+      model?: string;
+      generator?: 'flow-agent';
+      fallback?: { provider: AIProvider; model: string };
+    };
+  }) => (async () => {
+    const response = await fetch(`${MEDIA_BACKEND_ORIGIN}/api/canvas-animation-studio/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) await readError(response, 'Không thể tạo video Animation Studio.');
+    return response.json() as Promise<CanvasStudioProject>;
+  })(),
+  buildCanvasAudio: async (input: {project:CanvasStudioProject;narration:{provider:AIProvider;model:string;voice:string;speed?:number};autoSound?:boolean}) => {
+    const response=await fetch(`${MEDIA_BACKEND_ORIGIN}/api/canvas-animation-studio/audio`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)});
+    if(!response.ok)await readError(response,'Không thể dựng âm thanh cảnh.');
+    return response.json() as Promise<CanvasStudioProject>;
+  },
+  renderCanvasAnimationProject: async (project: CanvasStudioProject, onProgress?: (progress: number) => void) => {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ ...project, createdAt: '', updatedAt: '', engine: 'canvas-remotion-v4-lipsync-gated' })));
+    const cacheKey = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+    const queued = await fetch(`/api/canvas-animation-studio/projects/${encodeURIComponent(project.id)}/render-jobs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project, cacheKey }) });
+    if (!queued.ok) { const body = await queued.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || 'Không thể xếp render Canvas video.'); }
+    const initial = await queued.json() as { id: string };
+    let job: { status: string; progress?: number; error?: string } = { status: 'queued', progress: 0 };
+    onProgress?.(0);
+    for (let attempt = 0; attempt < 1800; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`);
+      onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0)));
+      if (job.status === 'completed' || job.status === 'failed') break;
+    }
+    if (job.status !== 'completed') throw new Error(job.error || 'Render Canvas quá thời gian chờ.');
+    onProgress?.(100);
+    const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`);
+    if (!response.ok) throw new Error('Không tải được Canvas video đã render.');
+    return response.blob();
+  },
   douyinTrends: () => request<{ items: Array<{ topic: string; rank: number; heat: number | null }>; fetchedAt: string }>('/api/douyin/trends'),
   assessDouyinTopic: (input: { topic: string; provider: AIProvider; model: string; items: Array<{ id: string; title: string }> }, signal?: AbortSignal) => request<{ items: Array<{ id: string; verdict: 'match' | 'uncertain' | 'off-topic'; reason: string }> }>('/api/douyin/relevance', { method: 'POST', body: JSON.stringify(input), signal }),
   runDouyinTool: (input: { operation: string; params: Record<string, string>; cursor: string; confirmed?: boolean; requestId?: string }) => request<{ data: unknown; write: boolean }>('/api/douyin/tools', { method: 'POST', body: JSON.stringify(input) }),
@@ -279,7 +331,7 @@ export const api = {
   deleteDouyinCookie: () => request<{ saved: boolean; environment: boolean }>('/api/douyin/search-cookie', { method: 'DELETE' }),
   searchDouyin: (input: { keyword: string; sort: string; publishTime: string; cookie?: string; offset?: number; count?: number; searchId?: string; filterDuration?: string; searchRange?: string; exactKeyword?: boolean; excludeKeywords?: string }) => request<{ warning: string; hasMore: boolean; nextOffset: number; searchId: string; items: Array<{ id: string; title: string; author: string; url: string; coverUrl?: string; duration: number; likes: number; comments: number; shares: number; publishedAt: number; views: number | null }> }>('/api/douyin/search', { method: 'POST', body: JSON.stringify(input) }),
   inspectStorage: (signal?: AbortSignal) => request<StorageSnapshot>('/api/storage', { signal }),
-  deleteStorageItems: (items: Array<Pick<StorageItem, 'categoryId' | 'name'>>) => request<{ deletedCount: number; freedBytes: number; errors: Array<{ categoryId: string; name: string; error: string }> }>('/api/storage/delete', { method: 'POST', body: JSON.stringify({ items }) }),
+  deleteStorageItems: (items: Array<Pick<StorageItem, 'categoryId' | 'name'>>, onProgress?: (processed: number, total: number) => void) => deleteStorageInBatches(items, batch => request<StorageDeleteResult>('/api/storage/delete', { method: 'POST', body: JSON.stringify({ items: batch }) }, 409), onProgress),
   createAnimationProject: (input: { name: string; width: number; height: number; fps: number }) =>
     request<AnimationProject>("/api/animation-studio/projects", { method: "POST", body: JSON.stringify(input) }),
   listAnimationProjects: () => request<AnimationProjectSummary[]>("/api/animation-studio/projects"),
@@ -320,7 +372,7 @@ export const api = {
     for (let attempt = 0; attempt < 1800; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0))); if (job.status === "completed" || job.status === "failed") break; }
     if (job.status !== "completed") throw new Error(job.error || "Render Remotion quá thời gian chờ."); onProgress?.(100); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video Remotion."); return response.blob();
   },
-  listAnimationRenderJobs: () => request<Array<{ id: string; projectId: string; engine?: "browser-recording" | "remotion"; cacheKey?: string; status: "queued" | "rendering" | "completed" | "failed"; progress: number; cached?: boolean; error?: string; createdAt: string }>>("/api/animation-studio/render-jobs"),
+  listAnimationRenderJobs: () => request<Array<{ id: string; projectId: string; engine?: "browser-recording" | "remotion" | "canvas-remotion"; cacheKey?: string; status: "queued" | "rendering" | "completed" | "failed"; progress: number; cached?: boolean; error?: string; createdAt: string }>>("/api/animation-studio/render-jobs"),
   listAnimationAssets: (query = "") => request<AnimationAsset[]>(`/api/animation-studio/assets?q=${encodeURIComponent(query)}`),
   registerAnimationAsset: (asset: AnimationAsset) => request<AnimationAsset>("/api/animation-studio/assets", { method: "POST", body: JSON.stringify(asset) }),
   updateAnimationAsset: (id: string, change: Partial<Pick<AnimationAsset, "name" | "tags" | "style" | "animations">>) => request<AnimationAsset>(`/api/animation-studio/assets/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(change) }),
@@ -366,10 +418,12 @@ export const api = {
     file: File,
     consent: boolean,
     signal?: AbortSignal,
+    startSeconds = 0,
   ) => {
     const form = new FormData();
     form.append("name", name);
     form.append("consent", String(consent));
+    form.append("startSeconds", String(startSeconds));
     form.append("file", file, file.name);
     const response = await fetch(
       `${MEDIA_BACKEND_ORIGIN}/api/voice-clones/vieneu`,
@@ -980,12 +1034,12 @@ export const api = {
   getAiVideoAdapters: () => request<Array<{ id: string; label: string; models: string[] }>>('/api/ai-video/video-adapters'),
   configureFilmReviewer: (id: string, vision?: { provider: AIProvider; model: string }) => request<{ ok: boolean }>(`/api/ai-video/jobs/${encodeURIComponent(id)}/reviewer`, { method: 'POST', body: JSON.stringify({ vision }) }),
   createAiVideoJob: (input: { brief: string; durationSeconds: number; model: FilmVideoModel; imageModel?: string; aspectRatio: '9:16' | '16:9'; directionMode?: 'cinematic' | 'documentary' | 'commercial' | 'social-realism'; workflowMode?: 'review-first' | 'direct'; automationMode?: 'automatic' | 'manual'; characterReferenceUploadId?: string; script: { provider: AIProvider; model: string } }) => request<AiVideoJobStatus>('/api/ai-video/jobs', { method: 'POST', body: JSON.stringify(input) }),
-  flowAgentStatus: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/status'),
+  flowAgentStatus: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string; imagePool?: { workerAccounts?: number; authenticatedAccounts?: number; active?: number; cap?: number } }>('/api/ai-video/flow-agent/status'),
   ima2GptImageStatus: () => request<{ installed: boolean; running: boolean; connected: boolean; authStatus: string; models: string[]; modelChoices?: string[]; version?: string }>('/api/gpt-image/status'),
   startIma2GptLogin: () => request<{ alreadyConnected?: boolean; status?: string; sessionId?: string; userCode?: string; verificationUrl?: string; expiresIn?: number }>('/api/gpt-image/connect', { method: 'POST', body: '{}' }),
   pollIma2GptLogin: (sessionId: string) => request<{ status: 'pending' | 'complete' | 'ready' | 'expired' | 'error'; authStatus?: string; error?: string }>(`/api/gpt-image/connect/${encodeURIComponent(sessionId)}`),
-  refreshFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/refresh', { method: 'POST' }),
-  openFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string }>('/api/ai-video/flow-agent/open', { method: 'POST' }),
+  refreshFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string; imagePool?: { workerAccounts?: number; authenticatedAccounts?: number; active?: number; cap?: number } }>('/api/ai-video/flow-agent/refresh', { method: 'POST' }),
+  openFlowAgent: () => request<{ installed: boolean; connected: boolean; extensionConnected: boolean; hasFlowKey: boolean; status: string; transport: string; url: string; error?: string; imagePool?: { workerAccounts?: number; authenticatedAccounts?: number; active?: number; cap?: number } }>('/api/ai-video/flow-agent/open', { method: 'POST' }),
   getAiVideoJob: (id: string, signal?: AbortSignal) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}`, { signal }),
   cancelAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
   composeAiVideoJob: (id: string) => request<AiVideoJobStatus>(`/api/ai-video/jobs/${encodeURIComponent(id)}/compose`, { method: 'POST', body: '{}' }),

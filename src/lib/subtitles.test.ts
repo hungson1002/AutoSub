@@ -20,12 +20,12 @@ test('ASS export only applies the text outline in outline mode', () => {
 
   assert.match(boxed, /Style: Box,.*?,1,0,0,2,154,154,108,1/);
   assert.match(boxed, /\\p1\\bord0\\shad0/);
-  assert.match(outlined, /Style: Outline,.*?,1,10\.7,0,2,154,154,108,1/);
+  assert.match(outlined, /Style: Outline,.*?,1,8\.8,0,2,154,154,108,1/);
 });
 
 test('per-cue outline width matches the value shown in preview', () => {
   const ass = cuesToAss([{ ...cue, sourceKind: 'onscreen-text', styleOverrides: { outlineWidth: 6 } }], { ...defaultStyle, background: 'outline', outlineWidth: 2 });
-  assert.match(ass, /\\bord8}/);
+  assert.match(ass, /\\bord6.6}/);
 });
 
 test('ASS boxed subtitles preserve configurable horizontal and vertical padding', () => {
@@ -62,22 +62,22 @@ test('ASS export preserves an individual cue canvas position', () => {
 
 test('subtitle cues always use the shared font and position', () => {
   const ass = cuesToAss([{ ...cue, sourceKind: 'subtitle', screenPosition: { xPercent: 25, yPercent: 40 }, styleOverrides: { fontFamily: 'Courier New', fontSize: 70 } }], { ...defaultStyle, fontFamily: 'Arial', fontSize: 34, position: 'bottom' });
-  assert.match(ass, /\\fnArial\\fs45\.3/);
-  assert.match(ass, /\\an5\\pos\(960,886\)/);
+  assert.match(ass, /\\fnArial\\fs37\.4/);
+  assert.match(ass, /\\an2\\pos\(960,886\)/);
   assert.doesNotMatch(ass, /Courier New|pos\(480,432\)/);
 });
 
 test('ASS export converts CSS font pixels and uses the same default canvas position as preview', () => {
   const ass = cuesToAss([cue], { ...defaultStyle, fontSize: 48, position: 'bottom' });
-  assert.equal(ASS_CSS_PIXEL_SCALE, 4 / 3);
-  assert.match(ass, /\\fs64/);
-  assert.match(ass, /\\an5\\pos\(960,886\)/);
+  assert.equal(ASS_CSS_PIXEL_SCALE, 1.1);
+  assert.match(ass, /\\fs52\.8/);
+  assert.match(ass, /\\an2\\pos\(960,886\)/);
 });
 
 test('ASS export preserves underline and letter spacing from the font controls', () => {
   const ass = cuesToAss([cue], { ...defaultStyle, underline: true, letterSpacing: 3 });
-  assert.match(ass, /\\u1\\fsp4\\bord/);
-  assert.match(ass, /,-1,0,100,100,4,0,1,2\.7,0,2,154/);
+  assert.match(ass, /\\u1\\fsp3\.3\\bord/);
+  assert.match(ass, /,-1,0,100,100,3\.3,0,1,2\.2,0,2,154/);
 });
 
 test('repairs persisted OCR cues that incorrectly share one video-long end time', () => {
@@ -122,7 +122,7 @@ test('ASS export does not enable bold or italic for persisted string flags', () 
     italic: 'false' as unknown as boolean,
   });
 
-  assert.match(ass, /,0,0,0,0,100,100,0,0,1,2\.7,0,2,154/);
+  assert.match(ass, /,0,0,0,0,100,100,0,0,1,2\.2,0,2,154/);
 });
 
 test('ASS both-content mode does not duplicate identical source and translation', () => {

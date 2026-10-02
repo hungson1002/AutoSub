@@ -6,8 +6,27 @@ import { writeJsonFileResilient } from './resilientFileWrite';
 
 // Persist only caller-supplied non-secret identity and the accepted plan, never
 // provider credentials. Failed/unknown provider operations are not retried here.
+//
+// Bump this only when storyboard semantics change enough that old accepted
+// storyboard/image checkpoints would violate the new directing contract.
+// Deliberately scope it to long AI-Director identities so job fingerprints,
+// sprite checkpoints and unrelated caches remain resumable/stable.
+export const ANIMATION_STORYBOARD_POLICY_EPOCH = 'reference-film-2026-09-27-v4-style-profile-calibration';
+
+function isLongDirectorCheckpointIdentity(identity: unknown) {
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return false;
+  const value = identity as Record<string, unknown>;
+  return typeof value.projectId === 'string'
+    && typeof value.brief === 'string'
+    && typeof value.targetDurationSeconds === 'number'
+    && typeof value.mode === 'string';
+}
+
 export function animationCheckpointKey(identity: unknown) {
-  return createHash('sha256').update(JSON.stringify(identity)).digest('hex');
+  const payload = isLongDirectorCheckpointIdentity(identity)
+    ? { storyboardPolicyEpoch: ANIMATION_STORYBOARD_POLICY_EPOCH, identity }
+    : identity;
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
 export async function loadAnimationCheckpoint<T>(key: string): Promise<T | undefined> {

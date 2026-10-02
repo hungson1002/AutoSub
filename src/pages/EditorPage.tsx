@@ -735,12 +735,10 @@ export function EditorPage({
       setSelectedId(id);
       const cue = cues.find((item) => item.id === id);
       if (cue) {
-        if (cue.sourceKind === "onscreen-text") {
-          // Text objects are edited at the current playhead. Seeking back to
-          // their start on every selection made canvas/timeline drag and even
-          // inspector edits appear to jump backwards.
-          setPanel("style");
-        } else {
+        setPanel("style");
+        // Authored text stays at the current playhead; subtitle selection
+        // still navigates to its cue. Editing either kind never requests a seek.
+        if (cue.sourceKind !== "onscreen-text") {
           currentTimeRef.current = cue.startMs;
           setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: cue.startMs });
         }
@@ -751,7 +749,7 @@ export function EditorPage({
   const focusCue = useCallback((id: string) => {
     setSelectedId(id);
     const cue = cues.find((item) => item.id === id);
-    if (cue?.sourceKind === "onscreen-text") setPanel("style");
+    if (cue) setPanel("style");
   }, [cues]);
   const deleteCue = useCallback(
     (id: string) => {
@@ -2099,10 +2097,10 @@ export function EditorPage({
                 <span aria-hidden="true">×</span>
               </button>
             </div>
-            {editingTextCue && selected && textCuePosition && (
+            {selected && (
               <section className="text-inspector" aria-label="Chỉnh văn bản đã chọn">
                 <div className="text-inspector-status">
-                  <span>TEXT #{String(selected.index).padStart(2, "0")}</span>
+                  <span>{editingTextCue ? "TEXT" : "PHỤ ĐỀ"} #{String(selected.index).padStart(2, "0")}</span>
                   <small>Chỉ áp dụng cho cue đang chọn</small>
                 </div>
                 <label className="field text-content-field">
@@ -2113,7 +2111,7 @@ export function EditorPage({
                   <span>Bản dịch <small>để trống nếu không cần</small></span>
                   <textarea value={selected.translatedText} rows={2} placeholder="Chưa có bản dịch" onChange={(event) => changeCue(selected.id, { translatedText: event.target.value })} />
                 </label>
-                <div className="text-position-editor">
+                {editingTextCue && textCuePosition && <div className="text-position-editor">
                   <div className="text-position-heading"><span>Vị trí trên khung hình</span><b>X {Math.round(textCuePosition.xPercent)}% · Y {Math.round(textCuePosition.yPercent)}%</b></div>
                   <div className="text-position-body">
                     <div className="position-pad" aria-label="Vị trí nhanh">
@@ -2127,7 +2125,7 @@ export function EditorPage({
                     </div>
                   </div>
                   <small>Kéo trực tiếp chữ trên video để đặt chính xác hơn.</small>
-                </div>
+                </div>}
               </section>
             )}
             <SubtitleStylePanel

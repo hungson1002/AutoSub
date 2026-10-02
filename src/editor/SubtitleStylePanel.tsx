@@ -5,6 +5,7 @@ import { RangeInput } from '../components/RangeInput';
 import { subtitlePresets } from './subtitlePresets';
 import type { UploadedSubtitleFont } from '../lib/fontLibrary';
 import { FontLibraryPicker } from './FontLibraryPicker';
+import { subtitleAnchor } from '../lib/subtitleAnchor';
 
 type ColorKey = 'textColor' | 'outlineColor' | 'backgroundColor' | 'boxBorderColor';
 type SubtitleStylePanelProps = {
@@ -25,6 +26,13 @@ const colorLooks = [
 
 export function SubtitleStylePanel({ style, onChange, uploadedFonts = [], onFontUpload, mode = 'subtitle' }: SubtitleStylePanelProps) {
   const textMode = mode === 'text';
+  const positionY = style.position === 'top' ? 12 : style.position === 'middle' ? 50 : style.position === 'custom' ? (style.customY ?? 82) : 82;
+  const edgeAnchor = subtitleAnchor(style, 50, positionY).vertical;
+  const edgeGap = edgeAnchor === 1 ? 100 - positionY : positionY;
+  const changeEdgeGap = (value: number) => {
+    const gap = Math.max(0, Math.min(33, Number.isFinite(value) ? value : 0));
+    onChange({ position: 'custom', customX: style.customX ?? 50, customY: edgeAnchor === 1 ? 100 - gap : gap });
+  };
   const colorTimerRef = useRef<number | undefined>(undefined);
   const pendingColorPatchRef = useRef<Partial<SubtitleStyle>>({});
   const onChangeRef = useRef(onChange);

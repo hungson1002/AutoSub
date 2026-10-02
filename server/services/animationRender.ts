@@ -5,12 +5,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bundle } from '@remotion/bundler';
-import { renderMedia, selectComposition } from '@remotion/renderer';
+import { renderMedia, renderStill, selectComposition } from '@remotion/renderer';
 import type { AnimationAsset, AnimationProject, CompositeScene, SceneLayer } from '../../shared/animationStudio';
 import { assertAnimationProject, normalizeAnimationProjectForRender } from '../../shared/animationStudio';
-import { renderDurationInFrames } from '../../src/remotion/timeline';
+import type { CanvasStudioProject } from '../../shared/canvasAnimationStudio';
+import { buildRenderTimeline, renderDurationInFrames } from '../../src/remotion/timeline';
 import { preferredH264Encoder, run, workdir } from './ffmpeg';
 import { getAnimationAssetFile } from './animationAssets';
+import {canvasSpeechActivity,canvasSpeechEnvelope} from './canvasSpeechActivity';
+import {synchronizeCanvasPerformance} from '../../shared/canvasPerformance';
+import {animationRenderSourceSignature} from './animationRenderSource';
+import {renderCanvasFast} from './canvasFastRender';
+import {compileCanvasProjectLayout} from '../../shared/canvasLayoutCompiler';
 import { resolveUpload } from './uploads';
 
 const x264Presets = ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow', 'placebo'] as const;
@@ -91,6 +97,7 @@ export async function transcodeAnimationRecording(projectId: string, recording: 
 }
 
 let remotionBundle: Promise<string> | undefined;
+let remotionBundleSignature:string|undefined;
 
 function resolveBrowserExecutable() {
   const candidates = [
@@ -103,9 +110,12 @@ function resolveBrowserExecutable() {
   return candidates.find((candidate) => existsSync(candidate));
 }
 
-async function getRemotionBundle() {
-  if (!remotionBundle) {
-    const entryPoint = fileURLToPath(new URL('../../src/remotion/index.tsx', import.meta.url));
+async function getRemotionBundle(sourceSignature?:string) {
+  const entryPoint = fileURLToPath(new URL('../../src/remotion/index.tsx', import.meta.url));
+  const root=path.resolve(path.dirname(entryPoint),'../..');
+  const signature=sourceSignature??await animationRenderSourceSignature(root);
+  if (!remotionBundle || remotionBundleSignature!==signature) {
+    remotionBundleSignature=signature;
     remotionBundle = bundle(entryPoint, undefined, { rootDir: path.resolve(path.dirname(entryPoint), '../..'), publicDir: null })
       .catch((error) => { remotionBundle = undefined; throw error; });
   }
@@ -214,6 +224,164 @@ function sceneImageWindows(scene: CompositeScene, layers: SceneLayer[]) {
   });
 }
 
+export function isStaticImageOnlyProject(project: AnimationProject, showSubtitles = false) {
+  if (showSubtitles) return false;
+  return project.scenes.every((scene) => {
+    if (scene.renderMode !== 'composite') return false;
+    const transition = scene.transition || project.transitionPreset || { type: 'cut' as const, durationMs: 0 };
+    if (transition.type !== 'cut' || transition.durationMs !== 0) return false;
+    if (scene.commands.length || scene.camera.commands.length) return false;
+    const visibleLayers = scene.layers.filter((layer) => layer.visible);
+    return visibleLayers.length > 0 && visibleLayers.every((layer) => layer.type === 'image' || layer.type === 'audio');
+  });
+}
+
+
+export interface StaticHybridFrame {
+  frame: number;
+  startFrame: number;
+  durationInFrames: number;
+  startMs: number;
+  durationMs: number;
+}
+
+export function isStaticHybridProject(project: AnimationProject, showSubtitles = false) {
+  if (showSubtitles) return false;
+  const allowedLayerTypes = new Set(['image', 'audio', 'text', 'shape', 'diagram', 'chart']);
+  return project.scenes.every((scene) => {
+    if (scene.renderMode !== 'composite') return false;
+    const transition = scene.transition || project.transitionPreset || { type: 'cut' as const, durationMs: 0 };
+    if (transition.type !== 'cut' || transition.durationMs !== 0) return false;
+    if (scene.camera.commands.length) return false;
+    if (!scene.layers.filter((layer) => layer.visible).every((layer) => allowedLayerTypes.has(layer.type))) return false;
+    return scene.commands.every((command) =>
+      (command.type === 'FADE_IN' || command.type === 'FADE_OUT') && command.durationMs <= 2
+    );
+  });
+}
+
+export function buildStaticHybridFramePlan(project: AnimationProject): StaticHybridFrame[] {
+  const fps = Math.max(1, project.fps);
+  const frameMs = 1000 / fps;
+  const timeline = buildRenderTimeline(project);
+  const beatsByScene = new Map<string, Array<{ startMs?: number; endMs?: number }>>();
+  for (const beat of project.productionPlan?.beats || []) {
+    beatsByScene.set(beat.sceneId, [...(beatsByScene.get(beat.sceneId) || []), beat]);
+  }
+  const plan: StaticHybridFrame[] = [];
+  for (const range of timeline) {
+    if (range.scene.renderMode !== 'composite') continue;
+    const changeFrames = new Set<number>([0, range.durationInFrames]);
+    const toLocalFrame = (ms: number) => Math.max(0, Math.min(range.durationInFrames, Math.round(ms / 1000 * fps)));
+
+    for (const layer of range.scene.layers) {
+      if (!layer.visible || layer.type === 'audio') continue;
+      if (layer.startMs !== undefined) changeFrames.add(toLocalFrame(layer.startMs));
+      if (layer.startMs !== undefined && layer.durationMs !== undefined) changeFrames.add(toLocalFrame(layer.startMs + layer.durationMs));
+    }
+    for (const command of range.scene.commands) {
+      if (command.type === 'FADE_IN' || command.type === 'FADE_OUT') changeFrames.add(toLocalFrame(command.startMs));
+    }
+    for (const beat of beatsByScene.get(range.scene.id) || []) {
+      if (beat.startMs !== undefined) changeFrames.add(toLocalFrame(beat.startMs));
+      if (beat.endMs !== undefined) changeFrames.add(toLocalFrame(beat.endMs));
+    }
+
+    const boundaries = [...changeFrames].filter((frame) => frame >= 0 && frame <= range.durationInFrames).sort((a, b) => a - b);
+    for (let index = 0; index < boundaries.length - 1; index += 1) {
+      const start = boundaries[index];
+      const end = boundaries[index + 1];
+      if (end <= start) continue;
+      const representativeLocalFrame = Math.min(range.durationInFrames - 1, Math.floor((start + end - 1) / 2));
+      const startFrame = range.from + start;
+      const durationInFrames = end - start;
+      plan.push({
+        frame: range.from + representativeLocalFrame,
+        startFrame,
+        durationInFrames,
+        startMs: startFrame * frameMs,
+        durationMs: durationInFrames * frameMs,
+      });
+    }
+  }
+  return plan;
+}
+
+async function collectStaticAudio(project: AnimationProject): Promise<StaticAudio[]> {
+  const audio: StaticAudio[] = [];
+  const fps = Math.max(1, project.fps);
+  for (const range of buildRenderTimeline(project)) {
+    const scene = range.scene;
+    if (scene.renderMode !== 'composite') continue;
+    const sceneStartMs = range.from / fps * 1000;
+    const sceneDurationMs = range.durationInFrames / fps * 1000;
+    for (const layer of scene.layers.filter((candidate) => candidate.visible && candidate.type === 'audio' && candidate.assetId)) {
+      const asset = project.assets.find((candidate) => candidate.id === layer.assetId);
+      if (!asset) continue;
+      const file = await resolveLocalAnimationAsset(asset);
+      if (!file) continue;
+      const localStartMs = Math.max(0, layer.startMs || 0);
+      const startMs = sceneStartMs + localStartMs;
+      const durationMs = layer.durationMs ? Math.max(1, Math.min(layer.durationMs, sceneDurationMs - localStartMs)) : undefined;
+      const isMusic = asset.tags.some((tag) => /^(?:music|bgm|nhac)$/i.test(tag));
+      const hasVoiceover = scene.layers.some((candidate) => candidate.type === 'audio' && candidate.visible && candidate.name.startsWith('Voiceover'));
+      audio.push({ path: file, startMs, durationMs, volume: Math.max(0, Math.min(1, (layer.volume ?? layer.transform.opacity) * (isMusic && hasVoiceover ? .3 : 1))) });
+    }
+  }
+  return audio;
+}
+
+async function renderStaticHybridProject(project: AnimationProject, showSubtitles: boolean, output: string, onProgress?: (progress: number) => void) {
+  const framePlan = buildStaticHybridFramePlan(project);
+  if (!framePlan.length) throw new Error('Project hybrid tĩnh không có trạng thái visual để xuất.');
+  const serveUrl = await getRemotionBundle();
+  const executable = resolveBrowserExecutable();
+  const inputProps = { project, showSubtitles, assetOrigin: `http://127.0.0.1:${Number(process.env.AUTOSUB_PORT || 8787)}` };
+  const browserOptions = executable ? { browserExecutable: executable } : {};
+  const composition = await selectComposition({ serveUrl, id: 'AutoSubAnimation', inputProps, logLevel: 'warn', timeoutInMilliseconds: 120_000, ...browserOptions });
+  const temporaryDirectory = path.join(path.dirname(output), `${randomUUID()}.hybrid-stills`);
+  await mkdir(temporaryDirectory, { recursive: true });
+  try {
+    const visuals = new Array<StaticVisual>(framePlan.length);
+    const configuredStillConcurrency = Number(process.env.AUTOSUB_ANIMATION_STILL_CONCURRENCY);
+    const stillConcurrency = Math.max(1, Math.min(4, Number.isFinite(configuredStillConcurrency) && configuredStillConcurrency > 0
+      ? Math.round(configuredStillConcurrency)
+      : Math.min(3, typeof os.availableParallelism === 'function' ? os.availableParallelism() : 3)));
+    let stillCursor = 0;
+    let stillCompleted = 0;
+    const renderStillWorker = async () => {
+      while (stillCursor < framePlan.length) {
+        const index = stillCursor++;
+        const item = framePlan[index];
+        const still = path.join(temporaryDirectory, `${String(index).padStart(4, '0')}.png`);
+        await renderStill({
+          serveUrl,
+          composition,
+          inputProps,
+          frame: item.frame,
+          output: still,
+          imageFormat: 'png',
+          logLevel: 'warn',
+          timeoutInMilliseconds: 120_000,
+          ...browserOptions,
+        });
+        visuals[index] = { path: still, startMs: item.startMs, durationMs: item.durationMs };
+        stillCompleted += 1;
+        onProgress?.(.05 + .35 * stillCompleted / framePlan.length);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(stillConcurrency, framePlan.length) }, () => renderStillWorker()));
+    const timeline: StaticImageTimeline = {
+      visuals,
+      audio: await collectStaticAudio(project),
+      durationMs: renderDurationInFrames(project) / Math.max(1, project.fps) * 1000,
+    };
+    await renderStaticImageProjectFast(project, timeline, output, (progress) => onProgress?.(.4 + .6 * progress));
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
 async function buildStaticImageTimeline(project: AnimationProject): Promise<StaticImageTimeline | undefined> {
   const visuals: StaticVisual[] = [];
   const audio: StaticAudio[] = [];
@@ -292,7 +460,7 @@ async function renderStaticImageProject(project: AnimationProject, timeline: Sta
           filters.push(`[${inputIndex}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=duration=${(durationMs / 1000).toFixed(3)},asetpts=PTS-STARTPTS,volume=${item.volume.toFixed(3)},adelay=${startMs}|${startMs}[${label}]`);
           audioLabels.push(`[${label}]`);
         });
-        filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0:normalize=0,apad,atrim=duration=${sceneSeconds},loudnorm=I=-16:TP=-1.5:LRA=7[aout]`);
+        filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0:normalize=0,apad,atrim=duration=${sceneSeconds},loudnorm=I=-18:TP=-1.5:LRA=5[aout]`);
       }
       args.push('-filter_complex', filters.join(';'), '-map', '[vout]');
       if (audio.length) args.push('-map', '[aout]');
@@ -344,7 +512,7 @@ async function renderStaticImageProjectFast(project: AnimationProject, timeline:
     audioLabels.push(`[${label}]`);
   });
   if (audioLabels.length) {
-    filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0:normalize=0,apad,atrim=duration=${outputSeconds},loudnorm=I=-16:TP=-1.5:LRA=7[aout]`);
+    filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0:normalize=0,apad,atrim=duration=${outputSeconds},loudnorm=I=-18:TP=-1.5:LRA=5[aout]`);
   }
 
   const encoder = await preferredH264Encoder();
@@ -385,7 +553,7 @@ async function renderStaticImageProjectFast(project: AnimationProject, timeline:
 }
 
 async function normalizeRenderedAudio(input: string, output: string) {
-  await run('ffmpeg', ['-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', '-af', 'loudnorm=I=-16:TP=-1.5:LRA=7', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output]);
+  await run('ffmpeg', ['-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', '-af', 'loudnorm=I=-18:TP=-1.5:LRA=5', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output]);
 }
 
 export async function renderAnimationProject(project: AnimationProject, showSubtitles: boolean, requestedCacheKey?: string, onProgress?: (progress: number) => void) {
@@ -395,23 +563,20 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
   const missingVideo = project.scenes.find((scene) => scene.renderMode === 'generated-video' && !scene.source?.uri);
   if (missingVideo) throw new Error(`Cảnh “${missingVideo.name}” chưa có video nguồn. Không thể xuất bản đầy đủ.`);
   if (!project.productionPlan?.targetDurationMs) project = await compactNarrationSceneTails(project);
-  const renderProject: AnimationProject = {
-    ...project,
-    transitionPreset: { type: 'cut', durationMs: 0 },
-    scenes: project.scenes.map((scene) => scene.renderMode !== 'composite' ? scene : {
-      ...scene,
-      transition: { type: 'cut', durationMs: 0 },
-      layers: scene.layers.filter((layer) => layer.type === 'image' || layer.type === 'audio'),
-      commands: [],
-      camera: { ...scene.camera, commands: [] },
-    }),
-  };
+  const renderProject = project;
   const normalized = { ...renderProject, assetManifest: undefined, createdAt: '', updatedAt: '', assets: renderProject.assets.map((asset) => ({ ...asset, createdAt: '' })) };
-  // Read cue boundaries from the original project for backwards compatibility,
-  // but never pass its commands/layers to the renderer.
-  const staticTimeline = await buildStaticImageTimeline(project).catch(() => undefined);
+  // Use the optimized FFmpeg path only when the authored project is already a
+  // true static image+audio cut sequence. Rich/manual/hybrid projects must keep
+  // every visible layer, command, camera move and transition for Remotion.
+  const staticTimeline = isStaticImageOnlyProject(renderProject, showSubtitles)
+    ? await buildStaticImageTimeline(renderProject).catch(() => undefined)
+    : undefined;
+  const staticHybrid = !staticTimeline && isStaticHybridProject(renderProject, showSubtitles);
   // A client key must never override the actual project/subtitle/engine fingerprint.
-  const hash = createHash('sha256').update(JSON.stringify({ project: normalized, showSubtitles, engine: staticTimeline ? 'ffmpeg-static-image-v4-tight-voice-boundaries' : 'remotion-v6-tight-voice-boundaries', requestedCacheKey })).digest('hex');
+  const engine = staticTimeline
+    ? 'ffmpeg-static-image-v4-tight-voice-boundaries'
+    : staticHybrid ? 'remotion-stills-plus-ffmpeg-v1' : 'remotion-v6-tight-voice-boundaries';
+  const hash = createHash('sha256').update(JSON.stringify({ project: normalized, showSubtitles, engine, requestedCacheKey })).digest('hex');
   const cacheDirectory = path.join(workdir, 'animation-render-cache');
   const cached = path.join(cacheDirectory, `${hash}.mp4`);
   try {
@@ -434,9 +599,23 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
       // Keep the browser renderer as a compatibility fallback for old or unusual assets.
     }
   }
+  if (staticHybrid) {
+    const temporary = path.join(cacheDirectory, `${hash}.${randomUUID()}.partial.mp4`);
+    try {
+      await renderStaticHybridProject(renderProject, showSubtitles, temporary, onProgress);
+      await validateAnimationOutput(temporary, { width: renderProject.width, height: renderProject.height, fps: renderProject.fps, durationInFrames: renderDurationInFrames(renderProject) });
+      await rename(temporary, cached);
+      return { path: cached, size: (await stat(cached)).size, cached: false };
+    } catch (error) {
+      const hybridRenderError = error instanceof Error ? error.message : String(error);
+      await writeFile(path.join(cacheDirectory, 'last-hybrid-still-render-error.txt'), hybridRenderError, 'utf8').catch(() => undefined);
+      console.warn('[animation-render] Hybrid still renderer skipped; using full Remotion fallback.', hybridRenderError);
+      await rm(temporary, { force: true });
+    }
+  }
   const serveUrl = await getRemotionBundle();
   const executable = resolveBrowserExecutable();
-  const inputProps = { project: renderProject, showSubtitles: false, assetOrigin: `http://127.0.0.1:${Number(process.env.AUTOSUB_PORT || 8787)}` };
+  const inputProps = { project: renderProject, showSubtitles, assetOrigin: `http://127.0.0.1:${Number(process.env.AUTOSUB_PORT || 8787)}` };
   const browserOptions = executable ? { browserExecutable: executable } : {};
   const composition = await selectComposition({ serveUrl, id: 'AutoSubAnimation', inputProps, logLevel: 'warn', timeoutInMilliseconds: 120_000, ...browserOptions });
   const temporary = path.join(cacheDirectory, `${hash}.${randomUUID()}.partial.mp4`);
@@ -484,7 +663,111 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
   return { path: cached, size: (await stat(cached)).size, cached: false };
 }
 
-export interface AnimationRenderJob { id: string; projectId: string; engine?: 'browser-recording' | 'remotion'; showSubtitles?: boolean; cacheKey?: string; timeline?: AnimationRecordingTimeline; status: 'queued' | 'rendering' | 'completed' | 'failed'; progress: number; createdAt: string; updatedAt: string; cached?: boolean; result?: { path: string; size: number }; error?: string }
+
+function canvasDurationInFrames(project: CanvasStudioProject) {
+  return project.scenes.reduce((total, scene) => total + Math.max(1, Math.round(Math.max(1, scene.durationMs) / 1000 * project.fps)), 0);
+}
+
+export async function renderCanvasAnimationProject(project: CanvasStudioProject, requestedCacheKey?: string, onProgress?: (progress: number) => void) {
+  if (!project || project.version !== 1 || !/^[a-f0-9-]{36}$/i.test(project.id)) throw new Error('Canvas project không hợp lệ.');
+  if (!Number.isFinite(project.width) || !Number.isFinite(project.height) || !Number.isFinite(project.fps) || project.width < 320 || project.height < 180 || project.fps < 1) throw new Error('Kích thước hoặc FPS Canvas project không hợp lệ.');
+  if (!Array.isArray(project.scenes) || !project.scenes.length) throw new Error('Canvas project chưa có scene để xuất.');
+  // Apply the same production preparation to UI exports and retained projects.
+  // Analyze existing voice assets only; never regenerate TTS during export.
+  project=compileCanvasProjectLayout(structuredClone(project));
+  for(const scene of project.scenes){
+    for(const line of scene.dialogue||[]){
+      if(line.speechEnvelope!==undefined||!line.audioUrl)continue;
+      const id=line.audioUrl.match(/^\/api\/animation-studio\/assets\/([a-f0-9-]{36})\/file$/i)?.[1];
+      if(!id)continue;
+      const wav=await readFile((await getAnimationAssetFile(id)).path);
+      line.speechEnvelope=canvasSpeechEnvelope(wav);
+      if(line.speechWindows===undefined)line.speechWindows=canvasSpeechActivity(wav);
+    }
+    synchronizeCanvasPerformance(scene);
+  }
+  const durationInFrames = canvasDurationInFrames(project);
+  const normalized = { ...project, createdAt: '', updatedAt: '' };
+  const sourceSignature=await animationRenderSourceSignature(fileURLToPath(new URL('../..',import.meta.url)));
+  const hash = createHash('sha256').update(JSON.stringify({ project: normalized, engine: 'canvas-direct-v17-cinematic',sourceSignature, requestedCacheKey })).digest('hex');
+  const cacheDirectory = path.join(workdir, 'animation-render-cache');
+  const cached = path.join(cacheDirectory, `${hash}.mp4`);
+  try {
+    await validateAnimationOutput(cached, { width: project.width, height: project.height, fps: project.fps, durationInFrames });
+    return { path: cached, size: (await stat(cached)).size, cached: true };
+  } catch { /* render below */ }
+  await mkdir(cacheDirectory, { recursive: true });
+  const fastExecutable=resolveBrowserExecutable();
+  if(fastExecutable&&process.env.AUTOSUB_CANVAS_RENDER_ENGINE!=='remotion'){
+    const temporary=path.join(cacheDirectory,`${hash}.${randomUUID()}.partial.mp4`);
+    const normalizedAudio=temporary+'.audio.mp4';
+    const started=Date.now();
+    try{
+      await renderCanvasFast(project,temporary,{signature:sourceSignature,executable:fastExecutable,assetOrigin:`http://127.0.0.1:${Number(process.env.AUTOSUB_PORT||8787)}`,preset:resolveX264Preset(process.env.AUTOSUB_ANIMATION_X264_PRESET?.trim()),onProgress});
+      await validateAnimationOutput(temporary,{width:project.width,height:project.height,fps:project.fps,durationInFrames});
+      if(project.scenes.some(s=>s.audioUrl)){
+        await normalizeRenderedAudio(temporary,normalizedAudio);
+        await validateAnimationOutput(normalizedAudio,{width:project.width,height:project.height,fps:project.fps,durationInFrames});
+        await rename(normalizedAudio,cached);
+      }else await rename(temporary,cached);
+      await writeFile(path.join(cacheDirectory,`${hash}.metrics.json`),JSON.stringify({renderer:'canvas-direct',elapsedMs:Date.now()-started,frames:durationInFrames,width:project.width,height:project.height,fps:project.fps}));
+      return {path:cached,size:(await stat(cached)).size,cached:false};
+    }catch(error){
+      await writeFile(path.join(cacheDirectory,'last-canvas-fast-render-error.txt'),String(error),'utf8');
+      // The retained project/audio remain valid for the established renderer.
+    }finally{await rm(temporary,{force:true});await rm(normalizedAudio,{force:true});}
+  }
+  const serveUrl = await getRemotionBundle(sourceSignature);
+  const executable = resolveBrowserExecutable();
+  const inputProps = { project, assetOrigin: `http://127.0.0.1:${Number(process.env.AUTOSUB_PORT || 8787)}` };
+  const browserOptions = executable ? { browserExecutable: executable } : {};
+  const composition = await selectComposition({ serveUrl, id: 'AutoSubCanvasAnimation', inputProps, logLevel: 'warn', timeoutInMilliseconds: 120_000, ...browserOptions });
+  const temporary = path.join(cacheDirectory, `${hash}.${randomUUID()}.partial.mp4`);
+  const configuredConcurrency = Number(process.env.AUTOSUB_ANIMATION_RENDER_CONCURRENCY);
+  const availableParallelism = typeof os.availableParallelism === 'function' ? os.availableParallelism() : 4;
+  const defaultConcurrency=os.freemem()<4*1024**3||availableParallelism<=4?1:2;
+  const concurrency = Math.max(1, Math.min(8, Number.isFinite(configuredConcurrency) && configuredConcurrency > 0 ? Math.round(configuredConcurrency) : defaultConcurrency));
+  const hasAudio = project.scenes.some((scene) => Boolean(scene.audioUrl));
+  try {
+    await renderMedia({
+      serveUrl,
+      composition,
+      inputProps,
+      codec: 'h264',
+      pixelFormat: 'yuv420p',
+      crf: 21,
+      x264Preset: resolveX264Preset(process.env.AUTOSUB_ANIMATION_X264_PRESET?.trim()),
+      audioBitrate: '192k',
+      outputLocation: temporary,
+      overwrite: true,
+      concurrency,
+      logLevel: 'warn',
+      timeoutInMilliseconds: 120_000,
+      onProgress: ({ progress }) => onProgress?.(Math.max(0, Math.min(1, progress))),
+      ...browserOptions,
+    });
+    await validateAnimationOutput(temporary, { width: composition.width, height: composition.height, fps: composition.fps, durationInFrames: composition.durationInFrames });
+    let finalOutput = temporary;
+    if (hasAudio) {
+      const normalizedAudio = path.join(cacheDirectory, `${hash}.${randomUUID()}.audio-normalized.partial.mp4`);
+      try {
+        await normalizeRenderedAudio(temporary, normalizedAudio);
+        await validateAnimationOutput(normalizedAudio, { width: composition.width, height: composition.height, fps: composition.fps, durationInFrames: composition.durationInFrames });
+        await rm(temporary, { force: true });
+        finalOutput = normalizedAudio;
+      } catch {
+        await rm(normalizedAudio, { force: true });
+      }
+    }
+    await rename(finalOutput, cached);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+  return { path: cached, size: (await stat(cached)).size, cached: false };
+}
+
+export interface AnimationRenderJob { id: string; projectId: string; engine?: 'browser-recording' | 'remotion' | 'canvas-remotion'; showSubtitles?: boolean; cacheKey?: string; timeline?: AnimationRecordingTimeline; status: 'queued' | 'rendering' | 'completed' | 'failed'; progress: number; createdAt: string; updatedAt: string; cached?: boolean; result?: { path: string; size: number }; error?: string }
 const root = path.join(workdir, 'animation-render-jobs'); const jobs = new Map<string, AnimationRenderJob>(); const queue: string[] = []; let running = false;
 const jobDirectory = (id: string) => path.join(root, /^[a-f0-9-]{36}$/i.test(id) ? id : 'invalid');
 const jobFile = (id: string) => path.join(jobDirectory(id), 'job.json'); const recordingFile = (id: string) => path.join(jobDirectory(id), 'recording.webm'); const projectFile = (id: string) => path.join(jobDirectory(id), 'project.json');
@@ -523,7 +806,9 @@ async function drainQueue() {
         };
         const result = job.engine === 'remotion'
           ? await renderAnimationProject(JSON.parse(await readFile(projectFile(id), 'utf8')) as AnimationProject, job.showSubtitles !== false, job.cacheKey, reportProgress)
-          : await transcodeAnimationRecording(job.projectId, await readFile(recordingFile(id)), job.cacheKey, job.timeline);
+          : job.engine === 'canvas-remotion'
+            ? await renderCanvasAnimationProject(JSON.parse(await readFile(projectFile(id), 'utf8')) as CanvasStudioProject, job.cacheKey, reportProgress)
+            : await transcodeAnimationRecording(job.projectId, await readFile(recordingFile(id)), job.cacheKey, job.timeline);
         await patchJob(id, { status: 'completed', progress: 100, cached: result.cached, result: { path: result.path, size: result.size }, error: undefined });
       } catch (error) {
         const failed: AnimationRenderJob = { ...jobs.get(id)!, status: 'failed', progress: 100, error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() };
@@ -536,5 +821,21 @@ async function drainQueue() {
 export async function initializeAnimationRenderJobs() { await mkdir(root, { recursive: true }); for (const entry of await readdir(root, { withFileTypes: true })) { if (!entry.isDirectory()) continue; try { let job = JSON.parse(await readFile(jobFile(entry.name), 'utf8')) as AnimationRenderJob; if (job.status === 'queued' || job.status === 'rendering') { job = await saveJob({ ...job, status: 'queued', progress: 0, error: undefined, updatedAt: new Date().toISOString() }); queue.push(job.id); } else jobs.set(job.id, job); } catch { /* ignore broken job record */ } } void drainQueue(); }
 export async function enqueueAnimationRender(projectId: string, recording: Buffer, cacheKey?: string, timeline?: AnimationRecordingTimeline) { if (!/^[a-f0-9-]{36}$/i.test(projectId) || !recording.length) throw new Error('Project hoặc bản ghi render không hợp lệ.'); const now = new Date().toISOString(); const job: AnimationRenderJob = { id: randomUUID(), projectId, cacheKey: cacheKey && /^[a-f0-9]{64}$/i.test(cacheKey) ? cacheKey : undefined, timeline, status: 'queued', progress: 0, createdAt: now, updatedAt: now }; await mkdir(jobDirectory(job.id), { recursive: true }); await writeFile(recordingFile(job.id), recording); await saveJob(job); queue.push(job.id); void drainQueue(); return job; }
 export async function enqueueAnimationProjectRender(projectId: string, project: AnimationProject, showSubtitles = true, cacheKey?: string) { project = normalizeAnimationProjectForRender(project); if (!/^[a-f0-9-]{36}$/i.test(projectId) || project.id !== projectId) throw new Error('Project render không hợp lệ.'); assertAnimationProject(project); const normalizedCacheKey = cacheKey && /^[a-f0-9]{64}$/i.test(cacheKey) ? cacheKey : undefined; const duplicate = [...jobs.values()].filter((candidate) => candidate.projectId === projectId && candidate.engine === 'remotion' && candidate.showSubtitles === showSubtitles && candidate.cacheKey === normalizedCacheKey && (candidate.status === 'queued' || candidate.status === 'rendering')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]; if (duplicate) return duplicate; const now = new Date().toISOString(); const job: AnimationRenderJob = { id: randomUUID(), projectId, engine: 'remotion', showSubtitles, cacheKey: normalizedCacheKey, status: 'queued', progress: 0, createdAt: now, updatedAt: now }; await mkdir(jobDirectory(job.id), { recursive: true }); await writeFile(projectFile(job.id), JSON.stringify(project), 'utf8'); await saveJob(job); queue.push(job.id); void drainQueue(); return job; }
+
+export async function enqueueCanvasAnimationProjectRender(projectId: string, project: CanvasStudioProject, cacheKey?: string) {
+  if (!/^[a-f0-9-]{36}$/i.test(projectId) || project.id !== projectId || project.version !== 1 || !project.scenes.length) throw new Error('Canvas project render không hợp lệ.');
+  const normalizedCacheKey = cacheKey && /^[a-f0-9]{64}$/i.test(cacheKey) ? cacheKey : undefined;
+  const duplicate = [...jobs.values()].filter((candidate) => candidate.projectId === projectId && candidate.engine === 'canvas-remotion' && candidate.cacheKey === normalizedCacheKey && (candidate.status === 'queued' || candidate.status === 'rendering')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  if (duplicate) return duplicate;
+  const now = new Date().toISOString();
+  const job: AnimationRenderJob = { id: randomUUID(), projectId, engine: 'canvas-remotion', cacheKey: normalizedCacheKey, status: 'queued', progress: 0, createdAt: now, updatedAt: now };
+  await mkdir(jobDirectory(job.id), { recursive: true });
+  await writeFile(projectFile(job.id), JSON.stringify(project), 'utf8');
+  await saveJob(job);
+  queue.push(job.id);
+  void drainQueue();
+  return job;
+}
+
 export function getAnimationRenderJob(id: string) { const job = jobs.get(id); if (!job) throw new Error('Không tìm thấy render job.'); return job; }
 export function listAnimationRenderJobs() { return [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }

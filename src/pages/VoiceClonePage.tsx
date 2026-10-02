@@ -18,10 +18,11 @@ const formatCreatedAt = (value: string) => {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('vi-VN', { dateStyle: 'short', timeStyle: 'short' });
 };
-const profileReferenceLabel = (referenceVersion?: number) => {
+const profileReferenceLabel = (referenceVersion?: number, startSeconds=0) => {
   if ((referenceVersion ?? 0) < 2) return 'mẫu cũ 24 kHz, nên tạo lại';
   if ((referenceVersion ?? 0) < 4) return 'mẫu cũ 8 giây, nên tạo lại';
-  return '10 giây đầu · 48 kHz';
+  if ((referenceVersion ?? 0) < 5) return '10 giây đầu · 48 kHz';
+  return `Từ ${startSeconds.toFixed(1)}s · tối đa 8 giây · 48 kHz`;
 };
 
 export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableForTts, onOpenEditor, onNotice }: {
@@ -37,6 +38,9 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
   const [selectedId, setSelectedId] = useState('');
   const [name, setName] = useState('');
   const [file, setFile] = useState<File>();
+  const [sourceStart, setSourceStart] = useState(0);
+  const [sourceUrl, setSourceUrl] = useState<string>();
+  const [sourceDuration, setSourceDuration] = useState(0);
   const [consent, setConsent] = useState(false);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -49,6 +53,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
   const [previewTime, setPreviewTime] = useState(0);
   const [previewDuration, setPreviewDuration] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sourceAudioRef = useRef<HTMLAudioElement>(null);
   const previewAudioRef = useRef<HTMLAudioElement>(null);
   const audioUrlRef = useRef<string | undefined>(undefined);
   const provider = providers.find((item) => resolvedProviderType(item) === 'vieneu-local');
@@ -104,13 +109,20 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
     return () => window.clearTimeout(timer);
   }, [provider?.id, selectedId, speed, previewText]);
 
+  useEffect(() => {
+    setSourceStart(0);setSourceDuration(0);
+    if (!file) {setSourceUrl(undefined);return;}
+    const url=URL.createObjectURL(file);setSourceUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
   const createClone = async () => {
     if (!name.trim()) { onNotice('Hãy đặt tên cho giọng clone.', 'error'); return; }
-    if (!file) { onNotice('Hãy chọn mẫu giọng sạch dài ít nhất 3 giây; hệ thống sẽ lấy 10 giây đầu nếu file dài hơn.', 'error'); return; }
+    if (!file) { onNotice('Hãy chọn mẫu giọng sạch dài ít nhất 3 giây, có cách đọc bạn muốn giữ.', 'error'); return; }
     if (!consent) { onNotice('Bạn cần xác nhận quyền sử dụng giọng trước khi clone.', 'error'); return; }
     setCreating(true);
     try {
-      const created = await api.createVieneuVoiceClone(name.trim(), file, consent);
+      const created = await api.createVieneuVoiceClone(name.trim(), file, consent, undefined, sourceStart);
       const nextProfiles = [created.profile, ...profiles.filter((item) => item.id !== created.profile.id)];
       replaceProfiles(nextProfiles, [created.voice, ...nextProfiles.filter((item) => item.id !== created.profile.id).map((item) => ({ id: item.id, name: item.name, language: item.language }))]);
       setSelectedId(created.profile.id);
@@ -195,15 +207,22 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
 
     <div className="voice-clone-workbench">
       <section className="voice-clone-card voice-clone-create-card">
-        <div className="section-title"><span>01 · TẠO HỒ SƠ GIỌNG</span><small>Lấy 10 giây đầu của file</small></div>
+        <div className="section-title"><span>01 · TẠO HỒ SƠ GIỌNG</span><small>Chọn đoạn đọc truyền cảm</small></div>
         <div className="field"><span>Tên giọng</span><input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} placeholder="Ví dụ: Giọng kể của tôi" /></div>
         <label className={`voice-clone-dropzone ${file ? 'loaded' : ''}`}>
           <input ref={fileInputRef} type="file" accept="audio/*,video/*" onChange={(event) => setFile(event.currentTarget.files?.[0])} />
           <span className="voice-clone-file-icon">{file ? <Check size={19} /> : <FileAudio size={19} />}</span>
-          <span><strong>{file?.name || 'Chọn file mẫu giọng'}</strong><small>{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · lấy 10 giây đầu khi clone` : 'Audio hoặc video · lấy 10 giây đầu · tối đa 25 MB'}</small></span>
+          <span><strong>{file?.name || 'Chọn file mẫu giọng'}</strong><small>{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · chọn đoạn mẫu bên dưới` : 'Audio hoặc video · mẫu 3–8 giây · tối đa 25 MB'}</small></span>
           <b>{file ? 'Đổi file' : 'Duyệt file'}</b>
         </label>
-        <div className="voice-clone-sample-guide"><span><b>01</b>Một người nói</span><span><b>02</b>Hệ thống lấy 10 giây đầu</span><span><b>03</b>Không nhạc / tiếng vang</span></div>
+        {sourceUrl && <div className="field voice-clone-reference">
+          <label htmlFor="voice-reference-start">Bắt đầu mẫu tại (giây)</label>
+          <audio ref={sourceAudioRef} controls preload="metadata" src={sourceUrl} onLoadedMetadata={event => setSourceDuration(Number.isFinite(event.currentTarget.duration)?event.currentTarget.duration:0)} />
+          <input id="voice-reference-start" type="number" min={0} max={sourceDuration?Math.max(0,sourceDuration-3):undefined} step={0.1} value={sourceStart} onChange={event => setSourceStart(Math.max(0,Number(event.target.value)||0))} />
+          <button type="button" className="button ghost small" onClick={() => setSourceStart(Math.round(Math.min(sourceAudioRef.current?.currentTime || 0,Math.max(0,sourceDuration-3))*10)/10)}>Dùng vị trí đang nghe</button>
+          <small>Nghe file và chọn đoạn có nhấn nhá phù hợp. Dùng tối đa 8 giây từ vị trí này; mẫu đều giọng sẽ cho lối đọc đều.</small>
+        </div>}
+        <div className="voice-clone-sample-guide"><span><b>01</b>Một người nói</span><span><b>02</b>Giữ lối đọc của mẫu</span><span><b>03</b>Không nhạc / tiếng vang</span></div>
         <label className="voice-clone-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span>Tôi sở hữu giọng này hoặc đã được người nói cho phép dùng để tạo giọng tổng hợp.</span></label>
         <button type="button" className="button primary large full" disabled={creating || !name.trim() || !file || !consent} onClick={() => void createClone()}>{creating ? <LoaderCircle size={16} className="spin" /> : <Upload size={16} />} {creating ? 'Đang chuẩn hóa mẫu...' : 'Tạo giọng clone'}</button>
         <div className="voice-clone-warning"><ShieldCheck size={15} /><span>Chỉ clone giọng có sự đồng ý. Nếu dùng giọng của người khác, hãy khai báo nội dung tổng hợp khi nền tảng yêu cầu.</span></div>
@@ -219,7 +238,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
         </div>}
         <div className="section-title"><span>02 · THƯ VIỆN GIỌNG</span><button type="button" className="icon-button" title="Tải lại danh sách" disabled={loading} onClick={() => void loadProfiles()}><RefreshCw size={14} className={loading ? 'spin' : ''} /></button></div>
         {loading ? <div className="voice-clone-empty"><LoaderCircle size={25} className="spin" /><strong>Đang tải thư viện giọng</strong></div> : profiles.length ? <div className="voice-clone-profile-list">{profiles.map((profile) => <div key={profile.id} className={`voice-clone-profile ${selectedId === profile.id ? 'selected' : ''}`}>
-          <button type="button" className="voice-clone-profile-main" onClick={() => setSelectedId(profile.id)}><span className="voice-clone-avatar">{profile.name.trim().slice(0, 2).toUpperCase()}</span><span><strong>{profile.name}</strong><small>{formatDuration(profile.durationMs)} · {formatCreatedAt(profile.createdAt)}</small><em>{profile.sourceName} · {profileReferenceLabel(profile.referenceVersion)}</em></span>{selectedId === profile.id && <Check size={15} />}</button>
+          <button type="button" className="voice-clone-profile-main" onClick={() => setSelectedId(profile.id)}><span className="voice-clone-avatar">{profile.name.trim().slice(0, 2).toUpperCase()}</span><span><strong>{profile.name}</strong><small>{formatDuration(profile.durationMs)} · {formatCreatedAt(profile.createdAt)}</small><em>{profile.sourceName} · {profileReferenceLabel(profile.referenceVersion,profile.sourceStartSeconds)}</em></span>{selectedId === profile.id && <Check size={15} />}</button>
           <button type="button" className="icon-button danger" aria-label={`Xóa ${profile.name}`} disabled={deletingId === profile.id} onClick={() => void deleteClone(profile)}>{deletingId === profile.id ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />}</button>
         </div>)}</div> : <div className="voice-clone-empty"><Volume2 size={27} /><strong>Chưa có giọng clone</strong><small>Tạo hồ sơ đầu tiên từ mẫu giọng ở bên trái.</small></div>}
       </section>
@@ -227,6 +246,7 @@ export function VoiceClonePage({ providers, settings, onVoicesChange, onEnableFo
       <section className="voice-clone-card voice-clone-preview-card">
         <div className="section-title"><span>03 · NGHE THỬ</span><small>{selectedVoice?.name || 'Chưa chọn giọng'}</small></div>
         <div className="field"><span>Nội dung thử</span><textarea rows={4} maxLength={600} value={previewText} onChange={(event) => setPreviewText(event.target.value)} /></div>
+        <small>Đặt nghỉ bằng [pause 350ms], sửa cách phát âm bằng [[cách đọc]]. Xuống dòng trống để ngắt đoạn.</small>
         <div className="field"><span>Tốc độ <b className="value-badge">{speed.toFixed(2)}x</b></span><RangeInput min={0.9} max={1.5} step={0.05} value={speed} onChange={(event) => setSpeed(Number(event.target.value))} /></div>
         <button type="button" className="button secondary full" disabled={testing || !selectedId || !previewText.trim()} onClick={() => void testVoice()}>{testing ? <LoaderCircle size={15} className="spin" /> : <CirclePlay size={16} />} {testing ? 'Đang chuẩn bị...' : 'Nghe thử giọng'}</button>
         {previewUrl && <div className="voice-clone-audio">

@@ -161,6 +161,25 @@ async function autosubApiJson(path, options = {}) {
   return data;
 }
 
+let lastDiagRows = null;
+function paintDiagRows(rows) {
+  for (const row of rows || []) {
+    const el = document.querySelector(`[data-diag-for="${CSS.escape(String(row.id || ''))}"]`);
+    if (!el) continue;
+    const bits = [
+      row.hasTab ? 'có tab' : 'MẤT TAB',
+      row.isFlowPage ? 'trang Flow' : 'không phải trang Flow',
+      row.urlHasProject ? `project …${row.projectHint || ''}` : 'KHÔNG THẤY PROJECT',
+      row.tabComplete ? 'tải xong' : 'đang tải',
+      row.tokenPresent ? 'có token' : 'mất token',
+      row.bridgeConnected ? 'cầu nối OK' : 'cầu nối rớt',
+    ];
+    el.hidden = false;
+    el.className = `diag-line ${!row.hasTab || !row.urlHasProject ? 'bad' : 'good'}`;
+    el.textContent = `Tab: ${bits.join(' · ')}`;
+  }
+}
+
 async function loadFlowAccounts() {
   const list = document.getElementById('accounts-list');
   const summary = document.getElementById('accounts-summary');
@@ -168,8 +187,8 @@ async function loadFlowAccounts() {
   try {
     const data = await runtimeMessage({ type: 'LIST_FLOW_ACCOUNTS' });
     const accounts = Array.isArray(data.accounts) ? data.accounts : [];
-    const ready = accounts.filter((account) => account.connected && account.tokenReady);
-    summary.textContent = `${ready.length} ready account${ready.length === 1 ? '' : 's'} · ${ready.length * 2} parallel slots`;
+    const ready = accounts.filter((account) => !account.projectShared && !account.needsProject && FlowBatchCompat.isImageReadyAccount(account));
+    summary.textContent = `${ready.length} image-ready account${ready.length === 1 ? '' : 's'} · ${ready.length * 2} parallel slots`;
     if (!accounts.length) {
       list.innerHTML = '<div class="accounts-empty">No linked Flow accounts yet.<br>Press + Add and choose another Google account in this same Opera profile.</div>';
       return;
@@ -177,8 +196,24 @@ async function loadFlowAccounts() {
     list.innerHTML = accounts.map((account, index) => {
       const name = escHtml(account.email || (account.primary ? 'Primary Flow account' : `Flow account ${index + 1}`));
       const client = escHtml(account.clientId || '—');
-      const readyState = account.connected && account.tokenReady;
-      const status = readyState ? 'Ready' : account.tokenReady ? 'Token ready · reconnecting' : account.email ? 'Waiting for Flow token' : 'Choose/sign in to Google';
+      const readyState = !account.projectShared && !account.needsProject && FlowBatchCompat.isImageReadyAccount(account);
+      const status = account.projectShared
+        ? `Chung project …${account.flowProjectHint || ''} với account khác · mở project riêng rồi Refresh`
+        : account.needsProject
+        ? 'Chưa có project · mở/tạo project trong tab Flow của account này rồi Refresh'
+        : readyState
+        ? 'Ready · browser session + token'
+        : account.primary
+          ? account.tokenReady
+            ? 'Token ready · reconnecting'
+            : account.email ? 'Waiting for Flow token' : 'Choose/sign in to Google'
+          : account.connected && !account.tokenReady
+            ? 'Connected · waiting for Flow token'
+            : account.tokenReady
+              ? 'Token ready · reconnecting'
+              : account.email
+                ? 'Waiting for Flow token'
+                : 'Choose/sign in to Google';
       const active = Math.max(0, Math.min(2, Number(account.activeRequests) || 0));
       return `<article class="flow-account" data-account-id="${escHtml(account.id)}">
         <div class="flow-account-top">
@@ -191,6 +226,7 @@ async function loadFlowAccounts() {
           <button type="button" data-account-action="refresh">Refresh</button>
           ${account.primary ? '' : '<button type="button" class="danger" data-account-action="remove">Remove</button>'}
         </div>
+        <div class="diag-line" data-diag-for="${escHtml(account.id)}" hidden></div>
       </article>`;
     }).join('');
     list.querySelectorAll('[data-account-action]').forEach((button) => button.addEventListener('click', async () => {
@@ -201,10 +237,23 @@ async function loadFlowAccounts() {
       button.disabled = true;
       try {
         if (action === 'open') await runtimeMessage({ type: 'FOCUS_FLOW_ACCOUNT', accountId });
-        else if (action === 'refresh') await runtimeMessage({ type: 'REFRESH_FLOW_ACCOUNT', accountId });
+        else if (action === 'refresh') {
+          await runtimeMessage({ type: 'REFRESH_FLOW_ACCOUNT', accountId });
+          const latest = await runtimeMessage({ type: 'LIST_FLOW_ACCOUNTS' });
+          const refreshed = (latest.accounts || []).find((account) => account.id === accountId);
+          if (refreshed?.projectShared) {
+            showToast('Account này đang chung project với account khác · mở project riêng rồi Refresh.', 'error');
+          } else if (refreshed?.needsProject) {
+            showToast('Account này chưa có project · mở/tạo project trong tab Flow của nó rồi Refresh.', 'error');
+          } else if (FlowBatchCompat.isImageReadyAccount(refreshed)) {
+            showToast('Account is image-ready: browser session and token are ready.');
+          } else {
+            showToast('Session refreshed; this account is still reconnecting.');
+          }
+        }
         else if (action === 'remove') await runtimeMessage({ type: 'REMOVE_FLOW_ACCOUNT', accountId });
         if (action === 'remove') showToast('Flow account removed');
-        else showToast(action === 'open' ? 'Opened linked Flow tab' : 'Refreshing linked Flow tab');
+        else if (action === 'open') showToast('Opened linked Flow tab');
       } catch (error) {
         showToast(error.message, 'error');
       } finally {
@@ -212,6 +261,9 @@ async function loadFlowAccounts() {
         setTimeout(loadFlowAccounts, action === 'refresh' ? 1200 : 300);
       }
     }));
+    // The accounts list re-renders every few seconds; repaint the last
+    // diagnosis so it survives refresh ticks instead of flashing once.
+    if (lastDiagRows) paintDiagRows(lastDiagRows);
   } catch (error) {
     list.innerHTML = `<div class="accounts-empty">Could not load linked Flow accounts: ${escHtml(error.message)}</div>`;
     summary.textContent = 'Account pool unavailable';
@@ -249,12 +301,23 @@ async function loadMedia() {
 
 let monitorEnabled = false;
 let wasConnected = false;
-function runtimeMessage(payload) {
-  return new Promise((resolve, reject) => chrome.runtime.sendMessage(payload, (response) => {
-    if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-    else if (response?.error) reject(new Error(response.error));
-    else resolve(response || {});
-  }));
+function runtimeMessage(payload, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(new Error('EXTENSION_NO_RESPONSE: background chưa trả lời — Reload extension rồi thử lại.'));
+    }, timeoutMs);
+    chrome.runtime.sendMessage(payload, (response) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else if (response?.error) reject(new Error(response.error));
+      else resolve(response || {});
+    });
+  });
 }
 
 let toastTimer;
@@ -329,6 +392,45 @@ document.getElementById('agent-toggle').addEventListener('click', async () => {
   await runtimeMessage({ type: monitorEnabled ? 'DISCONNECT' : 'RECONNECT' });
   setTimeout(refreshMonitor, 350);
 });
+document.getElementById('diagnose-tabs')?.addEventListener('click', async () => {
+  const button = document.getElementById('diagnose-tabs');
+  button.disabled = true;
+  const original = button.textContent;
+  try {
+    button.textContent = 'Đang đọc tab…';
+    const result = await runtimeMessage({ type: 'DIAGNOSE_LINKED_TABS' });
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+    lastDiagRows = rows;
+    paintDiagRows(rows);
+    const withProject = rows.filter((row) => row.urlHasProject).length;
+    showToast(`${withProject}/${rows.length} tab đang ở trang project.`);
+  } catch (error) {
+    showToast(`Chẩn đoán thất bại: ${error.message}`, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+});
+document.getElementById('ensure-flow-projects')?.addEventListener('click', async () => {
+  const button = document.getElementById('ensure-flow-projects');
+  button.disabled = true;
+  const original = button.textContent;
+  try {
+    button.textContent = 'Đang mở tab…';
+    const result = await runtimeMessage({ type: 'ENSURE_FLOW_PROJECTS' });
+    if (!result.total) {
+      showToast('Mọi account đều đã có project.');
+    } else {
+      showToast(`Đã mở ${result.total} tab · bấm New project trong từng tab, xong bấm Refresh.`);
+    }
+    setTimeout(loadFlowAccounts, 700);
+  } catch (error) {
+    showToast(`Không mở được tab: ${error.message}`, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+});
 document.getElementById('open-flow').addEventListener('click', () => runtimeMessage({ type: 'OPEN_FLOW_TAB' }));
 async function refreshAccountsOneByOne(button) {
   const { accounts = [] } = await runtimeMessage({ type: 'LIST_FLOW_ACCOUNTS' });
@@ -355,7 +457,7 @@ async function refreshAccountsOneByOne(button) {
 document.getElementById('refresh-token').addEventListener('click', async () => {
   const button = document.getElementById('refresh-token');
   button.disabled = true;
-  button.textContent = 'Opening accounts…';
+  button.textContent = 'Checking accounts…';
   let legacyFallback = false;
   try {
     let result;
@@ -392,8 +494,10 @@ chrome.runtime.onMessage.addListener((message) => {
   const progress = message.progress || {};
   const done = Number(progress.done) || 0;
   const total = Number(progress.total) || 0;
-  if (progress.phase === 'opening') button.textContent = `Opening ${done}/${total}…`;
+  if (progress.phase === 'starting') button.textContent = `Checking ${total} account${total === 1 ? '' : 's'}…`;
+  else if (progress.phase === 'opening') button.textContent = `Opening ${done}/${total}…`;
   else if (progress.phase === 'connecting') button.textContent = `Connecting ${done}/${total}…`;
+  else if (progress.phase === 'processed') button.textContent = `Processed ${done}/${total} · ${progress.ready || 0} ready`;
   else if (progress.phase === 'complete') button.textContent = `Connected ${progress.ready}/${total}`;
 });
 chrome.storage.local.get(['clientId'], (data) => {
@@ -620,6 +724,9 @@ document.getElementById('quick-generate').addEventListener('click', async () => 
     button.textContent = 'Generate with Flow';
   }
 });
+
+const extensionVersion = document.getElementById('extension-version');
+if (extensionVersion) extensionVersion.textContent = `v${chrome.runtime.getManifest().version}`;
 
 updateQuickFields();
 refreshMonitor();

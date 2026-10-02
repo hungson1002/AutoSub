@@ -1,3 +1,4 @@
+import { normalizeSpokenText } from '../../shared/speech';
 import type { AIModel, AIVoice, AIProvider } from '../types';
 import { runEdgeTtsBridge } from '../services/edgeTtsBridge';
 import { assertPlayableAudio } from './capabilityTestMedia';
@@ -32,7 +33,7 @@ export async function testConnection(_provider: AIProvider) {
 
 export async function synthesize(_provider: AIProvider, _model: string, voice: string, text: string, options: { speed?: number; signal?: AbortSignal }) {
   if (!EDGE_VIETNAMESE_VOICES.some((item) => item.id === voice)) throw new ProviderError('Edge TTS cần chọn Hoài My hoặc Nam Minh.', 400);
-  const response = await serialized(() => runEdgeTtsBridge({ op: 'synthesize', voice, text, speed: options.speed || 1 }, options.signal));
+  const response = await serialized(() => runEdgeTtsBridge({ op: 'synthesize', voice, text: normalizeSpokenText(text), speed: options.speed || 1 }, options.signal));
   if (typeof response.audioBase64 !== 'string') throw new ProviderError('Edge TTS không trả về audio.', 502);
   return Buffer.from(response.audioBase64, 'base64');
 }
@@ -40,7 +41,7 @@ export async function synthesize(_provider: AIProvider, _model: string, voice: s
 export async function synthesizeBatch(_provider: AIProvider, _model: string, voice: string, texts: string[], options: { speed?: number; signal?: AbortSignal }) {
   if (!EDGE_VIETNAMESE_VOICES.some((item) => item.id === voice)) throw new ProviderError('Edge TTS cần chọn Hoài My hoặc Nam Minh.', 400);
   if (!texts.length || texts.length > 32 || texts.some((text) => !text.trim())) throw new ProviderError('Batch Edge TTS cần từ 1 đến 32 đoạn có nội dung.', 400);
-  const response = await serialized(() => runEdgeTtsBridge({ op: 'synthesize_batch', voice, texts, speed: options.speed || 1 }, options.signal));
+  const response = await serialized(() => runEdgeTtsBridge({ op: 'synthesize_batch', voice, texts: texts.map(normalizeSpokenText), speed: options.speed || 1 }, options.signal));
   if (typeof response.audioBase64 !== 'string' || !Array.isArray(response.ranges) || response.ranges.length !== texts.length) throw new ProviderError('Edge TTS không trả về audio/timestamp batch hợp lệ.', 502);
   const audio = Buffer.from(response.audioBase64, 'base64');
   assertPlayableAudio(audio);

@@ -13,7 +13,8 @@ import { DouyinWorkspace } from './components/DouyinWorkspace';
 import { ProductAdPage } from "./pages/ProductAdPage";
 import { AutoPipelinePage } from "./pages/AutoPipelinePage";
 import { AiVideoPage } from "./pages/AiVideoPage";
-import { AnimationStudioPage } from "./pages/AnimationStudioPage";
+import { AnimationStudioPage as StoryVideoPage } from "./pages/AnimationStudioPage";
+import { CanvasAnimationStudioPage } from "./pages/CanvasAnimationStudioPage";
 import { StoragePage } from "./pages/StoragePage";
 import { X, Check } from "./components/Icons";
 import { ensureBuiltInProviders } from "./lib/providers";
@@ -190,7 +191,8 @@ export default function App() {
           />
         )}
         {page === "ai-video" && <AiVideoPage providers={providers} settings={settings} onNotice={notice} />}
-        {page === "animation-studio" && <AnimationStudioPage providers={providers} settings={settings} onNotice={notice} />}
+        {page === "story-video" && <StoryVideoPage providers={providers} settings={settings} onNotice={notice} />}
+        {page === "animation-studio" && <CanvasAnimationStudioPage providers={providers} settings={settings} onNotice={notice} />}
         {page === "storage" && <StoragePage onNotice={notice} />}
         {page === "voice-clone" && (
           <VoiceClonePage

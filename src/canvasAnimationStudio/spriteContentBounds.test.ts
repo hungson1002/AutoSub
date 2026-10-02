@@ -1,0 +1,3 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {spriteContentBounds} from './spriteContentBounds';
+test('shared clip bounds remove atlas padding while preserving gesture travel',()=>{const w=40,h=20,data=new Uint8ClampedArray(w*h*4);for(const [ox,x0,x1] of ([[0,6,10],[20,8,15]] as const))for(let y=5;y<=16;y++)for(let x=x0;x<=x1;x++)data[(y*w+ox+x)*4+3]=255;assert.deepEqual(spriteContentBounds(data,w,h,20,20,2,0,1),{x:4,y:3,width:14,height:16});});
+test('empty or out-of-range cells keep safe original geometry',()=>{assert.deepEqual(spriteContentBounds(new Uint8ClampedArray(40*20*4),40,20,20,20,2,2,3),{x:0,y:0,width:20,height:20});});

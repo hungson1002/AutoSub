@@ -128,6 +128,13 @@
       color: var(--text);
     }
 
+    .header-version {
+      margin-left: 5px;
+      color: var(--muted);
+      font-size: 9px;
+      font-weight: 600;
+    }
+
     #btn-panel {
       padding: 5px 12px;
       font-family: var(--font);
@@ -471,6 +478,16 @@
     .accounts-head strong { display:block; font-size:14px; }
     .accounts-head small { display:block; margin-top:2px; color:var(--muted); font-size:9px; line-height:1.4; }
     #add-flow-account { flex-shrink:0; border:0; border-radius:9px; padding:8px 10px; background:linear-gradient(135deg,var(--accent),var(--accent-soft)); color:#fff; font:800 9px var(--font); cursor:pointer; }
+    #ensure-flow-projects { flex-shrink:0; border:1px solid var(--border); border-radius:9px; padding:8px 10px; background:#fff; color:var(--text-dim); font:800 9px var(--font); cursor:pointer; }
+    #ensure-flow-projects:hover { border-color:var(--accent); color:var(--accent); }
+    #ensure-flow-projects:disabled { opacity:.5; cursor:wait; }
+    #diagnose-tabs { flex-shrink:0; border:1px solid var(--border); border-radius:9px; padding:8px 10px; background:#fff; color:var(--text-dim); font:800 9px var(--font); cursor:pointer; }
+    #diagnose-tabs:hover { border-color:var(--accent); color:var(--accent); }
+    #diagnose-tabs:disabled { opacity:.5; cursor:wait; }
+    .diag-line { margin-top:6px; padding:6px 8px; border-radius:8px; background:#f3f5f8; color:var(--text-dim); font:700 8px var(--mono); line-height:1.5; }
+    .diag-line.bad { background:rgba(255,59,48,.07); color:var(--red); }
+    .diag-line.good { background:rgba(52,199,89,.08); color:#1a7f37; }
+    .accounts-head-actions { display:flex; gap:6px; flex-shrink:0; }
     .accounts-list { display:grid; gap:9px; }
     .flow-account { padding:11px; border:1px solid var(--border); border-radius:12px; background:#fff; box-shadow:0 6px 20px rgba(15,23,42,.05); }
     .flow-account-top { display:flex; align-items:center; gap:8px; }
@@ -516,7 +533,7 @@
 <body>
   <header>
     <div class="extension-mark" id="extension-mark" aria-hidden="true"></div>
-    <div class="header-title">Flow Agent<div class="header-token" id="monitor-token">No token</div></div>
+    <div class="header-title">Flow Agent <span class="header-version" id="extension-version"></span><div class="header-token" id="monitor-token">No token</div></div>
     <div class="health-row">
       <span class="header-badge account-badge"><span class="badge-label">Device</span><span class="badge-value" id="monitor-client">—</span></span>
       <span class="header-badge account-badge"><span class="badge-label">Credits</span><span class="badge-value" id="quick-credits">—</span></span>
@@ -545,7 +562,11 @@
     <div class="accounts-panel">
       <div class="accounts-head">
         <div><strong>Linked Flow accounts</strong><small>All accounts stay in this same Opera profile; each ready account contributes up to 2 parallel image slots.</small></div>
-        <button id="add-flow-account" type="button">+ Add</button>
+        <div class="accounts-head-actions">
+          <button id="add-flow-account" type="button">+ Add</button>
+          <button id="ensure-flow-projects" type="button" title="Tự mở tab Flow cho các account chưa có project">Mở project</button>
+          <button id="diagnose-tabs" type="button" title="Đọc trạng thái tab của từng account">Chẩn đoán</button>
+        </div>
       </div>
       <div class="accounts-list" id="accounts-list"><div class="accounts-empty">No linked accounts yet.<br>Add one and finish Google sign-in in the opened Flow tab.</div></div>
       <div class="accounts-summary" id="accounts-summary">0 ready accounts · 0 parallel slots</div>
@@ -599,6 +620,7 @@
   <div id="toast" role="status" aria-live="polite"></div>
 
   <script src="config.js"></script>
+  <script src="flow-batch-compat.js"></script>
   <script src="popup.js"></script>
 </body>
 

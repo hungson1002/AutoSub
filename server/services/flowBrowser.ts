@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ensureGoogleFlowAgentRuntime } from './googleFlow';
 
@@ -49,6 +49,7 @@ async function flowAgentIsRunning() {
 }
 
 export async function ensureFlowAgentRuntime() {
+  await syncFlowExtensionRuntime();
   const wasRunning = await flowAgentIsRunning();
   await ensureGoogleFlowAgentRuntime();
   return { started: !wasRunning, url: flowAgentUrl() };
@@ -85,6 +86,29 @@ const flowWorkerProcesses = new Map<string, ChildProcess>();
 const flowWorkerRoot = () => path.join(process.env.LOCALAPPDATA || process.cwd(), 'AutoSub', 'flow-workers');
 const flowWorkerRegistryFile = () => path.join(flowWorkerRoot(), 'accounts.json');
 const flowExtensionRuntimePath = () => path.join(process.env.LOCALAPPDATA || '', 'AutoSub', 'flow-agent-runtime', 'flow-extension');
+
+async function syncFlowExtensionRuntime() {
+  const runtimePath = flowExtensionRuntimePath();
+  if (!runtimePath || !process.env.LOCALAPPDATA) return;
+  const candidates = [
+    process.env.AUTOSUB_FLOW_EXTENSION_SOURCE?.trim(),
+    path.resolve(process.cwd(), 'flow-extension'),
+  ].filter((item): item is string => Boolean(item));
+  for (const sourcePath of candidates) {
+    try {
+      await Promise.all([
+        access(path.join(sourcePath, 'manifest.json')),
+        access(path.join(sourcePath, 'background.js')),
+      ]);
+      await mkdir(path.dirname(runtimePath), { recursive: true });
+      await cp(sourcePath, runtimePath, { recursive: true, force: true });
+      return;
+    } catch {
+      // Try the next source candidate. Packaged/runtime-only installs may not
+      // have the repository extension source available, which is still valid.
+    }
+  }
+}
 
 async function readFlowWorkerRegistry(): Promise<FlowWorkerAccountRecord[]> {
   try {

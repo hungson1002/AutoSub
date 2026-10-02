@@ -13,6 +13,7 @@ export function checkAnimationQuality(project: AnimationProject): AnimationQuali
     const imageOnly = scene.layers.length > 0 && scene.layers.every((layer) => ['image', 'audio'].includes(layer.type)) && scene.layers.some((layer) => layer.type === 'image');
     if (!imageOnly && !scene.commands.length && !scene.camera.commands.length && scene.durationMs > 2500) issues.push({ severity: 'warning', code: 'STATIC_SCENE', sceneId: scene.id, message: 'Scene dài nhưng không có chuyển động hoặc camera.' });
     const illustrated = scene.layers.some((layer) => layer.visible && layer.type === 'image' && layer.width >= project.width * .8 && layer.height >= project.height * .8);
+    const explanatoryGraphic = scene.layers.some((layer) => layer.visible && /^process-/.test(layer.id) && ['shape', 'text', 'diagram', 'chart'].includes(layer.type));
     const performance = scene.commands.some((command) => {
       const layer = scene.layers.find((item) => item.id === command.targetId && item.visible);
       const cue = command.parameters?.narrationCue;
@@ -20,7 +21,7 @@ export function checkAnimationQuality(project: AnimationProject): AnimationQuali
       const changes = command.from !== undefined && command.to !== undefined && JSON.stringify(command.from) !== JSON.stringify(command.to);
       return layer && !isLegacyAnimationAccent(layer) && grounded && ((layer.type === 'sprite' && command.type === 'PLAY_ANIMATION' && project.assets.find((asset) => asset.id === layer.assetId)?.sprite?.clips[command.animation || '']) || (['shape', 'diagram', 'chart'].includes(layer.type) && ['MOVE', 'SCALE', 'ROTATE'].includes(command.type) && changes));
     });
-    if (illustrated && !performance && !imageOnly && scene.durationMs > 2500) issues.push({ severity: 'warning', code: 'SLIDESHOW_ONLY', sceneId: scene.id, message: 'Cảnh chỉ chuyển/zoom ảnh minh họa, chưa có chuyển động đối tượng. Cần sprite, sơ đồ có tiến trình hoặc clip video thật.' });
+    if (illustrated && !performance && !imageOnly && !explanatoryGraphic && scene.durationMs > 2500) issues.push({ severity: 'warning', code: 'SLIDESHOW_ONLY', sceneId: scene.id, message: 'Cảnh chỉ chuyển/zoom ảnh minh họa, chưa có chuyển động đối tượng hoặc infographic giải thích.' });
     for (const layer of scene.layers) {
       if (isLegacyAnimationAccent(layer)) issues.push({ severity: 'warning', code: 'DECORATIVE_MOTION', sceneId: scene.id, layerId: layer.id, message: 'Hiệu ứng trang trí tự chèn cũ không gắn với nội dung. Sửa chất lượng sẽ bỏ riêng lớp này.' });
       if (!isLegacyAnimationAccent(layer) && ['shape', 'diagram', 'chart', 'sprite'].includes(layer.type) && scene.commands.some((command) => {
@@ -32,6 +33,11 @@ export function checkAnimationQuality(project: AnimationProject): AnimationQuali
       if (layer.type !== 'audio' && (layer.transform.position.x + halfWidth < 0 || layer.transform.position.x - halfWidth > project.width || layer.transform.position.y + halfHeight < 0 || layer.transform.position.y - halfHeight > project.height)) issues.push({ severity: 'error', code: 'OFFSCREEN_LAYER', sceneId: scene.id, layerId: layer.id, message: `${layer.name} nằm hoàn toàn ngoài khung hình.` });
       if (layer.type === 'text' && (layer.text || '').length > 160) issues.push({ severity: 'warning', code: 'LONG_TEXT', sceneId: scene.id, layerId: layer.id, message: `${layer.name} có quá nhiều chữ cho một cảnh.` });
       if (layer.assetId && !project.assets.some((asset) => asset.id === layer.assetId)) issues.push({ severity: 'error', code: 'MISSING_ASSET', sceneId: scene.id, layerId: layer.id, message: `${layer.name} tham chiếu asset không tồn tại.` });
+      if (layer.assetId) {
+        const asset = project.assets.find((item) => item.id === layer.assetId);
+        if (asset?.tags?.includes('qc-hard-warning')) issues.push({ severity: 'error', code: 'HARD_QC_ASSET', sceneId: scene.id, layerId: layer.id, message: `${layer.name}: ảnh còn lỗi QC quan trọng về identity/text/semantic; nên tạo lại trước khi xuất bản.` });
+        else if (asset?.tags?.includes('qc-warning')) issues.push({ severity: 'warning', code: 'QC_WARNING_ASSET', sceneId: scene.id, layerId: layer.id, message: `${layer.name}: ảnh còn cảnh báo QC nhẹ; nên xem lại nếu cần chất lượng xuất bản cao.` });
+      }
     }
     // A full-frame background is expected to overlap every foreground layer;
     // including it here makes the checker report false positives for every

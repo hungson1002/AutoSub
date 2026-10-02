@@ -23,8 +23,8 @@ type BridgeResponse = { requestId?: string; ok?: boolean; error?: string; bytes?
 type PendingRequest = { resolve: (value: BridgeResponse) => void; reject: (error: Error) => void; cleanup: () => void };
 export type VieneuInternalSilence = { startMs: number; endMs: number; durationMs: number };
 
-const VIENEU_HESITATION_MIN_MS = 160;
-const VIENEU_NATURAL_PAUSE_MS = 95;
+const VIENEU_HESITATION_MIN_MS = 450;
+const VIENEU_NATURAL_PAUSE_MS = 220;
 const VIENEU_EDGE_GUARD_MS = 80;
 // VieNeu v3 Turbo's documented default is 0.8. A very small increase gives
 // punctuation and question/reveal contours a little more life without making
@@ -39,7 +39,7 @@ export function prepareVieneuSpeechText(text: string) {
     // tokens. Keep those controls in the TTS input; remove English aliases that
     // this app never emits so they cannot accidentally be spoken as text.
     .replace(/\[(?:laugh|chuckle|sigh|clear\s+throat)\]\s*/giu, '')
-    .replace(/\s+/g, ' ')
+    .replace(/[^\S\n]+/g, ' ').replace(/\r\n?/g, '\n')
     .trim();
   const trailingCue = content.match(/(?:\[(?:c\u01b0\u1eddi|th\u1edf\s+d\u00e0i|h\u1eafng\s+gi\u1ecdng)\]\s*)+$/iu);
   if (trailingCue) {
@@ -104,7 +104,9 @@ export function buildVieneuPauseRepairFilter(pauses: VieneuInternalSilence[], du
 
 export function usesShortUtteranceQualityPass(text: string) {
   const sentenceBreaks = text.match(/[.!?…]+/g)?.length || 0;
-  return text.length <= 220 && sentenceBreaks <= 1;
+  // Commas, questions, ellipses, paragraph breaks and reactions carry intentional pauses.
+  // Repair only plain short statements; a 160ms pause alone is not a delivery defect.
+  return text.length <= 220 && sentenceBreaks <= 1 && !/[,;:!??\n]|\.\.\.|\[[^\]]+\]/u.test(text);
 }
 
 function terminateProcess(child: { pid?: number; kill: () => boolean }) {
@@ -205,7 +207,7 @@ interface BridgeSlot {
 }
 
 const vieneuThreads = () => Math.max(1, Math.min(4, Number(process.env.AUTOSUB_VIENEU_THREADS) || 2));
-const vieneuWorkerCount = () => Math.max(1, Math.min(4, Number(process.env.AUTOSUB_VIENEU_WORKERS) || 3));
+const vieneuWorkerCount = () => Math.max(1, Math.min(4, Number(process.env.AUTOSUB_VIENEU_WORKERS) || 1));
 const bridgeSlots: BridgeSlot[] = Array.from(
   { length: vieneuWorkerCount() },
   () => ({ stdoutBuffer: '', stderrTail: '', load: 0, pending: new Map() }),

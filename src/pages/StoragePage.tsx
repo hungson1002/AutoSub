@@ -20,6 +20,7 @@ export function StoragePage({ onNotice }: { onNotice: (message: string, kind?: '
   const [snapshot, setSnapshot] = useState<StorageSnapshot>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState<{ processed: number; total: number }>();
   const [query, setQuery] = useState('');
   const [categoryId, setCategoryId] = useState('all');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -68,15 +69,16 @@ export function StoragePage({ onNotice }: { onNotice: (message: string, kind?: '
   const removeSelected = async () => {
     if (!selectedItems.length) return;
     setBusy(true);
+    setDeleteProgress({ processed: 0, total: selectedItems.length });
     try {
-      const result = await api.deleteStorageItems(selectedItems.map(({ categoryId: category, name }) => ({ categoryId: category, name })));
-      setSelected(new Set());
+      const result = await api.deleteStorageItems(selectedItems.map(({ categoryId: category, name }) => ({ categoryId: category, name })), (processed, total) => setDeleteProgress({ processed, total }));
+      setSelected(new Set(selectedItems.filter(item => result.errors.some(error => error.categoryId === item.categoryId && error.name === item.name)).map(item => item.id)));
       setConfirmMode(undefined);
       await load();
       if (result.deletedCount) onNotice(`Đã xóa ${result.deletedCount} mục, giải phóng ${formatBytes(result.freedBytes)}.`, 'success');
-      if (result.errors.length) onNotice(`${result.errors.length} mục không thể xóa vì đang được sử dụng hoặc đã thay đổi.`, 'error');
+      if (result.errors.length) onNotice(`${result.errors.length} mục chưa xóa được và vẫn được chọn để thử lại.`, 'error');
     } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể xóa dữ liệu đã chọn.'), 'error'); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setDeleteProgress(undefined); }
   };
 
   const cleanup = async () => {
@@ -98,15 +100,15 @@ export function StoragePage({ onNotice }: { onNotice: (message: string, kind?: '
       </div>
       <div className="modal-actions">
         <button className="button ghost" disabled={busy} onClick={() => setConfirmMode(undefined)}>Giữ lại</button>
-        <button className="button danger" disabled={busy} onClick={() => void (confirmMode === 'cleanup' ? cleanup() : removeSelected())}>{busy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />} {busy ? 'Đang xóa…' : 'Xóa dữ liệu'}</button>
+        <button className="button danger" disabled={busy} onClick={() => void (confirmMode === 'cleanup' ? cleanup() : removeSelected())}>{busy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />} {busy ? deleteProgress ? `Đang xử lý ${deleteProgress.processed}/${deleteProgress.total} mục…` : 'Đang xóa…' : 'Xóa dữ liệu'}</button>
       </div>
     </Modal>
 
     <header className="page-header storage-header">
       <div><div className="eyebrow">LOCAL STORAGE</div><h1>Tệp & <span>dung lượng</span></h1><p>Xem đúng nơi AutoSub đang chiếm chỗ và xóa nhiều kết quả cũ trong một lần.</p></div>
       <div className="header-actions">
-        <button className="button ghost" disabled={loading} onClick={() => void load()}><RefreshCw className={loading ? 'spin' : ''} size={15} /> Quét lại</button>
-        <button className="button ghost" disabled={loading} onClick={() => setConfirmMode('cleanup')}><Trash2 size={15} /> Dọn file tạm</button>
+        <button className="button ghost" disabled={loading || busy} onClick={() => void load()}><RefreshCw className={loading ? 'spin' : ''} size={15} /> Quét lại</button>
+        <button className="button ghost" disabled={loading || busy} onClick={() => setConfirmMode('cleanup')}><Trash2 size={15} /> Dọn file tạm</button>
       </div>
     </header>
 

@@ -46,6 +46,58 @@ test('flags empty, static and offscreen composite scenes', () => {
   assert.equal(fixed.project.scenes[0].renderMode === 'composite' && fixed.project.scenes[0].layers.length === 0, true);
 });
 
+
+test('hybrid infographic is accepted as meaningful explanation without decorative motion', () => {
+  const now = new Date().toISOString();
+  const project: AnimationProject = {
+    schemaVersion: ANIMATION_PROJECT_VERSION,
+    id: 'hybrid',
+    name: 'hybrid',
+    width: 1280,
+    height: 720,
+    fps: 30,
+    createdAt: now,
+    updatedAt: now,
+    assets: [{ id: 'background', type: 'background', name: 'Background', uri: 'data:image/png;base64,AA==', tags: [], createdAt: now }],
+    scenes: [{
+      id: 'scene',
+      name: 'Scene',
+      order: 0,
+      durationMs: 5000,
+      narration: 'Khẩu phần giảm từ 4.000 calo xuống 1.500 calo.',
+      renderMode: 'composite',
+      backgroundColor: '#f4efe6',
+      camera: { transform: defaultTransform(), commands: [] },
+      layers: [
+        { id: 'visual-0-0', name: 'Story frame', type: 'image', assetId: 'background', visible: true, locked: true, zIndex: 0, width: 1280, height: 720, startMs: 0, durationMs: 2500, transform: { ...defaultTransform(), position: { x: 640, y: 360 } } },
+        { id: 'process-0-1-0-card', name: 'So sánh 1', type: 'shape', shape: 'rectangle', visible: true, locked: false, zIndex: 10, width: 360, height: 180, fill: '#f7f1e7', transform: { ...defaultTransform(), opacity: 0, position: { x: 380, y: 360 } } },
+        { id: 'process-0-1-0-label', name: 'So sánh 1', type: 'text', text: '4.000 calo', visible: true, locked: false, zIndex: 11, width: 360, height: 180, fill: '#263238', transform: { ...defaultTransform(), opacity: 0, position: { x: 380, y: 360 } } },
+      ],
+      commands: [
+        { id: 'in-card', type: 'FADE_IN', targetId: 'process-0-1-0-card', startMs: 2500, durationMs: 1 },
+        { id: 'in-label', type: 'FADE_IN', targetId: 'process-0-1-0-label', startMs: 2500, durationMs: 1 },
+      ],
+    }],
+  };
+  const codes = checkAnimationQuality(project).map((issue) => issue.code);
+  assert.equal(codes.includes('SLIDESHOW_ONLY'), false);
+  assert.equal(codes.includes('UNGROUNDED_MOTION'), false);
+});
+
+test('quality checker surfaces unresolved generated-image QC severity', () => {
+  const now = new Date().toISOString();
+  const project: AnimationProject = { schemaVersion: ANIMATION_PROJECT_VERSION, id: 'qc-tags', name: 'qc-tags', width: 1280, height: 720, fps: 30, createdAt: now, updatedAt: now, assets: [
+    { id: 'hard', type: 'image', name: 'Hard', uri: 'data:image/png;base64,AA==', tags: ['qc-hard-warning'], createdAt: now },
+    { id: 'soft', type: 'image', name: 'Soft', uri: 'data:image/png;base64,AA==', tags: ['qc-warning'], createdAt: now },
+  ], scenes: [{ id: 'scene', name: 'Scene', order: 0, durationMs: 4000, narration: 'Một mô tả.', renderMode: 'composite', backgroundColor: '#000', camera: { transform: defaultTransform(), commands: [] }, commands: [], layers: [
+    { id: 'hard-layer', name: 'Hard image', type: 'image', assetId: 'hard', visible: true, locked: false, zIndex: 0, width: 1280, height: 720, transform: defaultTransform() },
+    { id: 'soft-layer', name: 'Soft image', type: 'image', assetId: 'soft', visible: true, locked: false, zIndex: 1, width: 1280, height: 720, transform: defaultTransform() },
+  ] }] };
+  const issues = checkAnimationQuality(project);
+  assert.ok(issues.some((issue) => issue.code === 'HARD_QC_ASSET' && issue.severity === 'error'));
+  assert.ok(issues.some((issue) => issue.code === 'QC_WARNING_ASSET' && issue.severity === 'warning'));
+});
+
 test('does not flag expected overlap between a full-frame background and foreground diagram', () => {
   const now = new Date().toISOString();
   const project: AnimationProject = { schemaVersion: ANIMATION_PROJECT_VERSION, id: 'backdrop', name: 'backdrop', width: 1280, height: 720, fps: 30, createdAt: now, updatedAt: now, assets: [{ id: 'background', type: 'background', name: 'Background', uri: 'data:image/png;base64,AA==', tags: [], createdAt: now }], scenes: [{ id: 'scene', name: 'Scene', order: 0, durationMs: 4000, narration: 'Một mô tả.', renderMode: 'composite', backgroundColor: '#000', camera: { transform: defaultTransform(), commands: [] }, layers: [

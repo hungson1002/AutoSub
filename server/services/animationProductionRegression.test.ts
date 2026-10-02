@@ -31,6 +31,24 @@ test('sprite restart reuses retained clip sources without a provider call', asyn
   assert.equal((await generateAnimationSprite(request, model, continuity)).id, asset.id);
 });
 
+test('storyboard policy epoch invalidates only long Director checkpoints, not generic resume keys', async () => {
+  const { animationCheckpointKey, ANIMATION_STORYBOARD_POLICY_EPOCH } = await import('./animationCheckpoint');
+  assert.match(ANIMATION_STORYBOARD_POLICY_EPOCH, /reference-film/);
+
+  const genericIdentity = { fixture: 'stable-job-fingerprint' };
+  const rawGeneric = createHash('sha256').update(JSON.stringify(genericIdentity)).digest('hex');
+  assert.equal(animationCheckpointKey(genericIdentity), rawGeneric);
+
+  const directorIdentity = {
+    projectId: 'project-1',
+    brief: 'A sufficiently long storyboard brief.',
+    targetDurationSeconds: 300,
+    mode: 'reference-paced-ai-image-only',
+  };
+  const legacyDirectorKey = createHash('sha256').update(JSON.stringify(directorIdentity)).digest('hex');
+  assert.notEqual(animationCheckpointKey(directorIdentity), legacyDirectorKey);
+});
+
 test('checkpoint survives reload, rejects corruption and releases failed execution locks', async () => {
   const { animationCheckpointKey, loadAnimationCheckpoint, saveAnimationCheckpoint, runAnimationOnce } = await import('./animationCheckpoint');
   const key = animationCheckpointKey({ fixture: randomUUID() });
@@ -158,6 +176,8 @@ test('narration retries a transient provider failure instead of aborting the who
 test('Director checkpoints accepted plans, rejects missing images, and shares duplicate submissions', async () => {
   const { buildVisualDensityPlan, directAnimationProject, batchDirectAnimationProjects } = await import('./animationDirector');
   let calls = 0;
+  let speechCalls = 0;
+  let narrationRewriteCalls = 0;
   const plan = { name: 'Checkpoint integration', continuityBible: 'One consistent illustrated presenter with an immutable face, outfit, palette and story world.', segments: Array.from({ length: 5 }, (_, i) => ({ title: `Part ${i}`, narration: 'Đây là nguyên nhân, sau đó là diễn biến, cuối cùng là kết quả rõ ràng.', visualBeats: [
     { purpose: 'explain', narrationCue: 'Đây là nguyên nhân', visual: 'The presenter demonstrates the concrete cause.', motion: 'locked', transition: 'cut' },
     { purpose: 'mechanism', narrationCue: 'sau đó là diễn biến', visual: 'A distinct explanatory shot shows the mechanism progressing.', motion: 'locked', transition: 'cut' },
@@ -179,7 +199,26 @@ test('Director checkpoints accepted plans, rejects missing images, and shares du
     motionGraphic: 'none',
   }));
   const server = createServer(async (req, res) => {
-    for await (const _chunk of req) { /* drain */ }
+    const requestChunks: Buffer[] = [];
+    for await (const chunk of req) requestChunks.push(Buffer.from(chunk));
+    if (req.url?.endsWith('/chat/completions')) {
+      const payload = JSON.parse(Buffer.concat(requestChunks).toString('utf8')) as { messages?: Array<{ role?: string; content?: unknown }> };
+      const systemPrompt = String(payload.messages?.find((message) => message.role === 'system')?.content || '');
+      if (/Repair ONLY the supplied narration scenes|Repair narration timing BEFORE TTS|Rewrite only the supplied narration scenes to fit measured voice timing/i.test(systemPrompt)) {
+        narrationRewriteCalls++;
+      }
+    }
+    if (req.url?.endsWith('/audio/speech')) {
+      speechCalls++;
+      const samples = 12 * 24_000;
+      const wav = Buffer.alloc(44 + samples * 2);
+      wav.write('RIFF', 0); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
+      wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+      wav.writeUInt32LE(24000, 24); wav.writeUInt32LE(48000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
+      wav.write('data', 36); wav.writeUInt32LE(samples * 2, 40);
+      res.writeHead(200, { 'Content-Type': 'audio/wav' }); res.end(wav);
+      return;
+    }
     calls++;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }));
@@ -206,5 +245,18 @@ test('Director checkpoints accepted plans, rejects missing images, and shares du
     assert.equal(batch.completed, 0);
     assert.equal(batch.failed, 1);
     assert.equal(calls, requestsForAcceptedPlan * 3);
+    const stages: string[] = [];
+    const spokenInput = { ...input, project: { ...input.project, id: randomUUID() }, narration: { provider, model: 'fixture', voice: 'overrun-test' } };
+    // Each scene is 12s: speech exceeds the requested 35s. It must reach the
+    // image stage without rewriting narration or regenerating voice to fit.
+    await assert.rejects(directAnimationProject(spokenInput, async (stage) => { stages.push(stage); }), /AI/i);
+    assert.ok(stages.some((stage) => stage.includes('dựng theo giọng đọc thật')));
+    assert.ok(!stages.some((stage) => /Đang căn lời đọc|Đang chỉnh lời đọc theo timeline/.test(stage)));
+    assert.ok(speechCalls > 0 && speechCalls <= plan.segments.length);
+    const savedSpeechCalls = speechCalls;
+    const savedNarrationRewriteCalls = narrationRewriteCalls;
+    await assert.rejects(directAnimationProject(spokenInput), /AI/i);
+    assert.equal(speechCalls, savedSpeechCalls, 'resume reuses measured voice');
+    assert.equal(narrationRewriteCalls, savedNarrationRewriteCalls, 'resume does not rewrite narration');
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });

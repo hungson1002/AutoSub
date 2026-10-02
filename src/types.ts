@@ -52,6 +52,7 @@ export interface VoiceCloneProfile {
   sourceName: string;
   authorized: true;
   referenceVersion?: number;
+  sourceStartSeconds?: number;
 }
 
 export interface SubtitleCue {

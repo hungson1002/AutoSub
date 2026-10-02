@@ -469,7 +469,7 @@ async function synthesizeNarration(input: CreateReviewJobInput, jobId: string, p
   const narrated: NarratedSegment[] = [];
   const providerType = resolveProviderType(input.tts.provider);
   const voice = providerType === 'hiiu-tts' ? input.tts.model : input.tts.voice;
-  if (providerType === 'edge-tts') {
+  if (providerType === 'edge-tts' && !plan.segments.some(segment => /\[pause(?:\s|\])/i.test(segment.narration))) {
     const batchSize = 24;
     for (let batchStart = 0; batchStart < plan.segments.length; batchStart += batchSize) {
       throwIfCancelled(signal);

@@ -18,6 +18,7 @@ import type {
   VideoEditState,
 } from "../types";
 import { defaultStyle } from "../types";
+import { subtitleAnchorTransform } from "../lib/subtitleAnchor";
 import {
   Crop as CropIcon,
   Maximize,
@@ -26,7 +27,7 @@ import {
   Scissors,
   Volume2,
 } from "../components/Icons";
-import { formatClock } from "../lib/subtitles";
+import { formatClock, wrapSubtitleText } from "../lib/subtitles";
 import { layoutTimelineCues } from "../lib/subtitleTimeline";
 import {
   announceDropdownOpen,
@@ -264,6 +265,7 @@ export function VideoPlayer({
   onVideoEditChange,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const appliedSeekRef = useRef<{ source?: string; id: number } | undefined>(undefined);
   const dubAudioRef = useRef<HTMLAudioElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -560,6 +562,10 @@ export function VideoPlayer({
   }, [asset?.url, playingDub, syncActiveCue, syncSubtitleClock, sourceToTimelineMs, playbackRateAt]);
   useEffect(() => {
     if (!videoRef.current || !seekRequest) return;
+    // Cue edits recreate the clock callbacks. An already consumed seek must
+    // not run again and rewind the playhead while the user types.
+    if (appliedSeekRef.current?.source === asset?.url && appliedSeekRef.current?.id === seekRequest.id) return;
+    appliedSeekRef.current = { source: asset?.url, id: seekRequest.id };
     const next = timelineToSourceMs(seekRequest.timeMs) / 1000;
     setTime(seekRequest.timeMs);
     syncSubtitleClock(seekRequest.timeMs, true);
@@ -568,7 +574,7 @@ export function VideoPlayer({
       videoRef.current.currentTime = next;
     if (audioMode === "dubbed" && dubAudioUrl && dubAudioRef.current)
       dubAudioRef.current.currentTime = seekRequest.timeMs / 1000;
-  }, [seekRequest?.id, audioMode, dubAudioUrl, syncActiveCue, syncSubtitleClock, timelineToSourceMs]);
+  }, [asset?.url, seekRequest?.id, audioMode, dubAudioUrl, syncActiveCue, syncSubtitleClock, timelineToSourceMs]);
 
   const toggle = () => {
     if (!videoRef.current) return;
@@ -1408,12 +1414,12 @@ export function VideoPlayer({
                       top: `${position.y}%`,
                       right: "auto",
                       bottom: "auto",
-                      transform: `translate(${position.x <= 1 ? "0%" : position.x >= 99 ? "-100%" : "-50%"}, ${position.y <= 1 ? "0%" : position.y >= 99 ? "-100%" : "-50%"})`,
+                      transform: subtitleAnchorTransform(previewStyle, position.x, position.y, cue.sourceKind === "onscreen-text"),
                     }}
                   >
-                    {previewStyle.content === "original" ? cue.originalText : previewStyle.content === "both" ? (
-                      <><span>{cue.originalText}</span>{cue.translatedText && <><br /><span>{cue.translatedText}</span></>}</>
-                    ) : cue.translatedText || cue.originalText}
+                    {previewStyle.content === "original" ? wrapSubtitleText(cue.originalText, previewStyle) : previewStyle.content === "both" ? (
+                      <><span>{wrapSubtitleText(cue.originalText, previewStyle)}</span>{cue.translatedText && <><br /><span>{wrapSubtitleText(cue.translatedText, previewStyle)}</span></>}</>
+                    ) : wrapSubtitleText(cue.translatedText || cue.originalText, previewStyle)}
                     {selectedCueId === cue.id && (
                       <button
                         type="button"

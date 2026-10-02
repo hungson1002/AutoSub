@@ -1,5 +1,6 @@
 import type { DubbingMetadata, SubtitleCue, SubtitleStyle } from '../types';
 import { layoutTimelineCues } from './subtitleTimeline';
+import { subtitleAnchor } from './subtitleAnchor';
 
 const parseTime = (value: string) => {
   const normalized = value.trim().replace(',', '.');
@@ -82,17 +83,28 @@ const assTime = (ms: number) => { const safe = Math.max(0, Math.round(ms)); cons
 const assColor = (hex: string) => { const rgb = hex.replace('#', '').length === 6 ? hex.replace('#', '') : 'ffffff'; return `&H00${rgb.slice(4, 6)}${rgb.slice(2, 4)}${rgb.slice(0, 2)}`.toUpperCase(); };
 const assAlpha = (opacity: number) =>
   `&H${Math.round((1 - Math.max(0, Math.min(1, opacity))) * 255).toString(16).padStart(2, '0').toUpperCase()}&`;
-// CSS renders the editor's font controls in 96-DPI pixels, while libass uses
-// typographic 72-DPI script units. Convert once so the same UI value occupies
-// the same visible height in preview and in the burned video.
-export const ASS_CSS_PIXEL_SCALE = 96 / 72;
-const assPixels = (value: number) => Math.round(value * ASS_CSS_PIXEL_SCALE * 10) / 10;
+// Calibrated against Chromium and the Windows libass renderer at PlayRes
+// 1920x1080. Equal numeric sizes made libass glyphs about 9% shorter than
+// the editor preview, so apply the measured correction once to ASS values.
+export const ASS_CSS_PIXEL_SCALE = 1.1;
+const assFontScale = (fontFamily: string) => {
+  const family = fontFamily.split(',')[0]?.trim().toLowerCase();
+  // Bangers' ascender metrics differ substantially between Chromium and
+  // libass even when both load the same bundled font file.
+  if (family === 'bangers') return 1.74;
+  return ASS_CSS_PIXEL_SCALE;
+};
+const assTextOffsetY = (fontFamily: string, fontSize: number) =>
+  fontFamily.split(',')[0]?.trim().toLowerCase() === 'bangers' ? Math.round(fontSize * 0.2) : 0;
+const assPixels = (value: number, fontFamily = 'Arial') => Math.round(value * assFontScale(fontFamily) * 10) / 10;
 
+let subtitleMeasureContext: CanvasRenderingContext2D | null | undefined;
 const measureSubtitleLine = (line: string, style: SubtitleStyle) => {
   if (typeof document !== 'undefined') {
-    const context = document.createElement('canvas').getContext('2d');
+    if (subtitleMeasureContext === undefined) subtitleMeasureContext = document.createElement('canvas').getContext('2d');
+    const context = subtitleMeasureContext;
     if (context) {
-      const family = style.fontFamily.replace(/"/g, '');
+      const family = style.fontFamily.split(',')[0]?.trim().replace(/"/g, '') || 'sans-serif';
       context.font = `${style.italic === true ? 'italic ' : ''}${style.bold === true ? '700 ' : '400 '}${style.fontSize}px "${family}", sans-serif`;
       return context.measureText(line).width + Math.max(0, Array.from(line).length - 1) * (style.letterSpacing ?? 0);
     }
@@ -100,6 +112,54 @@ const measureSubtitleLine = (line: string, style: SubtitleStyle) => {
   return Array.from(line).reduce((width, character) => width + (character === ' ' ? .32 : .58) * style.fontSize, 0)
     + Math.max(0, Array.from(line).length - 1) * (style.letterSpacing ?? 0);
 };
+
+const SUBTITLE_CANVAS_WIDTH = 1920;
+const SUBTITLE_MAX_WIDTH_RATIO = 0.84;
+
+/** Match the editor's 84% caption width in both the browser and ASS export. */
+export function wrapSubtitleText(text: string, style: SubtitleStyle) {
+  const paddingX = style.background === 'box' ? Math.max(0, style.boxPaddingX ?? 10) : 0;
+  const borderWidth = style.background === 'box' ? Math.max(0, style.boxBorderWidth ?? 0) : 0;
+  const maxLineWidth = Math.max(1, SUBTITLE_CANVAS_WIDTH * SUBTITLE_MAX_WIDTH_RATIO - 2 * (paddingX + borderWidth));
+  const wrapped: string[] = [];
+
+  for (const paragraph of String(text || '').replace(/\\N/g, '\n').split(/\r?\n/)) {
+    const words = paragraph.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      wrapped.push('');
+      continue;
+    }
+
+    let line = '';
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (measureSubtitleLine(candidate, style) <= maxLineWidth) {
+        line = candidate;
+        continue;
+      }
+
+      if (line) wrapped.push(line);
+      line = '';
+      if (measureSubtitleLine(word, style) <= maxLineWidth) {
+        line = word;
+        continue;
+      }
+
+      let fragment = '';
+      for (const character of Array.from(word)) {
+        const next = fragment + character;
+        if (fragment && measureSubtitleLine(next, style) > maxLineWidth) {
+          wrapped.push(fragment);
+          fragment = character;
+        } else fragment = next;
+      }
+      line = fragment;
+    }
+    if (line) wrapped.push(line);
+  }
+
+  return wrapped.join('\n');
+}
 
 const roundedRectDrawing = (width: number, height: number, radius: number) => {
   const w = Math.max(1, Math.round(width));
@@ -115,20 +175,23 @@ const roundedRectDrawing = (width: number, height: number, radius: number) => {
   ].join(' ');
 };
 
-const subtitleBoxLayers = (content: string, effective: SubtitleStyle, xPercent: number, yPercent: number, startMs: number, endMs: number, layer: number) => {
-  if (effective.background !== 'box') return [];
+const subtitleBlockBounds = (content: string, effective: SubtitleStyle, xPercent: number, yPercent: number, freeText: boolean) => {
   const lines = content.split(/\r?\n/);
   const textWidth = Math.max(1, ...lines.map((line) => measureSubtitleLine(line, effective)));
   const textHeight = Math.max(1, lines.length * effective.fontSize * 1.18);
-  const paddingX = Math.max(0, effective.boxPaddingX ?? 10);
-  const paddingY = Math.max(0, effective.boxPaddingY ?? 4);
-  const borderWidth = Math.max(0, effective.boxBorderWidth ?? 0);
+  const paddingX = effective.background === 'box' ? Math.max(0, effective.boxPaddingX ?? 10) : 0;
+  const paddingY = effective.background === 'box' ? Math.max(0, effective.boxPaddingY ?? 4) : 0;
+  const borderWidth = effective.background === 'box' ? Math.max(0, effective.boxBorderWidth ?? 0) : 0;
   const width = textWidth + paddingX * 2 + borderWidth * 2;
   const height = textHeight + paddingY * 2 + borderWidth * 2;
   const centerX = (xPercent / 100) * 1920;
   const centerY = (yPercent / 100) * 1080;
-  const left = xPercent <= 1 ? centerX : xPercent >= 99 ? centerX - width : centerX - width / 2;
-  const top = yPercent <= 1 ? centerY : yPercent >= 99 ? centerY - height : centerY - height / 2;
+  const anchor = subtitleAnchor(effective, xPercent, yPercent, freeText);
+  return { left: centerX - width * anchor.horizontal, top: centerY - height * anchor.vertical, width, height, borderWidth };
+};
+const subtitleBoxLayers = (effective: SubtitleStyle, bounds: ReturnType<typeof subtitleBlockBounds>, startMs: number, endMs: number, layer: number) => {
+  if (effective.background !== 'box') return [];
+  const { left, top, width, height, borderWidth } = bounds;
   const radius = Math.max(0, effective.boxBorderRadius ?? 0);
   const drawing = (drawLayer: number, x: number, y: number, w: number, h: number, r: number, color: string, opacity: number) =>
     `Dialogue: ${drawLayer},${assTime(startMs)},${assTime(endMs)},None,,0,0,0,,{\\an7\\pos(${Math.round(x)},${Math.round(y)})\\p1\\bord0\\shad0\\1c${assColor(color)}\\1a${assAlpha(opacity)}}${roundedRectDrawing(w, h, r)}{\\p0}`;
@@ -147,12 +210,11 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
   const isItalic = style.italic === true;
   const defaultX = style.position === 'custom' ? (style.customX ?? 50) : 50;
   const defaultY = style.position === 'top' ? 12 : style.position === 'middle' ? 50 : style.position === 'custom' ? (style.customY ?? 82) : 82;
-  const defaultPositionTag = `{\\an5\\pos(${Math.round((defaultX / 100) * 1920)},${Math.round((defaultY / 100) * 1080)})}`;
   const cueStyleTag = (effective: SubtitleStyle) => {
     const font = effective.fontFamily.split(',')[0]?.trim() || 'Arial';
-    const outline = effective.background === 'outline' ? Math.max(0, assPixels(effective.outlineWidth ?? 2)) : 0;
+    const outline = effective.background === 'outline' ? Math.max(0, assPixels(effective.outlineWidth ?? 2, font)) : 0;
     const edgeColor = assColor(effective.outlineColor);
-    return `{\\fn${font}\\fs${assPixels(effective.fontSize)}\\c${assColor(effective.textColor)}\\3c${edgeColor}\\b${effective.bold === true ? 1 : 0}\\i${effective.italic === true ? 1 : 0}\\u${effective.underline === true ? 1 : 0}\\fsp${assPixels(effective.letterSpacing ?? 0)}\\bord${outline}}`;
+    return `{\\fn${font}\\fs${assPixels(effective.fontSize, font)}\\c${assColor(effective.textColor)}\\3c${edgeColor}\\b${effective.bold === true ? 1 : 0}\\i${effective.italic === true ? 1 : 0}\\u${effective.underline === true ? 1 : 0}\\fsp${assPixels(effective.letterSpacing ?? 0, font)}\\bord${outline}}`;
   };
   const enabledCues = cues.filter((cue) => cue.enabled);
   const defaultStyleTag = cueStyleTag(style);
@@ -163,21 +225,28 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
     const effective = individualStyle ? { ...style, ...individualStyle } : style;
     const effectiveStyleTag = individualStyle ? cueStyleTag(effective) : defaultStyleTag;
     const translated = cue.translatedText || cue.originalText;
-    const content = effective.content === 'original' ? cue.originalText : effective.content === 'both' && cue.originalText.trim() !== translated.trim() ? `${cue.originalText}\\N${translated}` : translated;
-    const escaped = content.replace(/\r?\n/g, '\\N').replace(/[{}]/g, '');
+    const content = effective.content === 'original' ? cue.originalText : effective.content === 'both' && cue.originalText.trim() !== translated.trim() ? `${cue.originalText}\n${translated}` : translated;
+    const wrappedContent = wrapSubtitleText(content, effective);
+    const escaped = wrappedContent.replace(/\r?\n/g, '\\N').replace(/[{}]/g, '');
     const xPercent = cue.sourceKind === 'onscreen-text' && cue.screenPosition ? cue.screenPosition.xPercent : defaultX;
     const yPercent = cue.sourceKind === 'onscreen-text' && cue.screenPosition ? cue.screenPosition.yPercent : defaultY;
-    const positionTag = cue.sourceKind === 'onscreen-text' && cue.screenPosition ? `{\\an5\\pos(${Math.round((xPercent / 100) * 1920)},${Math.round((yPercent / 100) * 1080)})}` : defaultPositionTag;
+    const bounds = subtitleBlockBounds(wrappedContent, effective, xPercent, yPercent, cue.sourceKind === 'onscreen-text');
+    const edgeAnchor = subtitleAnchor(effective, xPercent, yPercent, cue.sourceKind === 'onscreen-text').vertical;
+    // libass owns its glyph/line metrics. Native edge alignment keeps an
+    // unboxed caption fixed even when its actual line advance differs from CSS.
+    const nativeEdge = cue.sourceKind !== 'onscreen-text' && effective.background !== 'box' && edgeAnchor !== .5;
+    const textY = Math.round(nativeEdge ? yPercent / 100 * 1080 : bounds.top + bounds.height / 2 - assTextOffsetY(effective.fontFamily, effective.fontSize));
+    const positionTag = `{\\an${nativeEdge ? edgeAnchor === 1 ? 2 : 8 : 5}\\pos(${Math.round(bounds.left + bounds.width / 2)},${textY})}`;
     const styleName = effective.background === 'box' ? 'Box' : effective.background === 'none' ? 'None' : 'Outline';
     const renderLayer = (layers.get(cue.id) ?? 0) * 4;
-    const dialogue = (layer: number, tags: string) => `Dialogue: ${layer},${assTime(cue.startMs)},${assTime(cue.endMs)},${styleName},,0,0,0,,${positionTag}${effectiveStyleTag}${tags}${escaped}`;
-    const boxes = subtitleBoxLayers(content.replace(/\\N/g, '\n'), effective, xPercent, yPercent, cue.startMs, cue.endMs, renderLayer);
+    const dialogue = (layer: number, tags: string) => `Dialogue: ${layer},${assTime(cue.startMs)},${assTime(cue.endMs)},${styleName},,154,154,0,,${positionTag}${effectiveStyleTag}${tags}${escaped}`;
+    const boxes = subtitleBoxLayers(effective, bounds, cue.startMs, cue.endMs, renderLayer);
     return [...boxes, dialogue(renderLayer + 3, '')];
   });
-  const outlineWidth = style.background === 'outline' ? Math.max(0, assPixels(style.outlineWidth ?? 2)) : 0;
+  const outlineWidth = style.background === 'outline' ? Math.max(0, assPixels(style.outlineWidth ?? 2, style.fontFamily)) : 0;
   const marginV = style.position === 'top' ? 97 : style.position === 'bottom' ? 108 : 0;
-  const common = `${fontFamily},${assPixels(style.fontSize)},${assColor(style.textColor)},${assColor(style.textColor)}`;
-  const flags = `${isBold ? -1 : 0},${isItalic ? -1 : 0},${style.underline === true ? -1 : 0},0,100,100,${assPixels(style.letterSpacing ?? 0)},0`;
+  const common = `${fontFamily},${assPixels(style.fontSize, style.fontFamily)},${assColor(style.textColor)},${assColor(style.textColor)}`;
+  const flags = `${isBold ? -1 : 0},${isItalic ? -1 : 0},${style.underline === true ? -1 : 0},0,100,100,${assPixels(style.letterSpacing ?? 0, style.fontFamily)},0`;
   return `[Script Info]\nScriptType: v4.00+\nScaledBorderAndShadow: yes\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Outline,${common},${assColor(style.outlineColor)},&HFF000000,${flags},1,${outlineWidth},0,${alignment},154,154,${marginV},1\nStyle: Box,${common},${assColor(style.outlineColor)},&HFF000000,${flags},1,0,0,${alignment},154,154,${marginV},1\nStyle: None,${common},&HFF000000,&HFF000000,${flags},1,0,0,${alignment},154,154,${marginV},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${lines.join('\n')}\n`;
 }
 

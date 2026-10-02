@@ -1,10 +1,13 @@
 /* Preview owns the workspace; creation settings and motion details are secondary. */
 .animation-studio-page.studio-preview-first {
+  display: grid;
   height: 100dvh;
   min-height: 560px;
   position: relative;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 64px minmax(0, 1fr) 116px;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 .studio-preview-first.setup-open { grid-template-columns: 292px minmax(0, 1fr); }
 .studio-preview-first.timeline-open { grid-template-rows: 64px minmax(0, 1fr) 264px; }
@@ -37,7 +40,7 @@
 .animation-project-list strong, .animation-project-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .animation-project-list small { color: #98a7b7; font-size: 11px; }
 .animation-project-list em { position: absolute; top: 50%; right: 12px; translate: 0 -50%; color: #72d6a6; font-size: 10px; font-style: normal; }
-.animation-setup-panel { grid-column: 1; grid-row: 2 / 4; min-width: 0; overflow-y: auto; overflow-x: hidden; border-right: 1px solid var(--studio-line); background: var(--studio-panel); scrollbar-width: thin; scrollbar-color: #3b4654 transparent; }
+.animation-setup-panel { grid-column: 1; grid-row: 2 / 4; min-width: 0; min-height: 0; height: 100%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; border-right: 1px solid var(--studio-line); background: var(--studio-panel); scrollbar-width: thin; scrollbar-color: #3b4654 transparent; }
 .animation-setup-panel[hidden], .animation-detail-timeline[hidden] { display: none; }
 .studio-preview-first .animation-director-bar { display: flex; flex-direction: column; align-items: stretch; gap: 18px; min-width: 0; padding: 20px 16px; background: transparent; }
 .studio-preview-first .animation-director-heading > span { font-size: 15px; }
@@ -72,8 +75,11 @@
 .animation-character-picker { display: grid; gap: 9px; padding: 11px; border: 1px solid var(--studio-line); border-radius: 8px; background: rgba(255,255,255,.018); }
 .animation-character-picker-head { display: flex; align-items: center; justify-content: space-between; color: #c7d0db; font-size: 12px; }
 .animation-character-picker-head button { border: 0; background: transparent; color: #ffad7a; cursor: pointer; font-size: 11px; }
-.animation-character-upload { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 58px; border: 1px dashed #465363; border-radius: 7px; color: #b8c3cf; cursor: pointer; font-size: 12px; }
-.animation-character-upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.animation-character-upload { position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 58px; border: 1px dashed #465363; border-radius: 7px; color: #b8c3cf; cursor: pointer; font-size: 12px; }
+/* Keep the file-picker anchor inside its button, not the entire studio.
+   Override the voice-panel input sizing inherited by these nested controls. */
+.studio-preview-first .animation-character-upload input[type="file"] { position: absolute; inset: 0; width: 100%; height: 100%; min-width: 0; min-height: 0; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+.animation-character-upload:focus-within { outline: 2px solid #ff9a5d; outline-offset: 2px; }
 .animation-character-reference { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; color: #dce4ec; font-size: 12px; }
 .animation-character-reference > button { width: 52px; height: 52px; padding: 0; overflow: hidden; border: 1px solid #445160; border-radius: 6px; background: #0d131a; cursor: zoom-in; }
 .animation-character-reference img { width: 100%; height: 100%; object-fit: cover; }
@@ -91,6 +97,10 @@
 .animation-story-cast-grid button { display: grid; gap: 5px; min-width: 0; padding: 5px; border: 1px solid #334150; border-radius: 7px; background: #111820; color: #c7d0db; cursor: zoom-in; text-align: left; }
 .animation-story-cast-grid img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border-radius: 4px; background: #0d131a; }
 .animation-story-cast-grid span { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.animation-story-cast-grid .animation-character-reference { grid-template-columns: 44px minmax(0, 1fr) 28px; gap: 7px; padding: 5px; border: 1px solid #334150; border-radius: 7px; background: #111820; }
+.animation-story-cast-grid .animation-character-reference > button { width: 44px; height: 44px; padding: 0; }
+.animation-story-cast-grid .animation-character-reference > button:last-child { width: 28px; height: 28px; place-items: center; cursor: pointer; }
+.animation-story-cast-grid .animation-character-reference img { aspect-ratio: 1; }
 .animation-character-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .animation-character-options article { display: grid; gap: 5px; min-width: 0; padding: 5px; border: 1px solid var(--studio-line); border-radius: 7px; background: #101821; }
 .animation-character-options article:hover, .animation-character-options article.selected { border-color: #ff8a45; box-shadow: 0 0 0 1px rgba(255,138,69,.22); }
@@ -165,7 +175,7 @@
 .animation-director-actions-bottom > .button.primary.is-loading { color: #ffe0ca; border: 1px solid rgba(255,177,125,.45); background: linear-gradient(135deg, #8d4c2c, #683922); box-shadow: none; cursor: progress; opacity: 1; }
 .animation-director-actions-bottom .animation-open-saved-result { border: 1px solid rgba(91,217,159,.36); background: rgba(91,217,159,.07); color: #bdf5d8; }
 .animation-director-actions-bottom .animation-thumbnail-tool { order: initial; }
-.studio-preview-first .animation-workspace, .studio-preview-first .animation-workspace:not(.has-selection) { grid-column: -2; grid-row: 2; grid-template-columns: 188px minmax(0, 1fr); }
+.studio-preview-first .animation-workspace, .studio-preview-first .animation-workspace:not(.has-selection) { grid-column: -2; grid-row: 2; min-width: 0; min-height: 0; overflow: hidden; grid-template-columns: 188px minmax(0, 1fr); }
 .studio-preview-first .animation-workspace.has-selection { grid-template-columns: 188px minmax(0, 1fr) 230px; }
 .studio-preview-first .animation-workspace.has-selection .animation-inspector { display: block; }
 .studio-preview-first .animation-panel-heading > span { font-size: 11px; letter-spacing: .02em; }
@@ -182,7 +192,7 @@
 .studio-preview-first .animation-stage-controls label, .studio-preview-first .animation-stage-controls span { font-size: 12px; }
 .studio-preview-first .animation-stage-controls label input { width: 60px; height: 30px; font-size: 12px; }
 .studio-preview-first .animation-stage-controls small { display: none; }
-.studio-preview-first .animation-timeline { grid-column: -2; grid-row: 3; grid-template-rows: 42px minmax(0, 1fr); padding: 0 0 10px; }
+.studio-preview-first .animation-timeline { grid-column: -2; grid-row: 3; min-width: 0; min-height: 0; overflow: hidden; grid-template-rows: 42px minmax(0, 1fr); padding: 0 0 10px; }
 .studio-preview-first.timeline-open .animation-timeline { grid-template-rows: 42px 58px minmax(0, 1fr); }
 .studio-preview-first .animation-timeline-top { padding-right: 172px; }
 .studio-preview-first .animation-timeline-top strong { font-size: 11px; }

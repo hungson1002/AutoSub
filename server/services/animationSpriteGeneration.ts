@@ -22,16 +22,47 @@ export function normalizeSpriteRequests(value: unknown): SpriteRequest[] {
   });
 }
 
+/** Fixed art-direction anchor appended to every sprite prompt of a character.
+ * Same proportions/palette/linework in all clips = no more drifting faces. */
+export const SPRITE_STYLE_ANCHOR =
+  'chibi proportions 2.5 heads tall, big round head, flat cel shading, thick dark outline, ' +
+  'simple period costume with exact same colors, face, hairstyle and accessories in every cell';
+
+/** Character bible: one locked design sentence reused for the sheet + all clips. */
+export function buildSpriteBibleDesign(name: string, design: string): string {
+  const clean = design.trim().replace(/\s+/g, ' ').slice(0, 2400);
+  return `${name}: ${clean}. ${SPRITE_STYLE_ANCHOR}.`;
+}
+
+/** Deterministic sheet prompt so all clips of a character share one art bible. */
+export function buildSpriteSheetPrompt(
+  bibleDesign: string,
+  continuity: string,
+  clip: string,
+): string {
+  const action = clip === 'point'
+    ? 'pointing gesture'
+    : clip === 'talk'
+      ? 'talking gesture with mouth variants'
+      : `one coherent ${clip} loop`;
+  return `Professional 2D animation production sprite sheet. Exactly 8 equally sized cells, 4 columns by 2 rows, read left-to-right then top-to-bottom. No grid lines, labels, text, scenery, shadows, borders or checkerboard. Solid pure magenta #FF00FF matte background in every cell; no magenta on character. One identical full-body character per cell, 12% clear padding around all limbs, consistent camera, scale, ground baseline, side facing right. Character bible (LOCKED for every clip): ${bibleDesign} Style/continuity: ${continuity.slice(0, 1200)}. Action: ${clip}, eight successive distinct poses of ${action}; include anticipation, main poses and recovery. For walk/run animate articulated limbs in place, do NOT translate the character across cells. Preserve face, anatomy, costume and colors in all frames. Do not substitute a robot/stick figure unless specified. Image is a sprite atlas, not a comic or character contact sheet.`;
+}
+
 /** Controlled matte extraction, not a claim of semantic/anatomical quality. */
 export async function prepareSpriteSheet(input: string | Buffer) {
   const { data, info } = await sharp(input, { limitInputPixels: 24_000_000 }).toColourspace('srgb').ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  const fw = info.width / 4, fh = info.height / 2;
-  if (!Number.isInteger(fw) || !Number.isInteger(fh) || fw < 128 || fh < 128) throw new Error('Sprite sheet phải có lưới 4×2, mỗi ô tối thiểu 128px.');
+  const rawFw = info.width / 4, rawFh = info.height / 2;
+  if (!Number.isInteger(rawFw) || !Number.isInteger(rawFh) || rawFw < 128 || rawFh < 128) throw new Error('Sprite sheet phải có lưới 4×2, mỗi ô tối thiểu 128px.');
+  // Inset 3px mỗi biên: model thường kẻ grid line mỏng giữa các ô;
+  // cắt biên loại grid mà không chạm vào nhân vật (contract yêu cầu padding quanh limbs).
+  const inset = 3;
+  const fw = rawFw - inset * 2, fh = rawFh - inset * 2;
   const cells: Buffer[] = []; const heights: number[] = []; const thumbnails: Buffer[] = [];
   for (let frame = 0; frame < 8; frame++) {
+    const baseX = (frame % 4) * rawFw + inset, baseY = Math.floor(frame / 4) * rawFh + inset;
     const rgba = Buffer.alloc(fw * fh * 4); let visible = 0, edgePixels = 0, matteBorder = 0, border = 0, minY = fh, maxY = -1, minX = fw, maxX = -1;
     for (let y = 0; y < fh; y++) for (let x = 0; x < fw; x++) {
-      const source = ((Math.floor(frame / 4) * fh + y) * info.width + (frame % 4) * fw + x) * 4;
+      const source = ((baseY + y) * info.width + (baseX + x)) * 4;
       const target = (y * fw + x) * 4;
       const [r, g, b, alpha] = data.subarray(source, source + 4);
       // Magenta matte with tolerance; forbid magenta in the generated subject contract.
@@ -73,10 +104,12 @@ async function generateSprite(request: SpriteRequest, model: string, continuity:
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, 'request.json'), JSON.stringify({ request, continuity, model }));
   const prepared: Awaited<ReturnType<typeof prepareSpriteSheet>>[] = [];
+  // One locked bible for all clips: same design sentence + style anchor everywhere.
+  const bibleDesign = buildSpriteBibleDesign(request.name, request.design);
   for (const [index, clip] of request.clips.entries()) {
     await onStage(`Sprite ${request.name}: ${clip} (${index + 1}/${request.clips.length})`);
     const source = path.join(directory, `${clip}-source.png`);
-    const prompt = `Professional 2D animation production sprite sheet. Exactly 8 equally sized cells, 4 columns by 2 rows, read left-to-right then top-to-bottom. No grid lines, labels, text, scenery, shadows, borders or checkerboard. Solid pure magenta #FF00FF matte background in every cell; no magenta on character. One identical full-body character per cell, 12% clear padding around all limbs, consistent camera, scale, ground baseline, side facing right. Character design: ${request.design}. Style/continuity: ${continuity.slice(0, 1200)}. Action: ${clip}, eight successive distinct poses of one coherent ${clip === 'point' ? 'pointing gesture' : 'loop'}; include anticipation, main poses and recovery. For walk/run animate articulated limbs in place, do NOT translate the character across cells. Preserve face, anatomy, costume and colors in all frames. Do not substitute a robot/stick figure unless specified. Image is a sprite atlas, not a comic or character contact sheet.`;
+    const prompt = buildSpriteSheetPrompt(bibleDesign, continuity, clip);
     try {
       // Revalidate retained sources. Invalid retained images fail visibly rather
       // than silently authorizing another generation on every resume.

@@ -25,6 +25,38 @@ test('compiles an inspectable production contract from normalized beats', () => 
   assert.ok((plan.beats[0]?.failureConditions.length || 0) >= 2);
 });
 
+test('cueOccurrence never points past the real narration even when multiple beats reuse one cue', () => {
+  const plan = compileAnimationProductionPlan({
+    sceneIds: ['scene-1'],
+    sceneDurationsMs: [6000],
+    segments: [{
+      title: 'Repeated visual anchors',
+      narration: 'Não báo động chỉ một lần trong câu này.',
+      visualBeats: [
+        { narrationCue: 'Não báo động', visual: 'First view of the alarm response.' },
+        { narrationCue: 'Não báo động', visual: 'Second editorial view of the same spoken idea.' },
+      ],
+    }],
+  });
+  assert.deepEqual(plan.beats.map((beat) => beat.cueOccurrence), [0, 0]);
+});
+
+test('cueOccurrence still advances when the narration truly repeats the same cue', () => {
+  const plan = compileAnimationProductionPlan({
+    sceneIds: ['scene-1'],
+    sceneDurationsMs: [6000],
+    segments: [{
+      title: 'True repeated cue',
+      narration: 'Mặt Trăng xuất hiện. Sau đó Mặt Trăng xuất hiện lần nữa.',
+      visualBeats: [
+        { narrationCue: 'Mặt Trăng', visual: 'First moon view.' },
+        { narrationCue: 'Mặt Trăng', visual: 'Second moon view.' },
+      ],
+    }],
+  });
+  assert.deepEqual(plan.beats.map((beat) => beat.cueOccurrence), [0, 1]);
+});
+
 test('preflights fractional scene timelines before image generation', () => {
   const durationMs = 9866.666666666668;
   const sceneIds = ['scene-1'];

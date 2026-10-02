@@ -15,7 +15,7 @@ const mediaExecutableCache = new Map<string, string>();
 export type H264Encoder = 'libx264' | 'h264_amf' | 'h264_nvenc' | 'h264_qsv';
 let h264EncoderPromise: Promise<H264Encoder> | undefined;
 
-async function resolveMediaCommand(command: string) {
+export async function resolveMediaCommand(command: string) {
   if (process.platform !== 'win32' || (command !== 'ffmpeg' && command !== 'ffprobe')) return command;
   const cached = mediaExecutableCache.get(command);
   if (cached) return cached;

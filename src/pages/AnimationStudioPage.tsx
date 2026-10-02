@@ -21,19 +21,19 @@ const GPT_IMAGE_MODEL = 'gpt-5.6-luna';
 
 const VISUAL_STYLE_PRESETS = [
   {
+    id: 'handdrawn-story-explainer',
+    label: 'Hand-drawn story explainer',
+    prompt: 'simple hand-drawn editorial explainer illustration, visibly hand-drawn slightly wobbly organic dark contour lines with tiny natural deviations and no ruler-straight vector-perfect strokes, large readable simplified heads and expressive minimal faces, thin one-stroke arms and legs with restrained body detail, flat muted earthy local colors with off-white, beige, warm brown, dusty orange, sage and blue-gray accents, almost no gradients, minimal shading, no dramatic cinematic lighting, generous clean negative space, one dominant focal point, story-specific backgrounds reduced to only a few contextual props and simple flat depth, recurring mascot and supporting cast with clearly different silhouettes, every non-mascot human using a distinct head/face silhouette rather than the mascot\'s blank white circular head or presenter body language, consistent character proportions and clothing, comparisons maps timelines and mechanisms expressed as simple hand-drawn full-frame scenes, no glossy vector perfection, no cinematic 3D, no photorealism, no dense storybook scenery, no poster or UI-card layouts, professional educational YouTube storyboard aesthetic',
+  },
+  {
     id: 'stick-explainer',
     label: 'Người que explainer',
-    prompt: 'clean minimalist stick-figure explainer illustrations, bald round-headed stick characters, thin black limbs, simple expressive faces, flat vector design, bold clean outlines, off-white background, yellow accent color for the main mascot, simple economics and everyday-life icons, highly readable compositions, modern editorial educational style, consistent character design, minimal shading, clear comparisons and diagrams, professional YouTube explainer aesthetic',
+    prompt: 'clean minimalist stick-figure explainer illustrations, bald round-headed stick characters, thin black limbs, simple expressive faces, flat vector design, bold clean outlines, off-white and simple story backgrounds, yellow accent color for the main mascot, simple everyday objects, highly readable compositions, modern editorial educational style, consistent character design, minimal shading, comparisons and mechanisms shown as simple full-frame illustrated situations rather than UI cards, professional YouTube explainer aesthetic',
   },
   {
     id: 'modern-editorial',
     label: 'Editorial hiện đại',
-    prompt: 'premium modern editorial explainer illustration, clean shapes, expressive simplified characters, polished digital painting with subtle texture, strong visual hierarchy, warm accent colors, readable diagrams and object illustrations, consistent art direction, dynamic but not overly cinematic, designed for fast-paced educational YouTube videos',
-  },
-  {
-    id: 'flat-infographic',
-    label: 'Flat vector / infographic',
-    prompt: 'clean flat vector infographic illustration, geometric shapes, minimal shading, bold readable silhouettes, simple characters and objects, clear charts diagrams and comparisons, restrained color palette, uncluttered backgrounds, high information clarity, consistent educational explainer design',
+    prompt: 'premium modern editorial explainer illustration, clean shapes, expressive simplified characters, polished digital painting with subtle texture, strong visual hierarchy, warm accent colors, simple object relationships and story-specific comparisons, consistent art direction, dynamic but not overly cinematic, no UI-card layouts, designed for educational YouTube videos',
   },
   {
     id: 'whiteboard-doodle',
@@ -141,6 +141,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const [targetMinutes, setTargetMinutes] = useState('1');
   const [durationMode, setDurationMode] = useState<'auto' | 'fixed'>('fixed');
   const [characterReference, setCharacterReference] = useState<{ uploadId: string; name: string }>();
+  const [supportingCastReferences, setSupportingCastReferences] = useState<Array<{ uploadId: string; name: string }>>([]);
   const [characterAppearanceLock, setCharacterAppearanceLock] = useState('');
   const [characterOptions, setCharacterOptions] = useState<AnimationAsset[]>([]);
   const [selectedCharacterAssetId, setSelectedCharacterAssetId] = useState('');
@@ -248,6 +249,11 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   const storyCastReferenceAssets = (project.storyCastReferenceAssetIds || []).map((id) => project.assets.find((asset) => asset.id === id)).filter((asset): asset is AnimationAsset => Boolean(asset));
   const thumbnailAssets = project.assets.filter((asset) => asset.tags?.includes('youtube-thumbnail'));
   const videoHasNarration = project.scenes.some((item) => item.renderMode === 'composite' && Boolean(String(item.narration || '').trim()));
+  const productionBeatSummary = useMemo(() => {
+    const beats = project.productionPlan?.beats || [];
+    const images = beats.filter((beat) => beat.technique === 'image-camera').length;
+    return { total: beats.length, images };
+  }, [project.productionPlan]);
   const directorAssignment = capabilityAssignments(settings, 'translation')[0];
   const directorProvider = providers.find((item) => item.id === directorAssignment?.providerId);
   const usingFlowAgentAssets = imageProviderId === 'flow-agent';
@@ -443,7 +449,8 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       ? { referenceUploadId: characterReference.uploadId }
       : selectedCharacterAssetId ? { referenceAssetId: selectedCharacterAssetId } : {};
     const appearance = Object.keys(reference).length && characterAppearanceLock.trim() ? { characterAppearanceLock: characterAppearanceLock.trim() } : {};
-    return usingFlowAgentAssets ? { generator: 'flow-agent' as const, model: 'narwhal', ...reference, ...appearance } : imageProvider ? { provider: imageProvider, model: imageModel, ...reference, ...appearance } : undefined;
+    const supportingCast = supportingCastReferences.length && (usingFlowAgentAssets || imageProviderId === GPT_IMAGE_PROVIDER.id) ? { supportingCastReferenceUploadIds: supportingCastReferences.map((item) => item.uploadId) } : {};
+    return usingFlowAgentAssets ? { generator: 'flow-agent' as const, model: 'narwhal', ...reference, ...supportingCast, ...appearance } : imageProvider ? { provider: imageProvider, model: imageModel, ...reference, ...supportingCast, ...appearance } : undefined;
   };
   const uploadCharacterReference = async (file?: File) => {
     if (!file?.type.startsWith('image/')) return;
@@ -453,6 +460,16 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       setCharacterReference({ uploadId: uploaded.uploadId, name: file.name });
       setCharacterOptions([]); setSelectedCharacterAssetId('');
     } catch (error) { setDirectorError(friendlyErrorMessage(error, 'Không thể tải ảnh nhân vật.')); }
+    finally { setPreparingCharacters(false); }
+  };
+  const uploadSupportingCastReferences = async (files?: FileList | File[]) => {
+    const images = Array.from(files || []).filter((file) => file.type.startsWith('image/')).slice(0, Math.max(0, 4 - supportingCastReferences.length));
+    if (!images.length) return;
+    setPreparingCharacters(true); setDirectorError('');
+    try {
+      const uploaded = await Promise.all(images.map(async (file) => ({ uploadId: (await api.uploadMedia(file)).uploadId, name: file.name })));
+      setSupportingCastReferences((current) => [...current, ...uploaded].slice(0, 4));
+    } catch (error) { setDirectorError(friendlyErrorMessage(error, 'Không thể tải ảnh phong cách nhân vật phụ.')); }
     finally { setPreparingCharacters(false); }
   };
   const prepareCharacterOptions = async () => {
@@ -482,7 +499,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
     setGeneratingThumbnails(true); setDirectorError('');
     try {
       const oldThumbnailIds = new Set(thumbnailAssets.map((asset) => asset.id));
-      const assets = await api.generateAnimationThumbnails({ project, brief, provider: directorProvider, model: directorAssignment.model, assetGeneration: generation, count: 3 });
+      const assets = await api.generateAnimationThumbnails({ project, brief, provider: directorProvider, model: directorAssignment.model, assetGeneration: generation, count: 4 });
       setLibraryAssets((current) => [
         ...assets,
         ...current.filter((item) => !oldThumbnailIds.has(item.id) && !assets.some((asset) => asset.id === item.id)),
@@ -553,7 +570,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         value = { ...project, id: created.id, createdAt: created.createdAt, updatedAt: created.updatedAt };
       }
       const saved = await api.saveAnimationProject(value);
-      setProject(saved); setPersisted(true); void api.listAnimationProjectVersions(saved.id).then(setVersions); void api.listAnimationProjects().then(setSavedProjects); onNotice('Đã lưu project Animation Studio.');
+      setProject(saved); setPersisted(true); void api.listAnimationProjectVersions(saved.id).then(setVersions); void api.listAnimationProjects().then(setSavedProjects); onNotice('Đã lưu project Story Video.');
     } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể lưu project.'), 'error'); }
     finally { setSaving(false); }
   };
@@ -628,7 +645,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
   };
   const editWithAi = async (mode: 'edit' | 'visual' = 'edit') => {
     if (!scene || !directorProvider || !directorAssignment?.model) { onNotice('Chưa có scene hoặc provider/model AI.', 'error'); return; } setEditingWithAi(true);
-    const instruction = mode === 'visual' ? 'Regenerate the visual composition using available AI images while preserving timing and narration. Do not add animation, camera motion, transitions, text, icons or shapes.' : editInstruction;
+    const instruction = mode === 'visual' ? 'Regenerate only the AI image choices/composition while preserving timing and narration exactly. Keep every visual as one full-frame AI image; do not add runtime overlay layers, animation, camera motion or transitions.' : editInstruction;
     try { const edited = await api.editAnimationScene({ instruction, project, sceneId: scene.id, provider: directorProvider, model: directorAssignment.model, mode }); setProject(edited); if (mode === 'edit') setEditInstruction(''); setSelectedLayerId(''); onNotice(mode === 'visual' ? 'Đã đổi hình ảnh, giữ nguyên timing và narration.' : 'AI đã sửa Scene JSON, các layer vẫn chỉnh được.'); }
     catch (error) { onNotice(friendlyErrorMessage(error, 'AI không thể sửa scene.'), 'error'); } finally { setEditingWithAi(false); }
   };
@@ -706,7 +723,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       try {
         const mp4 = await api.renderAnimationProjectFrameAccurate(project, false, (progress) => setRenderProgress(progress));
         const url = URL.createObjectURL(mp4); const link = document.createElement('a'); link.href = url; link.download = `${project.name.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'autosub-animation'}.mp4`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-        onNotice(`Đã xuất MP4 gồm ${compositeScenes.length} cảnh, ảnh AI tĩnh và voiceover.`);
+        onNotice(`Đã xuất MP4 gồm ${compositeScenes.length} cảnh, ảnh AI toàn khung và voiceover.`);
         return;
       } catch (remotionError) {
         setRenderProgress((progress) => Math.max(progress, 5));
@@ -744,7 +761,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       const recording = new Blob(chunks, { type: 'video/webm' }); if (!recording.size) throw new Error('Trình duyệt không thu được khung hình. Hãy thử lại bằng Chrome hoặc Edge mới nhất.');
       const mp4 = await api.renderAnimationProject(project.id, recording, project, (progress) => setRenderProgress(Math.max(45, progress)));
       const url = URL.createObjectURL(mp4); const link = document.createElement('a'); link.href = url; link.download = `${project.name.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'autosub-animation'}.mp4`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-      onNotice(`Đã xuất MP4 gồm ${compositeScenes.length} cảnh, ảnh AI tĩnh và voiceover.`);
+      onNotice(`Đã xuất MP4 gồm ${compositeScenes.length} cảnh, ảnh AI toàn khung và voiceover.`);
     } catch (error) { onNotice(friendlyErrorMessage(error, 'Không thể render MP4.'), 'error'); }
     finally { renderSessionRef.current = undefined; setRendering(false); setRenderProgress(0); }
   };
@@ -814,14 +831,14 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       : 'Có lưu ý chất lượng. Xem chi tiết';
   if (!scene) return <div className="animation-studio-page"><p>Project chưa có composite scene.</p></div>;
 
-  return <section className={`animation-studio-page studio-preview-first${setupOpen ? ' setup-open' : ''}`} aria-label="Animation Studio">
+  return <section className={`animation-studio-page studio-preview-first${setupOpen ? ' setup-open' : ''}`} aria-label="Story Video">
     <header className="animation-toolbar">
       <div className="animation-project-title"><span>AI Storyboard</span><input aria-label="Tên project" value={project.name} onChange={(event) => setProject((current) => ({ ...current, name: event.target.value, updatedAt: now() }))} /></div>
       <div className="animation-toolbar-meta" aria-label="Thông số project"><span>{project.width} × {project.height}</span><span>{project.fps} FPS</span></div>
       <div className="animation-toolbar-actions">
         <div className="animation-project-menu">
           <button className="button quiet" type="button" aria-expanded={projectsOpen} aria-controls="animation-project-browser" onClick={() => { const next = !projectsOpen; setProjectsOpen(next); if (next) void refreshSavedProjects(); }}><BookOpen size={15} aria-hidden="true" /> Dự án{savedProjects.length ? ` (${savedProjects.length})` : ''}</button>
-          {projectsOpen && <div id="animation-project-browser" className="animation-project-browser" role="dialog" aria-label="Project Animation Studio đã lưu">
+          {projectsOpen && <div id="animation-project-browser" className="animation-project-browser" role="dialog" aria-label="Project Story Video đã lưu">
             <div className="animation-project-browser-head"><strong>Project đã lưu</strong><button type="button" aria-label="Đóng danh sách project" onClick={() => setProjectsOpen(false)}><X size={15} aria-hidden="true" /></button></div>
             <div className="animation-project-browser-actions"><button type="button" onClick={createNewProject}><Plus size={14} aria-hidden="true" /> Project mới</button><button type="button" onClick={closeCurrentProject}>Đóng project</button><button type="button" aria-label="Tải lại danh sách project" disabled={loadingProjects} onClick={() => void refreshSavedProjects()}><RefreshCw size={14} aria-hidden="true" /></button></div>
             <div className="animation-project-list">{loadingProjects && !savedProjects.length ? <span>Đang tải project…</span> : savedProjects.length ? savedProjects.map((item) => <button type="button" key={item.id} className={item.id === project.id && persisted ? 'active' : ''} onClick={() => void openSavedProject(item.id)}><strong>{item.name}</strong><small>{item.sceneCount} cảnh · {item.width}×{item.height} · {new Date(item.updatedAt).toLocaleString('vi-VN')}</small>{item.id === project.id && persisted && <em>Đang mở</em>}</button>) : <span>Chưa có project nào được lưu.</span>}</div>
@@ -833,7 +850,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         <button className="button quiet" type="button" onClick={exportJson}>JSON</button>
         <button className="button quiet" type="button" onClick={exportSrt}><Download size={14} aria-hidden="true" /> SRT</button>
         </div></details>
-        <button className="button animation-toolbar-thumbnail" type="button" title={videoHasNarration ? 'Tạo 3 phương án thumbnail từ toàn bộ nội dung video' : 'Dựng video có lời đọc trước để tạo thumbnail'} disabled={generatingThumbnails || directing || !videoHasNarration || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void generateThumbnails()}><Image size={15} aria-hidden="true" /> {generatingThumbnails ? 'Đang tạo thumbnail…' : thumbnailAssets.length ? `Thumbnail (${thumbnailAssets.length})` : 'Tạo thumbnail'}</button>
+        <button className="button animation-toolbar-thumbnail" type="button" title={videoHasNarration ? 'Tạo 4 phương án thumbnail: Face, Action, Confrontation, Mystery' : 'Dựng video có lời đọc trước để tạo thumbnail'} disabled={generatingThumbnails || directing || !videoHasNarration || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void generateThumbnails()}><Image size={15} aria-hidden="true" /> {generatingThumbnails ? 'Đang tạo thumbnail…' : thumbnailAssets.length ? `Thumbnail (${thumbnailAssets.length})` : 'Tạo thumbnail'}</button>
         <button className="button" type="button" onClick={startPresentation}><Maximize size={15} aria-hidden="true" /> Trình chiếu</button>
         <button className="button animation-export-button" type="button" onClick={() => void renderMp4()} disabled={rendering} aria-live="polite"><Download size={15} aria-hidden="true" /> {rendering ? renderProgress >= 100 ? 'Đang tải video…' : `Đang xuất ${renderProgress > 0 ? `${renderProgress}%` : '…'}` : 'Xuất video hoàn chỉnh'}</button>
         <button className="button primary" type="button" onClick={() => void save()} disabled={saving}><Save size={15} aria-hidden="true" /> {saving ? 'Đang lưu' : 'Lưu'}</button>
@@ -858,8 +875,8 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       <div className="animation-director-heading"><span><Sparkles size={16} aria-hidden="true" /> AI Director</span><small>{directorProvider ? `${directorProvider.name} · ${directorAssignment?.model || ''}` : 'Chưa cấu hình AI Director'}</small></div>
       <label className="animation-director-prompt"><span className="sr-only">Ý tưởng hoặc toàn bộ kịch bản</span><textarea value={brief} onChange={(event) => { setBrief(event.target.value); setCharacterOptions([]); setSelectedCharacterAssetId(''); }} placeholder="Nhập toàn bộ nội dung, hoặc một ý tưởng ngắn như: Mèo xâm chiếm ngoài hành tinh…" /></label>
       <div className="animation-director-options">
-        <fieldset className="animation-duration-mode"><legend>Thời lượng</legend><label className={durationMode === 'fixed' ? 'selected' : ''}><input type="radio" checked={durationMode === 'fixed'} onChange={() => setDurationMode('fixed')} /><span className="animation-duration-choice-copy"><strong>Khóa theo thời lượng</strong><small>Bám sát mốc bạn chọn</small></span></label><label className={durationMode === 'auto' ? 'selected' : ''}><input type="radio" checked={durationMode === 'auto'} onChange={() => setDurationMode('auto')} /><span className="animation-duration-choice-copy"><strong>Tự động theo nội dung</strong><small>AI tự suy ra độ dài phù hợp</small></span></label></fieldset>
-        {durationMode === 'fixed' && <label className="animation-duration"><span>Thời lượng video</span><input aria-label="Thời lượng video tính bằng phút" type="number" min="0.1" step="0.25" value={targetMinutes} onChange={(event) => setTargetMinutes(event.target.value)} /><span>phút</span><small>Director sẽ tạo TTS thử, đo thời lượng thật và tự viết lại narration trước khi tạo ảnh cho tới khi lời đọc gần đầy timeline đã chọn.</small></label>}
+        <fieldset className="animation-duration-mode"><legend>Thời lượng</legend><label className={durationMode === 'fixed' ? 'selected' : ''}><input type="radio" checked={durationMode === 'fixed'} onChange={() => setDurationMode('fixed')} /><span className="animation-duration-choice-copy"><strong>Bám sát thời lượng</strong><small>Viết narration gần đầy mốc bạn chọn</small></span></label><label className={durationMode === 'auto' ? 'selected' : ''}><input type="radio" checked={durationMode === 'auto'} onChange={() => setDurationMode('auto')} /><span className="animation-duration-choice-copy"><strong>Tự động theo nội dung</strong><small>AI tự suy ra độ dài phù hợp</small></span></label></fieldset>
+        {durationMode === 'fixed' && <label className="animation-duration"><span>Thời lượng video</span><input aria-label="Thời lượng video tính bằng phút" type="number" min="0.1" step="0.25" value={targetMinutes} onChange={(event) => setTargetMinutes(event.target.value)} /><span>phút</span><small>Director khóa time/word budget trước khi viết để voice 1.00× bám sát mốc đã chọn; chỉ cho phép vài giây khoảng thở tự nhiên, không tự co một video 5 phút xuống còn khoảng 4 phút rưỡi.</small></label>}
         {durationMode === 'auto' && <small className="animation-reference-note">Tự động sẽ suy ra độ dài từ nội dung. Nếu prompt có ghi rõ “60 giây”, “90 seconds”, “2 phút”… Director sẽ ưu tiên mốc đó thay vì tính theo độ dài prompt.</small>}
         <div className="animation-director-voice"><label htmlFor="animation-director-voice">Giọng đọc</label>{ttsVoices.length ? <select id="animation-director-voice" aria-label="Chọn giọng đọc" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} title={ttsProvider?.name}>{ttsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name || voice.id}{voice.language ? ` · ${voice.language}` : ''}</option>)}</select> : <input id="animation-director-voice" aria-label="Voice ID" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)} placeholder={ttsProvider ? 'Nhập Voice ID' : 'Chưa cấu hình TTS'} disabled={!ttsProvider} />}<button type="button" className="button ghost small" disabled={testingTtsVoice || !ttsProvider || !ttsAssignment?.model || !ttsVoice} onClick={() => void testTtsVoice()}>{testingTtsVoice ? <LoaderCircle size={14} className="spin" /> : <CirclePlay size={14} />} {testingTtsVoice ? 'Đang tạo/phát…' : 'Nghe thử'}</button></div>
         {ttsProvider?.providerType === 'kokoro-local' && <small className="animation-reference-note">Kokoro hiện chỉ có giọng tiếng Anh (Mỹ/Anh). Lần nghe thử đầu tải model khoảng 354 MB và cài runtime; audio sẽ tự phát ngay khi tạo xong.</small>}
@@ -876,7 +893,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
             }
             setCharacterOptions([]); setSelectedCharacterAssetId('');
           }}>
-            <option value="flow-agent">Nano Banana 2{flowAgent?.connected ? ' · sẵn sàng' : flowAgent?.extensionConnected ? ' · đang xác thực' : ' · chưa kết nối'}</option>
+            <option value="flow-agent">Nano Banana 2{flowAgent?.connected ? flowAgent.imagePool?.workerAccounts ? ` · ${flowAgent.imagePool.authenticatedAccounts ?? 0}/${flowAgent.imagePool.workerAccounts} tài khoản xác thực` : ' · sẵn sàng' : flowAgent?.extensionConnected ? ' · đang xác thực' : ' · chưa kết nối'}</option>
             {providers.filter((item) => item.enabled && !item.baseUrl.startsWith('local://')).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             <option value={GPT_IMAGE_PROVIDER.id}>GPT Image · ChatGPT{ima2GptStatus?.connected ? ' · sẵn sàng' : ' · cần đăng nhập'}</option>
           </select>
@@ -897,7 +914,8 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
           <div className="animation-character-picker-head"><span>Nhân vật và phong cách</span>{(characterReference || selectedCharacterAssetId) && <button type="button" onClick={() => { setCharacterReference(undefined); setSelectedCharacterAssetId(''); }}>Đổi lựa chọn</button>}</div>
           {characterReference ? <div className="animation-character-reference"><button type="button" aria-label="Xem lớn ảnh nhân vật tham chiếu" onClick={() => setCharacterPreview({ name: characterReference.name, uri: animationAssetUrl(characterReference.uploadId) })}><img src={animationAssetUrl(characterReference.uploadId)} alt="" /></button><span><b>Ảnh của bạn</b>{characterReference.name}</span></div> : selectedCharacter ? <div className="animation-character-reference"><button type="button" aria-label={`Xem lớn ${selectedCharacter.name}`} onClick={() => setCharacterPreview({ id: selectedCharacter.id, name: selectedCharacter.name, uri: selectedCharacter.uri })}><img src={selectedCharacter.uri} alt="" /></button><span><b>Đã chọn</b>{selectedCharacter.name}</span></div> : <label className="animation-character-upload"><Image size={16} aria-hidden="true" /><span>Tải ảnh nhân vật của bạn</span><input type="file" accept="image/png,image/jpeg,image/webp" disabled={preparingCharacters} onChange={(event) => { void uploadCharacterReference(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label>}
           {(characterReference || selectedCharacterAssetId) && <label className="animation-character-appearance" htmlFor="animation-character-appearance-lock"><span>Ghi chú thêm cho mascot (không bắt buộc)</span><textarea id="animation-character-appearance-lock" aria-describedby="animation-character-appearance-help" rows={3} value={characterAppearanceLock} onChange={(event) => setCharacterAppearanceLock(event.target.value)} placeholder="Ví dụ: đổi áo mascot sang xanh dương; giữ nguyên các đặc điểm còn lại." /><small id="animation-character-appearance-help">AI dùng trực tiếp ảnh tham chiếu làm chuẩn nhận diện. Để trống để bám ảnh; chỉ nhập nếu muốn ghi đè chi tiết cụ thể. Ghi chú này chỉ áp dụng cho mascot, không áp lên nhân vật phụ.</small></label>}
-          {storyCastReferenceAssets.length > 0 && <section className="animation-story-cast-references" aria-label="Ảnh tham chiếu nhân vật phụ"><div><strong>Dàn nhân vật phụ · ảnh tham chiếu AI</strong><small>Mỗi ảnh khóa riêng nhận diện nhân vật; mascot không bị dùng làm mẫu cho họ.</small></div><div className="animation-story-cast-grid">{storyCastReferenceAssets.map((asset) => <button key={asset.id} type="button" aria-label={`Xem lớn ảnh tham chiếu ${asset.name}`} onClick={() => setCharacterPreview({ name: asset.name, uri: asset.uri })}><img src={asset.uri} alt="" /><span>{asset.name}</span></button>)}</div></section>}
+          <section className="animation-story-cast-references" aria-label="Phong cách nhân vật phụ"><div><strong>Supporting-cast style · không bắt buộc</strong><small>Tải tối đa 4 ảnh mẫu nhân vật phụ. AI chỉ học ngữ pháp tạo hình chung như nét vẽ tay, tay/chân một nét, tỷ lệ và độ đơn giản; không sao chép nguyên một người. Nếu bỏ trống, Director tự suy ra từ phong cách chính.</small></div>{supportingCastReferences.length > 0 && <div className="animation-story-cast-grid">{supportingCastReferences.map((item) => <div key={item.uploadId} className="animation-character-reference"><button type="button" aria-label={`Xem lớn ${item.name}`} onClick={() => setCharacterPreview({ name: item.name, uri: animationAssetUrl(item.uploadId) })}><img src={animationAssetUrl(item.uploadId)} alt="" /></button><span><b>Style ref</b>{item.name}</span><button type="button" className="button quiet small" aria-label={`Bỏ ${item.name}`} onClick={() => setSupportingCastReferences((current) => current.filter((candidate) => candidate.uploadId !== item.uploadId))}><X size={13} aria-hidden="true" /></button></div>)}</div>}<label className="animation-character-upload"><Image size={16} aria-hidden="true" /><span>{supportingCastReferences.length ? `Thêm ảnh mẫu (${supportingCastReferences.length}/4)` : 'Tải ảnh mẫu nhân vật phụ'}</span><input type="file" multiple accept="image/png,image/jpeg,image/webp" disabled={preparingCharacters || supportingCastReferences.length >= 4} onChange={(event) => { void uploadSupportingCastReferences(event.target.files || undefined); event.currentTarget.value = ''; }} /></label></section>
+          {storyCastReferenceAssets.length > 0 && <section className="animation-story-cast-references" aria-label="Ảnh tham chiếu nhân vật phụ"><div><strong>Dàn nhân vật phụ · ảnh tham chiếu AI</strong><small>Mỗi ảnh khóa riêng nhận diện nhân vật tái xuất hiện; supporting-cast style ở trên chỉ khóa ngữ pháp tạo hình.</small></div><div className="animation-story-cast-grid">{storyCastReferenceAssets.map((asset) => <button key={asset.id} type="button" aria-label={`Xem lớn ảnh tham chiếu ${asset.name}`} onClick={() => setCharacterPreview({ name: asset.name, uri: asset.uri })}><img src={asset.uri} alt="" /><span>{asset.name}</span></button>)}</div></section>}
           {!characterReference && characterOptions.length === 0 && <button className="button quiet" type="button" disabled={!preparingCharacters && (brief.trim().length < 10 || (usingFlowAgentAssets && !flowAgent?.connected))} onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng tạo 4 nhân vật' : 'Không có ảnh? Tạo 4 nhân vật để chọn'}</button>}
           {!characterReference && characterOptions.length > 0 && <><div className="animation-character-options" role="radiogroup" aria-label="Chọn nhân vật">{characterOptions.map((asset) => <article className={selectedCharacterAssetId === asset.id ? 'selected' : ''} key={asset.id}><button className="animation-character-thumb" type="button" aria-label={`Xem lớn ${asset.name}`} onClick={() => setCharacterPreview({ id: asset.id, name: asset.name, uri: asset.uri })}><img src={asset.uri} alt="" /><span>{asset.name}</span></button><button className="animation-character-select" type="button" role="radio" aria-checked={selectedCharacterAssetId === asset.id} onClick={() => setSelectedCharacterAssetId(asset.id)}>{selectedCharacterAssetId === asset.id ? 'Đã chọn' : 'Chọn'}</button></article>)}</div><button className="animation-character-regenerate" type="button" onClick={() => preparingCharacters ? cancelCharacterOptions() : void prepareCharacterOptions()}>{preparingCharacters ? 'Dừng lượt tạo mới' : 'Tạo lại 4 phương án'}</button></>}
         </div>}
@@ -944,8 +962,9 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
         updatedAt: now(),
       }))}>{STORY_TONE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
       <small className="animation-reference-note">Phong cách này điều khiển cách viết kịch bản, không đổi voice đã chọn. “Hài hước thông minh” phải có setup, câu quan sát dí dỏm và cú chốt nghe được; vẫn giữ giọng đọc 1.00x, không đọc nhanh hoặc chèn [cười].</small>
-      <small className="animation-reference-note">Video dùng ảnh AI tĩnh, cắt thẳng theo từng cue và voiceover nối liên tục. Không thêm chuyển động camera hay lớp hiệu ứng.</small>
-      <small className="animation-reference-note">Luật nhất quán: prompt tiếng Việt thì chữ trong ảnh phải là tiếng Việt; mascot mẫu 3D sẽ khóa toàn bộ ảnh 3D, mascot 2D sẽ khóa toàn bộ ảnh 2D.</small>
+      <small className="animation-reference-note">Mỗi cue visual là một ảnh AI tĩnh hoàn chỉnh. Nhịp đến từ hard cut giữa establishing/action/detail/POV/reaction/comparison; một ý dài có thể dùng thêm detail có ích, nhưng không dùng Ken Burns hay ảnh gần như trùng nhau.</small>
+      <small className="animation-reference-note">Chữ trong ảnh dùng có chủ đích như video mẫu: khoảng một phần tư visual có thể chứa số liệu/ngày/timeline/nhãn 1–4 từ khi thật sự giúp hiểu; Vision QC vẫn chặn chữ sai, chữ thừa và pseudo-text. Mascot giữ nguyên identity toàn video nhưng có thể xuất hiện như narrator/viewer-proxy trong story scene.</small>
+      {productionBeatSummary.total > 0 && <small className="animation-reference-note">Kế hoạch hiện tại: {productionBeatSummary.total} visual · {productionBeatSummary.images} ảnh AI.</small>}
       <span>Tỷ lệ khung hình</span><div className="animation-ratio-buttons">{([[1080, 1920, '9:16'], [1920, 1080, '16:9'], [1080, 1080, '1:1']] as const).map(([width, height, label]) => <button key={label} type="button" aria-pressed={project.width === width && project.height === height} onClick={() => relayout(width, height)}>{label}</button>)}</div>
       <div className="animation-voiceover"><button type="button" disabled={creatingVoiceover} onClick={() => void createVoiceover()}>{creatingVoiceover ? 'Đang tạo…' : 'Tạo lại voiceover'}</button></div>
     </div>
@@ -963,11 +982,12 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
       </div>}
       {directorJob?.hasResult && <button className="button quiet animation-open-saved-result" type="button" onClick={() => void restoreDirectorResult()}>Mở kết quả đã lưu</button>}
       {(videoHasNarration || thumbnailAssets.length > 0) && <div id="animation-thumbnail-tool" className="animation-thumbnail-tool">
-        <div className="animation-thumbnail-head"><span><Image size={15} aria-hidden="true" /> Thumbnail video</span><button className="button quiet" type="button" disabled={generatingThumbnails || directing || !videoHasNarration || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void generateThumbnails()}>{generatingThumbnails ? 'Đang tạo 3 thumbnail…' : thumbnailAssets.length ? 'Tạo lại 3 phương án' : 'Tạo 3 phương án'}</button></div>
-        <small>AI dùng toàn bộ narration, các cảnh và phong cách hiện tại để nghĩ thumbnail 16:9; có thể dùng chữ ngắn, giá hoặc số khi hữu ích.</small>
+        <div className="animation-thumbnail-head"><span><Image size={15} aria-hidden="true" /> Thumbnail video</span><button className="button quiet" type="button" disabled={generatingThumbnails || directing || !videoHasNarration || (usingFlowAgentAssets && !flowAgent?.connected)} onClick={() => void generateThumbnails()}>{generatingThumbnails ? 'Đang tạo 4 thumbnail…' : thumbnailAssets.length ? 'Tạo lại 4 phương án' : 'Tạo 4 phương án'}</button></div>
+        <small>AI tạo 4 biến thể kiểu Flowkit: Face, Action, Confrontation và Mystery; mỗi ảnh dùng reference nhân vật hiện có, rồi Vision kiểm tra text, kích thước chủ thể, cảm xúc, tương phản, curiosity và semantic trước khi xếp hạng.</small>
         {thumbnailAssets.length > 0 && <div className="animation-thumbnail-grid">{thumbnailAssets.map((asset, index) => <article className={project.thumbnailAssetId === asset.id ? 'selected' : ''} key={asset.id}>
           <button className="animation-thumbnail-preview" type="button" onClick={() => setCharacterPreview({ id: asset.id, name: asset.name, uri: asset.uri })} aria-label={`Xem lớn ${asset.name}`}><img src={asset.uri} alt="" /></button>
-          <small className="animation-thumbnail-score">{(asset.tags.find((tag) => tag.startsWith('thumbnail-angle:')) || 'thumbnail-angle:concept').replace('thumbnail-angle:', '')} · {(asset.tags.find((tag) => tag.startsWith('thumbnail-score:')) || 'thumbnail-score:0').replace('thumbnail-score:', '')}/10</small>
+          <small className="animation-thumbnail-score">{(asset.tags.find((tag) => tag.startsWith('thumbnail-variant:')) || 'thumbnail-variant:concept').replace('thumbnail-variant:', '')} · plan {(asset.tags.find((tag) => tag.startsWith('thumbnail-score:')) || 'thumbnail-score:0').replace('thumbnail-score:', '')}/10 · vision {(asset.tags.find((tag) => tag.startsWith('thumbnail-vision-score:')) || 'thumbnail-vision-score:-').replace('thumbnail-vision-score:', '')} · {(asset.tags.find((tag) => tag.startsWith('thumbnail-review:')) || 'thumbnail-review:unrated').replace('thumbnail-review:', '')}</small>
+          <small className="animation-thumbnail-copy">{(asset.tags.find((tag) => tag.startsWith('thumbnail-hook:')) || 'thumbnail-hook:').replace('thumbnail-hook:', '')}{asset.tags.some((tag) => tag.startsWith('thumbnail-context:')) ? ` · ${(asset.tags.find((tag) => tag.startsWith('thumbnail-context:')) || '').replace('thumbnail-context:', '')}` : ''}</small>
           <div><button type="button" className="animation-thumbnail-select" onClick={() => setProject((current) => ({ ...current, thumbnailAssetId: asset.id, updatedAt: now() }))}>{project.thumbnailAssetId === asset.id ? 'Đã chọn' : `Chọn ${index + 1}`}</button><a href={asset.uri} download={`${project.name.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'video'}-thumbnail-${index + 1}.png`}>Tải PNG</a></div>
         </article>)}</div>}
       </div>}
@@ -1019,7 +1039,7 @@ export function AnimationStudioPage({ providers, settings, onNotice }: { provide
           <i ref={sequencePlayheadRef} className="animation-sequence-playhead" role="slider" tabIndex={0} aria-label="Vị trí phát toàn bộ video" aria-valuemin={0} aria-valuemax={Math.round(totalDurationMs)} aria-valuenow={Math.round(sequenceTimeMs)} style={{ left: `${sequenceTimeMs / Math.max(1, totalDurationMs) * 100}%` }} onPointerDown={beginSequenceScrub} onPointerMove={moveSequenceScrub} onPointerUp={endSequenceScrub} onPointerCancel={endSequenceScrub} onKeyDown={handleSequenceScrubKeyDown} />
         </div>
       </div>
-      <small className="animation-timeline-note">Mỗi ô là một cue ảnh AI; ảnh chỉ đổi khi lời đọc chuyển sang ý mới.</small>
+      <small className="animation-timeline-note">Mỗi ô là một visual AI toàn khung. Visual đổi theo nhịp kể: ý mới, hành động mới hoặc một detail/POV/reaction thực sự bổ sung thông tin.</small>
     </div>
   </section>;
 }

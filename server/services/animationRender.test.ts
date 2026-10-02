@@ -4,7 +4,8 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { run, workdir } from './ffmpeg';
-import { enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, transcodeAnimationRecording, validateAnimationOutput, wavTrailingSilenceMs } from './animationRender';
+import { defaultTransform, type AnimationProject } from '../../shared/animationStudio';
+import { buildStaticHybridFramePlan, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, isStaticHybridProject, isStaticImageOnlyProject, transcodeAnimationRecording, validateAnimationOutput, wavTrailingSilenceMs } from './animationRender';
 
 test('detects a quiet scene ending without mistaking an internal pause for the ending', () => {
   const sampleRate = 48_000;
@@ -22,6 +23,90 @@ test('detects a quiet scene ending without mistaking an internal pause for the e
     wav.writeInt16LE(active ? Math.round(9000 * Math.sin(2 * Math.PI * 440 * second)) : 0, 44 + frame * 2);
   }
   assert.ok(wavTrailingSilenceMs(wav) >= 170 && wavTrailingSilenceMs(wav) <= 190);
+});
+
+
+test('static renderer eligibility preserves rich projects for Remotion', () => {
+  const createdAt = new Date(0).toISOString();
+  const base: AnimationProject = {
+    schemaVersion: 1,
+    id: randomUUID(),
+    name: 'Render eligibility',
+    width: 1280,
+    height: 720,
+    fps: 30,
+    createdAt,
+    updatedAt: createdAt,
+    assets: [{ id: randomUUID(), name: 'Frame', type: 'image', uri: '/frame.png', tags: [], createdAt }],
+    transitionPreset: { type: 'cut', durationMs: 0 },
+    styleProfile: { name: 'Test', style: '', palette: [], pacing: 'balanced', tone: 'balanced' },
+    scenes: [],
+  };
+  const imageAssetId = base.assets[0].id;
+  const staticProject: AnimationProject = {
+    ...base,
+    scenes: [{
+      id: randomUUID(),
+      name: 'Static',
+      order: 0,
+      durationMs: 3000,
+      narration: '',
+      transition: { type: 'cut', durationMs: 0 },
+      renderMode: 'composite',
+      backgroundColor: '#fff',
+      layers: [{
+        id: 'image',
+        name: 'Image',
+        type: 'image',
+        assetId: imageAssetId,
+        visible: true,
+        locked: false,
+        zIndex: 0,
+        width: 1280,
+        height: 720,
+        transform: defaultTransform(),
+      }],
+      commands: [],
+      camera: { transform: defaultTransform(), commands: [] },
+    }],
+  };
+  assert.equal(isStaticImageOnlyProject(staticProject, false), true);
+  assert.equal(isStaticImageOnlyProject(staticProject, true), false);
+
+  const richProject: AnimationProject = {
+    ...staticProject,
+    scenes: staticProject.scenes.map((scene) => scene.renderMode === 'composite' ? {
+      ...scene,
+      layers: [...scene.layers, {
+        id: 'label',
+        name: 'Label',
+        type: 'text' as const,
+        text: '42',
+        visible: true,
+        locked: false,
+        zIndex: 2,
+        width: 200,
+        height: 80,
+        fill: '#111',
+        fontSize: 48,
+        transform: defaultTransform(),
+      }],
+    } : scene),
+  };
+  assert.equal(isStaticImageOnlyProject(richProject, false), false);
+  assert.equal(isStaticHybridProject(richProject, false), true);
+  const plan = buildStaticHybridFramePlan(richProject);
+  assert.equal(plan.length, 1);
+  assert.equal(plan[0].durationInFrames, 90);
+
+  const dynamicProject: AnimationProject = {
+    ...richProject,
+    scenes: richProject.scenes.map((scene) => scene.renderMode === 'composite' ? {
+      ...scene,
+      commands: [{ id: 'move-label', type: 'MOVE' as const, targetId: 'label', startMs: 0, durationMs: 1000, from: { x: 0, y: 0 }, to: { x: 100, y: 0 } }],
+    } : scene),
+  };
+  assert.equal(isStaticHybridProject(dynamicProject, false), false);
 });
 
 test('transcodes WebM and reuses cache by project fingerprint', async () => {

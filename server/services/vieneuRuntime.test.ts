@@ -33,13 +33,18 @@ test('VieNeu hesitation score ignores a short natural pause', () => {
     { startMs: 100, endMs: 250, durationMs: 150 },
     { startMs: 500, endMs: 720, durationMs: 220 },
     { startMs: 900, endMs: 1_250, durationMs: 350 },
-  ]), 250);
+  ]), 0);
+  assert.equal(vieneuHesitationScore([{startMs:100,endMs:950,durationMs:850}]),400);
 });
 
 test('VieNeu short-utterance repair does not flatten multi-sentence narration', () => {
   assert.equal(usesShortUtteranceQualityPass('Mọi ánh mắt lập tức hướng về Peter.'), true);
   assert.equal(usesShortUtteranceQualityPass('Peter quay lại. Ned bước vào.'), false);
   assert.equal(usesShortUtteranceQualityPass('Một câu rất dài '.repeat(20)), false);
+  assert.equal(usesShortUtteranceQualityPass('Đợi đã… Đừng mở cửa!'), false);
+  assert.equal(usesShortUtteranceQualityPass('Cháu ơi, đừng nhìn xuống.'), false);
+  assert.equal(usesShortUtteranceQualityPass('[thở dài] Rồi mọi chuyện đổi khác.'), false);
+  assert.equal(usesShortUtteranceQualityPass('Cháu nghe không?'), false);
 });
 
 test('VieNeu speech text keeps expressive punctuation and preserves supported emotion tokens', () => {
@@ -47,6 +52,7 @@ test('VieNeu speech text keeps expressive punctuation and preserves supported em
   assert.equal(prepareVieneuSpeechText('Tuyệt quá!'), 'Tuyệt quá!');
   assert.equal(prepareVieneuSpeechText('Xin chào mọi người'), 'Xin chào mọi người.');
   assert.equal(prepareVieneuSpeechText('Chờ một chút…'), 'Chờ một chút…');
+  assert.equal(prepareVieneuSpeechText('Chờ một chút.\n\nRồi hãy đi.'), 'Chờ một chút.\n\nRồi hãy đi.');
   assert.equal(prepareVieneuSpeechText('Đúng như vậy [cười]'), 'Đúng như vậy. [cười]');
   assert.equal(prepareVieneuSpeechText('Nghe hay quá! [cười]'), 'Nghe hay quá! [cười]');
   assert.equal(prepareVieneuSpeechText('[thở dài] Rồi mọi chuyện đổi khác.'), '[thở dài] Rồi mọi chuyện đổi khác.');
@@ -55,9 +61,9 @@ test('VieNeu speech text keeps expressive punctuation and preserves supported em
 
 test('VieNeu pause repair removes only the middle of a measured silence', () => {
   const filter = buildVieneuPauseRepairFilter([
-    { startMs: 500, endMs: 850, durationMs: 350 },
+    { startMs: 500, endMs: 1_150, durationMs: 650 },
   ], 2_000, 100);
   assert.match(filter, /atrim=start=0\.000000:end=0\.550000/);
-  assert.match(filter, /atrim=start=0\.800000:end=2\.000000/);
+  assert.match(filter, /atrim=start=1\.100000:end=2\.000000/);
   assert.match(filter, /concat=n=2:v=0:a=1\[out\]/);
 });

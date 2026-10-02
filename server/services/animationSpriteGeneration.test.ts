@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import { normalizeSpriteRequests, prepareSpriteSheet } from './animationSpriteGeneration';
+import { buildSpriteBibleDesign, buildSpriteSheetPrompt, normalizeSpriteRequests, prepareSpriteSheet, SPRITE_STYLE_ANCHOR } from './animationSpriteGeneration';
 
 async function fixture(identical = false, clipped = false) {
   const shapes = Array.from({ length: 8 }, (_, i) => {
@@ -18,13 +18,28 @@ test('sprite request requires explicit identity and supported actions', () => {
   assert.deepEqual(normalizeSpriteRequests([{ ...request, name: ' ' }]), []);
 });
 
+test('sprite bible locks one design + style anchor for every clip', () => {
+  const bible = buildSpriteBibleDesign('Tran Hung Dao', 'old general in bronze armor and helmet');
+  assert.ok(bible.includes('Tran Hung Dao'));
+  assert.ok(bible.includes(SPRITE_STYLE_ANCHOR));
+  const talk = buildSpriteSheetPrompt(bible, 'river battle', 'talk');
+  const point = buildSpriteSheetPrompt(bible, 'river battle', 'point');
+  // Same locked bible in both prompts; only the action differs.
+  assert.ok(talk.includes(bible) && point.includes(bible));
+  assert.ok(talk.includes('talking gesture') && point.includes('pointing gesture'));
+  // Deterministic: same inputs always give the same prompt.
+  assert.equal(buildSpriteSheetPrompt(bible, 'river battle', 'talk'), talk);
+});
+
 test('sprite matte extraction produces eight transparent cells', async () => {
   const result = await prepareSpriteSheet(await fixture());
   assert.equal(result.cells.length, 8);
-  assert.equal(result.frameWidth, 128);
+  // The production extractor removes a 3px grid border from each cell edge.
+  assert.equal(result.frameWidth, 122);
+  assert.equal(result.frameHeight, 122);
   const pixels = await sharp(result.cells[0]).raw().toBuffer();
   assert.equal(pixels[3], 0);
-  assert.equal(pixels[(40 * 128 + 40) * 4 + 3], 255);
+  assert.equal(pixels[(40 * result.frameWidth + 40) * 4 + 3], 255);
 });
 
 test('rejects identical poses and cropped subjects', async () => {

@@ -35,7 +35,7 @@ const adapters: FilmVideoAdapter[] = [{
   label: 'Google Flow · Veo',
   models: ['Flow Agent Auto'],
   canHandle: (model) => model === 'Flow Agent Auto',
-  validate: async () => { await validateGoogleFlowSession(); },
+  validate: async () => { await validateGoogleFlowSession(undefined, undefined, { requireBearer: true }); },
   compilePrompt: ({ prompt }) => prompt,
   generate: ({ prompt, outputFile, references, aspectRatio, signal }) => generateGoogleFlowVideo(
     prompt,

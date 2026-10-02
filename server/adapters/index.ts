@@ -1,3 +1,5 @@
+import { renderSpeechPerformance } from '../services/speechPerformance';
+import { normalizeSpokenText, planSpeech, resolveSpeech, type SpeechDelivery } from '../../shared/speech';
 import type { AIModel, AIProvider, Capability, SubtitleSegment, TranslationItem, TranslationMemoryItem } from '../types';
 import { resolveProviderType } from '../providers/base';
 import * as elevenlabs from './elevenlabs';
@@ -97,9 +99,18 @@ export function recognizeImage(provider: AIProvider, model: string, imagePath: s
   return openai.recognizeImage(provider, model, imagePath, prompt, signal);
 }
 
-export function synthesize(provider: AIProvider, model: string, voice: string, text: string, options: { speed?: number; format?: string; signal?: AbortSignal }) {
-  if (isVieneuLocal(provider)) return vieneuLocal.synthesize(provider, model, voice, text, options);
-  if (isKokoroLocal(provider)) return kokoroLocal.synthesize(provider, model, voice, text, options);
-  if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
-  return isElevenLabs(provider) ? elevenlabs.synthesize(provider, model, voice, text, options) : isCapCut(provider) ? capcut.synthesize(provider, model, voice, text, options) : isEdgeTts(provider) ? edgeTts.synthesize(provider, model, voice, text, options) : openai.synthesize(provider, model, voice, text, options);
+export function synthesize(provider: AIProvider, model: string, voice: string, text: string, options: { speed?: number; format?: string; signal?: AbortSignal; speech?: Omit<SpeechDelivery, 'text'> }) {
+  // Leave timing/speaker selection to the owning job. Never infer emotions or add cues.
+  if (options.speech) {
+    const delivery = resolveSpeech({ ...options.speech, text }, options.speed ?? 1, isVieneuLocal(provider));
+    text = delivery.text;
+    options = { ...options, speed: delivery.speed };
+  } else text = normalizeSpokenText(text);
+  const generate = (text:string) => {
+    if (isVieneuLocal(provider)) return vieneuLocal.synthesize(provider, model, voice, text, options);
+    if (isKokoroLocal(provider)) return kokoroLocal.synthesize(provider, model, voice, text, options);
+    if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
+    return isElevenLabs(provider) ? elevenlabs.synthesize(provider, model, voice, text, options) : isCapCut(provider) ? capcut.synthesize(provider, model, voice, text, options) : isEdgeTts(provider) ? edgeTts.synthesize(provider, model, voice, text, options) : openai.synthesize(provider, model, voice, text, options);
+  };
+  return renderSpeechPerformance(planSpeech(text), generate, options.signal, options.format);
 }
