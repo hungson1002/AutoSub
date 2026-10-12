@@ -6,7 +6,7 @@ import { recognizeImage, transcribe, ProviderError } from '../adapters';
 import { ensureWorkdir, extractAudio, extractRoiFrames, run } from '../services/ffmpeg';
 import { resolveProviderType } from '../providers/base';
 import { cleanupUploadSession, createTemporarySession, resolveUpload, UploadReferenceError } from '../services/uploads';
-import { filterLowConfidenceWhisperSegments, groupOcrResults, hasSignificantFrameChange, offsetSubtitleSegments, segmentsToCues } from '../services/subtitles';
+import { filterLowConfidenceWhisperSegments, groupOcrResults, hasSignificantFrameChange, offsetSubtitleSegments, rebalanceWordTimedSegmentBoundaries, segmentsToCues } from '../services/subtitles';
 import { alignTranscriptToAudio, filterCuesOutsideSpeech } from '../services/textAudioAlignment';
 import { detectSpeechRegions } from '../services/timestampRefinement';
 
@@ -115,6 +115,12 @@ async function transcribeGroqAudio(provider: AIProvider, model: string, audio: s
 }
 
 export async function extractionRoutes(app: FastifyInstance) {
+  const activeStt = new Map<string, AbortController>();
+  app.post<{ Params: { progressId: string } }>('/api/extract/progress/:progressId/cancel', async (request) => {
+    const controller = activeStt.get(request.params.progressId);
+    controller?.abort();
+    return { cancelled: Boolean(controller) };
+  });
   app.get<{ Params: { progressId: string } }>('/api/extract/progress/:progressId', async (request) => extractionProgress.get(request.params.progressId) || { percent: 0, stage: 'Tác vụ không còn chạy', status: 'failed', error: 'Kết nối xử lý đã bị ngắt. Hãy chạy lại tác vụ.' });
 
   app.post('/api/extract/stt', async (request, reply) => {
@@ -130,6 +136,10 @@ export async function extractionRoutes(app: FastifyInstance) {
     try {
       const body = bodyOf(request);
       progressId = body.progressId;
+      if (progressId) {
+        if (activeStt.has(progressId)) { progressId = undefined; return reply.code(409).send({ error: 'STT job đang chạy.' }); }
+        activeStt.set(progressId, controller);
+      }
       reportExtractionProgress(progressId, { percent: 3, stage: 'Đang kiểm tra file nguồn', status: 'running' });
       debugMedia('extraction', { method: request.method, url: request.url, contentLength: request.headers['content-length'] || '', contentType: request.headers['content-type'] || '', uploadId: body.uploadId || '' });
       if (!body.uploadId) return reply.code(400).send({ error: 'Thiếu uploadId. Hãy upload video một lần trước.' });
@@ -152,7 +162,12 @@ export async function extractionRoutes(app: FastifyInstance) {
         ? await transcribeGroqAudio(body.provider, body.model, audio, body.language || 'Auto Detect', controller.signal, onSttProgress)
         : await transcribe(body.provider, body.model, audio, path.basename(audio), body.language || 'Auto Detect', controller.signal, onSttProgress);
       reportExtractionProgress(progressId, { percent: 88, stage: 'Đã nhận dạng xong · đang căn thời gian phụ đề' });
-      let providerCues = segmentsToCues(filterLowConfidenceWhisperSegments(result.segments));
+      const providerType = resolveProviderType(body.provider);
+      const filteredSegments = filterLowConfidenceWhisperSegments(result.segments);
+      const boundaryAwareSegments = providerType === 'qwen3-asr-local' || providerType === 'funasr-local'
+        ? rebalanceWordTimedSegmentBoundaries(filteredSegments)
+        : filteredSegments;
+      let providerCues = segmentsToCues(boundaryAwareSegments);
       debugMedia('PROVIDER SEGMENTS', { cues: cueDebug(providerCues), wordTimestampCueCount: providerCues.filter((cue) => Array.isArray(cue.words) && cue.words.length > 0).length });
       debugMedia('STT PROVIDER CUES', { cues: cueDebug(providerCues) });
       if (!providerCues.length && result.text) {
@@ -179,6 +194,7 @@ export async function extractionRoutes(app: FastifyInstance) {
       return reply.code(error instanceof ProviderError ? error.status : error instanceof UploadReferenceError ? error.statusCode : 502).send(routeError(error, message));
     } finally {
       request.raw.removeListener('aborted', abortDisconnectedRequest);
+      if (progressId && activeStt.get(progressId) === controller) activeStt.delete(progressId);
       reply.raw.removeListener('close', abortDisconnectedRequest);
       if (temporaryDir) await cleanupUploadSession(temporaryDir);
       forgetExtractionProgress(progressId);

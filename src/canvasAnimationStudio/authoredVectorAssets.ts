@@ -1,8 +1,9 @@
 import { interpolate as interpolateShape } from 'flubber';
-import type { CanvasStudioObject } from './types';
+import type { CanvasStudioObject, CanvasStudioScene } from './types';
 import { resolveCanvasPropVariant, canvasShipStyle } from '../../shared/canvasAssetRegistry';
 import { CANVAS_DOOR_PANEL } from '../../shared/canvasEnvironment';
 import {canvasLampLight} from '../../shared/canvasAtmosphere';
+import {resolveCanvasProceduralAssetProfile, type CanvasProceduralAssetProfile} from '../../shared/canvasProceduralAssetForge';
 
 type Pt = { x: number; y: number };
 
@@ -115,6 +116,53 @@ function hatch(
   alpha = .24,
 ) {
   lines.forEach(([a, b]) => curve(ctx, [a, b], color, width, alpha));
+}
+
+/** Deterministic art-department detail. Nothing here uses frame randomness. */
+function forgeGrain(
+  ctx:CanvasRenderingContext2D,
+  profile:CanvasProceduralAssetProfile,
+  box:{left:number;top:number;right:number;bottom:number},
+  vertical=false,
+){
+  const count=Math.max(0,Math.round(2+profile.detail*3+profile.grain*4));
+  for(let i=0;i<count;i++){
+    const a=rnd(profile.seed,90+i);
+    const b=rnd(profile.seed,130+i);
+    const c=rnd(profile.seed,170+i)-.5;
+    if(vertical){
+      const x=box.left+(box.right-box.left)*a;
+      const y1=box.top+(box.bottom-box.top)*.08;
+      const y2=box.bottom-(box.bottom-box.top)*.08;
+      curve(ctx,[{x,y:y1},{x:x+c*4,y:(y1+y2)/2},{x:x-c*2,y:y2}],profile.shadow,.48+profile.detail*.2,.12+profile.grain*.18);
+    }else{
+      const y=box.top+(box.bottom-box.top)*a;
+      const x1=box.left+(box.right-box.left)*.08;
+      const x2=box.right-(box.right-box.left)*.08;
+      curve(ctx,[{x:x1,y},{x:(x1+x2)/2,y:y+c*3},{x:x2,y:y-c*2}],profile.shadow,.48+profile.detail*.2,.12+profile.grain*.18);
+    }
+  }
+}
+
+function forgeWear(
+  ctx:CanvasRenderingContext2D,
+  profile:CanvasProceduralAssetProfile,
+  points:Pt[],
+){
+  if(profile.wear<.25)return;
+  const count=Math.max(1,Math.round(profile.wear*4));
+  for(let i=0;i<count;i++){
+    const p=points[i%points.length]!;
+    const dx=(rnd(profile.seed,230+i)-.5)*9;
+    const dy=(rnd(profile.seed,260+i)-.5)*9;
+    curve(ctx,[{x:p.x+dx-2,y:p.y+dy},{x:p.x+dx+2.5,y:p.y+dy+(rnd(profile.seed,290+i)-.5)*2}],profile.highlight,.65,.18+profile.wear*.22);
+  }
+}
+
+function forgeFastener(ctx:CanvasRenderingContext2D,profile:CanvasProceduralAssetProfile,x:number,y:number,r=1.2){
+  if(profile.hardware<.25)return;
+  dot(ctx,x,y,r,profile.shadow);
+  curve(ctx,[{x:x-r*.7,y},{x:x+r*.7,y}],profile.highlight,.42,.55);
 }
 
 function fabricFolds(
@@ -533,8 +581,8 @@ function shipPalette(object: CanvasStudioObject) {
   };
 }
 
-export function drawAuthoredShip(ctx: CanvasRenderingContext2D, object: CanvasStudioObject) {
-  if(canvasShipStyle(object)==='ferry'){drawWoodenFerry(ctx,object);return;}
+export function drawAuthoredShip(ctx: CanvasRenderingContext2D, object: CanvasStudioObject, restingPaddle = true, phase:'full'|'back'|'front'='full') {
+  if(canvasShipStyle(object)==='ferry'){drawWoodenFerry(ctx,object,restingPaddle,phase);return;}
   const p = shipPalette(object);
   const large = /large|war|fleet|yuan|mongol|nguyên|hạm/i.test(`${object.label} ${object.designNotes || ''}`);
   const sx = object.width / 100;
@@ -618,28 +666,35 @@ export function drawAuthoredShip(ctx: CanvasRenderingContext2D, object: CanvasSt
   ctx.restore();
 }
 
-function drawWoodenFerry(ctx: CanvasRenderingContext2D, object: CanvasStudioObject) {
+function drawWoodenFerry(ctx: CanvasRenderingContext2D, object: CanvasStudioObject, restingPaddle: boolean, phase:'full'|'back'|'front') {
   const p=shipPalette(object);
   ctx.save();ctx.scale(object.width/100,object.height/100);
   // Open gunwale in shallow perspective, with the hull sitting on the water.
   const wood=ctx.createLinearGradient(0,-9,0,35);
   wood.addColorStop(0,p.hull);wood.addColorStop(.55,'#805d43');wood.addColorStop(1,'#44372e');
   const hull=new Path2D('M -49 -5 Q -37 9 0 10 Q 35 8 49 -9 Q 43 22 28 29 Q 0 38 -29 28 Q -43 19 -49 -5 Z');
-  ctx.fillStyle=wood;ctx.fill(hull);ctx.strokeStyle=p.ink;ctx.lineWidth=1.2;ctx.stroke(hull);
+  if(phase==='full'){ctx.fillStyle=wood;ctx.fill(hull);ctx.strokeStyle=p.ink;ctx.lineWidth=1.2;ctx.stroke(hull);}
+  if(phase!=='front'){
   path(ctx,'M -49 -5 Q -28 -20 12 -19 Q 39 -18 49 -9 Q 34 7 0 10 Q -34 8 -49 -5 Z','#332d28',p.ink,1);
   path(ctx,'M -41 -5 Q -20 -14 12 -13 Q 32 -13 41 -8 Q 28 1 0 3 Q -24 3 -41 -5 Z','#72533d',p.ink,.6);
   for(const x of [-26,-7,15,32]){
     path(ctx,`M ${x-3} -12 L ${x+2} -13 L ${x+7} 4 L ${x+1} 5 Z`,'#aa8059',p.ink,.55);
     curve(ctx,[{x:x-1,y:-10},{x:x+4,y:2}],'#d0a777',.35,.65);
   }
+  }
+  if(phase!=='back'){
+  if(phase==='front'){ctx.fillStyle=wood;ctx.fill(hull);ctx.strokeStyle=p.ink;ctx.lineWidth=1.2;ctx.stroke(hull);}
   curve(ctx,[{x:-48,y:-5},{x:0,y:10},{x:48,y:-9}],'#bd936a',1.8);
   for(const y of [16,22,28])curve(ctx,[{x:-37+(y-16)*.6,y},{x:0,y:y+6},{x:38-(y-16)*.8,y:y-2}],'#332b25',.6,.65);
   for(const x of [-28,-10,12,29])curve(ctx,[{x,y:13},{x:x*.8,y:29}],'#c69b72',.35,.4);
   // A real paddle: thin shaft and broad blade, resting across the stern.
-  curve(ctx,[{x:-39,y:-11},{x:-10,y:18}],'#bb9265',1.5);
-  path(ctx,'M -14 12 L -5 19 Q -1 25 -6 26 L -16 17 Z','#ac8058',p.ink,.55);
+  if(restingPaddle){
+    curve(ctx,[{x:-39,y:-11},{x:-10,y:18}],'#bb9265',1.5);
+    path(ctx,'M -14 12 L -5 19 Q -1 25 -6 26 L -16 17 Z','#ac8058',p.ink,.55);
+  }
   curve(ctx,[{x:37,y:-8},{x:49,y:-14},{x:55,y:-3}],'#a68d6b',.8,.8);
   curve(ctx,[{x:-36,y:30},{x:0,y:37},{x:34,y:30}],'#a9c7c7',.65,.35);
+  }
   ctx.restore();
 }
 
@@ -683,8 +738,9 @@ export function drawAuthoredStake(ctx: CanvasRenderingContext2D, object: CanvasS
   ctx.restore();
 }
 
-export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasStudioObject, timeMs = 0) {
+export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasStudioObject, timeMs = 0, scene?:CanvasStudioScene) {
   const v = resolveCanvasPropVariant(object);
+  const profile=resolveCanvasProceduralAssetProfile(object,scene);
   const sx = object.width / 100;
   const sy = object.height / 100;
   const fill = object.color || '#b58a5f';
@@ -693,7 +749,116 @@ export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasSt
   ctx.save();
   ctx.scale(sx, sy);
 
-  if (v === 'shield') {
+  if(v==='dog'||v==='demon-dog'){
+    const fur=object.color||'#d7d0bf';
+    const shade=object.secondaryColor||'#625f58';
+    const notes=(object.designNotes||'').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/đ/g,'d');
+    const demon=v==='demon-dog';
+    const hasHat=demon&&/(non|hat|conical|me rach)/.test(notes);
+    const hasCane=demon&&/(gay|cane|staff|bamboo)/.test(notes);
+    if(object.facing==='left')ctx.scale(-1,1);
+    if(demon){
+      // Supernatural canine kept unmistakably animal even when standing upright:
+      // long muzzle, pointed ears, hock-shaped hind legs and a visible tail.
+      ctx.save();ctx.globalAlpha*=Math.max(.25,object.opacity??1);
+      const sway=Math.sin(timeMs/900)*1.2;
+      ctx.translate(0,sway);
+      path(ctx,'M -18 -10 C -20 8 -17 26 -12 38 L -2 38 L 0 10 L 8 38 L 19 38 C 21 13 20 -5 14 -17 C 8 -27 -8 -28 -15 -18 Z',fur,INK,1.35);
+      path(ctx,'M -13 31 L -17 47 L -29 48 Q -32 43 -25 39 L -20 27 Z',shade,INK,1.1);
+      path(ctx,'M 13 31 L 18 47 L 30 48 Q 33 43 26 39 L 20 27 Z',shade,INK,1.1);
+      path(ctx,'M -13 -17 C -10 -29 11 -31 15 -16 L 11 -3 L -11 -3 Z',fur,INK,1.2);
+      path(ctx,'M -17 -34 Q -10 -49 5 -48 Q 20 -46 22 -31 Q 20 -18 8 -16 Q -7 -16 -17 -25 Z',fur,INK,1.35);
+      path(ctx,'M -13 -42 L -22 -55 L -5 -49 Z',shade,INK,1);
+      path(ctx,'M 9 -47 L 18 -58 L 23 -41 Z',shade,INK,1);
+      path(ctx,'M 7 -32 Q 25 -36 31 -25 Q 29 -14 13 -15 Q 3 -18 7 -32 Z',object.accent||'#a58f80',INK,1.1);
+      ctx.fillStyle=INK;ctx.beginPath();ctx.ellipse(29,-25,1.8,2.3,0,0,Math.PI*2);ctx.fill();
+      for(const x of [-5,7]){ctx.fillStyle=demon?'#a33b32':INK;ctx.beginPath();ctx.ellipse(x,-35,1.8,2.2,0,0,Math.PI*2);ctx.fill();}
+      curve(ctx,[{x:-12,y:-8},{x:-24,y:8},{x:-17,y:20}],shade,4.2,.9);
+      curve(ctx,[{x:12,y:-8},{x:24,y:7},{x:18,y:20}],shade,4.2,.9);
+      curve(ctx,[{x:-16,y:10},{x:-33,y:4},{x:-36,y:-8},{x:-28,y:-15}],shade,4,.9);
+      if(hasHat){
+        path(ctx,'M -24 -50 Q 0 -66 26 -49 L 20 -44 L -19 -44 Z','#76624b',INK,1.2);
+        curve(ctx,[{x:-34,y:-43},{x:32,y:-43}],INK,2);
+      }
+      if(hasCane){
+        curve(ctx,[{x:27,y:-1},{x:33,y:46}],'#806344',3.2,.95);
+        curve(ctx,[{x:26,y:-2},{x:31,y:-9},{x:36,y:-4}],'#806344',3.2,.95);
+      }
+      ctx.restore();
+    }else{
+      const step=(object.motion==='walk-left'||object.motion==='walk-right')?Math.sin(timeMs/180)*2:0;
+      for(const [x,phase] of [[-22,1],[-9,-1],[14,-1],[27,1]] as const){
+        const lift=Math.max(0,step*phase);
+        path(ctx,'M '+(x-3)+' 11 L '+(x+4)+' 11 L '+(x+3)+' '+(37-lift)+' L '+(x-4)+' '+(37-lift)+' Z',shade,INK,.95);
+      }
+      path(ctx,'M -36 1 Q -35 -22 -9 -25 Q 17 -27 30 -10 L 31 11 Q 12 24 -15 21 Q -35 18 -36 1 Z',fur,INK,1.3);
+      path(ctx,'M 17 -10 Q 18 -31 35 -28 Q 48 -23 46 -5 L 42 10 Q 29 18 17 9 Z',fur,INK,1.2);
+      path(ctx,'M 21 -24 L 15 -37 Q 29 -38 31 -24 Z',shade,INK,.9);
+      path(ctx,'M 35 -23 L 42 -35 Q 49 -28 43 -18 Z',shade,INK,.9);
+      path(ctx,'M 37 -5 Q 49 -8 51 0 Q 49 8 38 8 Q 31 5 37 -5 Z','#a58f80',INK,.9);
+      ctx.fillStyle=INK;ctx.beginPath();ctx.ellipse(31,-14,1.6,2,0,0,Math.PI*2);ctx.fill();
+      curve(ctx,[{x:-35,y:-4},{x:-45,y:-14},{x:-49,y:-4},{x:-42,y:1}],shade,2.6,.9);
+    }
+  } else if(v==='pig'||v==='pig-hoof'){
+    const skin=!object.color||['#b78a5d','#d8b06d'].includes(object.color)?'#bd9484':object.color;
+    const shade=!object.secondaryColor||object.secondaryColor==='#7a8270'?'#946e61':object.secondaryColor;
+    const count=object.hoofCount===5?5:4;
+    if(object.facing==='left')ctx.scale(-1,1);
+    const hoof=(x:number,y:number,size:number)=>{
+      ctx.save();ctx.translate(x,y);ctx.scale(size,size);
+      path(ctx,'M -6 -9 Q 0 -11 6 -9 L 7 1 Q 0 5 -7 1 Z',skin,INK,.8);
+      // Spread all digits across the terminal foot, never up the shin.
+      for(let i=0;i<count;i++){
+        const toe=-6+(i+.5)*12/count;
+        path(ctx,`M ${toe-5/count} -1 Q ${toe} -3 ${toe+5/count} -1 L ${toe+5/count} 3 Q ${toe} 5 ${toe-5/count} 3 Z`,'#554941',INK,.45);
+      }
+      ctx.restore();
+    };
+    if(v==='pig-hoof'){
+      path(ctx,'M -19 -43 Q 0 -48 19 -43 L 20 8 Q 0 20 -20 8 Z',skin,INK,1.3);
+      hoof(0,28,4);
+    }else if(object.pose==='reach'){
+      // A rearing pig keeps two hind hooves grounded; front legs brace higher.
+      for(const x of [-12,12]){
+        path(ctx,`M ${x-5} 12 L ${x+5} 12 L ${x+4} 37 L ${x-4} 37 Z`,skin,INK,1);
+        hoof(x,38,1);
+      }
+      path(ctx,'M -24 5 Q -27 -17 -12 -25 Q 8 -34 22 -12 L 22 13 Q 0 28 -20 17 Z',skin,INK,1.4);
+      for(const [x,y] of [[27,-18],[35,-10]] as const){
+        path(ctx,`M 13 -9 Q 21 -14 ${x} ${y} L ${x+4} ${y+6} Q 23 0 15 5 Z`,skin,INK,1);
+        hoof(x,y,1);
+      }
+      path(ctx,'M -8 -28 Q -7 -47 11 -46 Q 30 -43 31 -25 L 27 -14 Q 8 -9 -6 -18 Z',skin,INK,1.3);
+      path(ctx,'M -4 -39 L -13 -49 Q 0 -52 7 -43 Z',shade,INK,1);
+      path(ctx,'M 17 -42 L 26 -52 Q 36 -46 26 -34 Z',shade,INK,1);
+      path(ctx,'M 23 -29 Q 37 -32 39 -22 Q 37 -13 25 -16 Q 18 -19 23 -29 Z','#cba797',INK,1);
+      for(const x of [29,34]){ctx.fillStyle='#665046';ctx.beginPath();ctx.ellipse(x,-23,1.2,2,0,0,Math.PI*2);ctx.fill();}
+      ctx.fillStyle=INK;ctx.beginPath();ctx.ellipse(16,-35,1.7,2,0,0,Math.PI*2);ctx.fill();
+      curve(ctx,[{x:-23,y:7},{x:-35,y:2},{x:-38,y:11},{x:-30,y:12},{x:-31,y:5}],shade,1.6);
+    }else{
+      const frames=object.keyframes||[];
+      const keyedTravel=frames.some((frame,index)=>{
+        const next=frames[index+1];return next&&timeMs>=frame.atMs&&timeMs<next.atMs
+          &&Math.hypot((next.dx||0)-(frame.dx||0),(next.dy||0)-(frame.dy||0))>5;
+      });
+      const traveling=object.motion==='walk-left'||object.motion==='walk-right'||object.pose==='run'||keyedTravel;
+      const step=traveling?Math.sin(timeMs/190):0;
+      for(const [i,x] of [-25,-14,10,21].entries()){
+        const lift=traveling?Math.max(0,step*(i%2?-1:1))*3:0;
+        path(ctx,`M ${x-4} 10 L ${x+5} 10 L ${x+4} ${36-lift} L ${x-4} ${36-lift} Z`,i%2?shade:skin,INK,1);
+        hoof(x,38-lift,1);
+      }
+      path(ctx,'M -35 0 Q -39 -24 -10 -27 Q 17 -31 29 -13 L 31 10 Q 16 24 -13 22 Q -35 21 -35 0 Z',skin,INK,1.4);
+      path(ctx,'M 13 -10 Q 15 -33 34 -28 Q 47 -23 46 -4 L 42 11 Q 28 21 15 10 Z',skin,INK,1.3);
+      path(ctx,'M 18 -24 L 12 -38 Q 25 -39 29 -26 Z',shade,INK,1);
+      path(ctx,'M 34 -23 L 40 -36 Q 48 -30 43 -19 Z',shade,INK,1);
+      path(ctx,'M 36 -5 Q 49 -9 51 0 Q 51 9 38 9 Q 31 7 36 -5 Z','#cba797',INK,1);
+      for(const x of [40,46]){ctx.fillStyle='#665046';ctx.beginPath();ctx.ellipse(x,1,1.3,2,0,0,Math.PI*2);ctx.fill();}
+      ctx.fillStyle=INK;ctx.beginPath();ctx.ellipse(31,-13,1.7,timeMs%6500>6250?.3:2.1,0,0,Math.PI*2);ctx.fill();
+      curve(ctx,[{x:-35,y:-5},{x:-45,y:-13},{x:-48,y:-3},{x:-40,y:-1},{x:-42,y:-8}],shade,1.6);
+      curve(ctx,[{x:-25,y:-15},{x:-11,y:-20},{x:4,y:-20}],'#d0b1a0',1.2,.6);
+    }
+  } else if (v === 'shield') {
     path(ctx, 'M 0 42 C -25 29 -36 9 -31 -25 C -20 -36 20 -36 31 -25 C 36 9 25 29 0 42 Z', fill, INK, 2);
     path(ctx, 'M 0 33 C -10 20 -13 0 -10 -25 C -3 -28 3 -28 10 -25 C 13 0 10 20 0 33 Z', secondary, INK, 1.15, .7);
     curve(ctx, [{x:-19,y:-6},{x:19,y:-6}], INK, 1.2, .45);
@@ -800,12 +965,33 @@ export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasSt
       curve(ctx,[{x:Math.cos(a)*38,y:Math.sin(a)*38},{x:Math.cos(a)*47,y:Math.sin(a)*47}],'#b89448',1.1,.45);
     }
   } else if (v === 'ghost') {
-    // Ma kiểu Ma Xó: đĩa đen + mặt oval trắng + 2 mắt đen + áo choàng (không miệng).
-    path(ctx, 'M 0 -46 A 46 46 0 1 0 0.1 -46 Z', '#020306', undefined, 0);
-    path(ctx, 'M 0 -32 C 12 -32 19 -20 19 -6 C 19 6 12 12 0 12 C -12 12 -19 6 -19 -6 C -19 -20 -12 -32 0 -32 Z', '#e9edf2', INK, 2);
-    path(ctx, 'M -7 -14 C -10 -14 -12 -10 -12 -5 C -12 0 -10 3 -7 3 C -4 3 -2 0 -2 -5 C -2 -10 -4 -14 -7 -14 Z', '#0b0d12', undefined, 0);
-    path(ctx, 'M 7 -14 C 4 -14 2 -10 2 -5 C 2 0 4 3 7 3 C 10 3 12 0 12 -5 C 12 -10 10 -14 7 -14 Z', '#0b0d12', undefined, 0);
-    path(ctx, 'M -16 12 C -20 28 -18 40 -10 44 L 10 44 C 18 40 20 28 16 12 C 8 16 -8 16 -16 12 Z', 'rgba(233,237,242,.92)', INK, 1.8);
+    // Horror threat: an ambiguous human silhouette, never a cute white ghost
+    // icon. The shape is intentionally uneven so it can read as a person in
+    // darkness until the story explicitly reveals more.
+    ctx.save();
+    ctx.globalAlpha *= .96;
+    // Keep the aura subordinate to the body. A large opaque radial blob made
+    // medium/distant ghosts read like smoke stains instead of human silhouettes.
+    const shadow=ctx.createRadialGradient(0,-6,3,0,-2,46);
+    shadow.addColorStop(0,'rgba(28,39,39,.52)');
+    shadow.addColorStop(.64,'rgba(13,19,19,.32)');
+    shadow.addColorStop(1,'rgba(5,7,8,0)');
+    ctx.fillStyle=shadow;ctx.fillRect(-54,-64,108,118);
+    // Build a recognisably human shadow: small head, short neck, broad uneven
+    // shoulders and a long tapering torso. Keeping these masses separate avoids
+    // the hourglass/blob silhouette that read as an alien at reveal distance.
+    // A cool, thin rim keeps a half-opacity reveal readable against a nearly
+    // black corridor without turning the threat into a glowing ghost icon.
+    ctx.fillStyle='#182222';ctx.strokeStyle=profile.highlight;ctx.lineWidth=1.45+profile.detail*.6;
+    ctx.beginPath();ctx.ellipse(0,-35,7.5,10.5,-.04,0,Math.PI*2);ctx.fill();ctx.stroke();
+    ctx.fillRect(-3.1,-26,6.2,9.5);
+    path(ctx,'M -4 -18 C -11 -17 -16 -13 -18 -6 L -15 16 L -12 47 L 13 47 L 16 17 L 18 -5 C 15 -12 10 -16 4 -18 Z','#243030','#667a76',1.65,.98);
+    curve(ctx,[{x:-13,y:-5},{x:-16,y:20},{x:-14,y:45}],'#101617',3.4,.72);
+    curve(ctx,[{x:13,y:-4},{x:15,y:19},{x:13,y:44}],'#101617',3.4,.72);
+    // Eye pits are almost lost in the shadow; they should not read as glowing eyes.
+    ctx.fillStyle='rgba(96,112,111,.14)';
+    ctx.beginPath();ctx.ellipse(-2.7,-35,1.15,1.7,-.05,0,Math.PI*2);ctx.ellipse(2.9,-35,1.1,1.65,.04,0,Math.PI*2);ctx.fill();
+    ctx.restore();
   } else if (v === 'cart') {
     // Xe tải nhỏ nhìn ngang: thùng + cabin + bánh + đèn.
     path(ctx, 'M -42 8 L 42 8 L 36 30 L -36 30 Z', fill, INK, 2);
@@ -820,19 +1006,37 @@ export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasSt
     path(ctx, `M -24 -18 L 24 -18 L 24 ${-6-opening*40} L -24 ${-6-opening*40} Z`, secondary, INK, 1.4);
     curve(ctx, [{x:0,y:-18},{x:0,y:22}], INK, 1.4, .6);
   } else if (v === 'door') {
-    if (object.doorOpen !== undefined) {
-      if(object.environmentAnchor !== 'doorway') path(ctx, 'M -33 -47 L 33 -47 L 33 46 L -33 46 Z', '#252322', INK, 2);
+    const opening=Math.max(0,Math.min(1,object.doorOpen??0));
+    // Frame belongs to the architecture and stays fixed while the slab rotates.
+    if(object.environmentAnchor!=='doorway'){
+      path(ctx,'M -36 -48 L 35 -48 L 36 48 L -36 48 Z','#292522',INK,profile.lineWeight+.35);
+      path(ctx,'M -32 -44 L 30 -44 L 30 45 L -32 45 Z','#151515',undefined,0,.76);
+      forgeFastener(ctx,profile,-31,-39,1);forgeFastener(ctx,profile,29,-39,1);
+    }
+    if(object.doorOpen!==undefined){
       ctx.save();ctx.translate(CANVAS_DOOR_PANEL.left,0);
-      ctx.scale(Math.max(.15,Math.cos(Math.max(0,Math.min(1,object.doorOpen))*1.4)),1);
+      ctx.scale(Math.max(.13,Math.cos(opening*1.4)),1);
       ctx.translate(-CANVAS_DOOR_PANEL.left,0);
     }
     const panel=CANVAS_DOOR_PANEL;
-    path(ctx, object.doorOpen !== undefined
+    const doorPath=object.doorOpen!==undefined
       ? `M ${panel.left} ${panel.top} h ${panel.width} v ${panel.height} h ${-panel.width} Z`
-      : 'M -30 -44 L 28 -41 L 31 44 L -31 44 Z', fill, INK, 2);
-    path(ctx, 'M -22 -35 L 20 -34 L 21 35 L -22 35 Z', secondary, INK, 1.1, .35);
-    dot(ctx, 17, 2, 2.4, '#5b493c');
-    hatch(ctx, [[{x:-16,y:-28},{x:-11,y:29}],[{x:0,y:-30},{x:4,y:31}],[{x:13,y:-27},{x:10,y:28}]], '#4e3d32', .7, .28);
+      : 'M -30 -44 L 28 -42 L 31 44 L -31 44 Z';
+    path(ctx,doorPath,fill,INK,profile.lineWeight+.45);
+    // Recessed panels and stiles give a real door construction rather than a
+    // beige rectangle. Keep enough contrast to survive medium shots.
+    path(ctx,'M -23 -35 L 20 -34 L 20 -5 L -23 -5 Z',secondary,profile.shadow,.9,.42);
+    path(ctx,'M -22 3 L 21 3 L 22 34 L -22 35 Z',secondary,profile.shadow,.9,.34);
+    curve(ctx,[{x:-25,y:-1},{x:23,y:0}],profile.shadow,1,.34);
+    forgeGrain(ctx,profile,{left:-27,top:-40,right:25,bottom:39},true);
+    // Hinges, latch plate and knob.
+    for(const y of [-27,27]){
+      path(ctx,`M -31 ${y-4} L -27 ${y-4} L -27 ${y+4} L -31 ${y+4} Z`,'#5c5145',profile.shadow,.6,.8);
+      forgeFastener(ctx,profile,-29,y,1);
+    }
+    path(ctx,'M 13 -4 L 22 -4 L 22 8 L 13 8 Z','#655849',profile.shadow,.65,.88);
+    dot(ctx,17.5,2,2.55,'#8d7654');dot(ctx,17.1,1.6,.65,'#d1b47b');
+    forgeWear(ctx,profile,[{x:-28,y:-40},{x:27,y:-38},{x:-29,y:39},{x:27,y:38},{x:4,y:-6}]);
     if (object.doorOpen !== undefined) ctx.restore();
   } else if (v === 'window') {
     path(ctx, 'M -42 -36 L 42 -36 L 42 36 L -42 36 Z', '#b7ced5', INK, 2);
@@ -840,11 +1044,13 @@ export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasSt
     curve(ctx,[{x:-42,y:0},{x:42,y:0}],INK,2);
     path(ctx,'M -48 -42 L 48 -42 L 48 -35 L -48 -35 Z',secondary,INK,.8,.7);
   } else if (v === 'bowl') {
-    path(ctx, 'M -42 -8 C -36 24 -20 39 0 40 C 20 39 36 24 42 -8 Z', '#d9c8aa', INK, 1.7);
-    path(ctx, 'M -42 -8 C -20 -17 20 -17 42 -8 C 20 3 -20 3 -42 -8 Z', '#f1e8d4', INK, 1.1);
-    curve(ctx,[{x:-28,y:12},{x:0,y:18},{x:27,y:11}],secondary,.8,.32);
+    ctx.save();ctx.globalAlpha=.28;ctx.fillStyle='#080706';ctx.beginPath();ctx.ellipse(3,43,34,5,0,0,Math.PI*2);ctx.fill();ctx.restore();
+    path(ctx, 'M -42 -8 C -36 24 -20 39 0 40 C 20 39 36 24 42 -8 Z', '#c8b591', INK, 1.45);
+    path(ctx, 'M -42 -8 C -20 -17 20 -17 42 -8 C 20 3 -20 3 -42 -8 Z', '#e1d4b7', INK, .95);
+    curve(ctx,[{x:-28,y:12},{x:0,y:18},{x:27,y:11}],secondary,.7,.24);
   } else if (v === 'pipe') {
-    curve(ctx,[{x:-33,y:31},{x:-8,y:4},{x:18,y:-19}], '#6a4d37', 8, .95);
+    ctx.save();ctx.globalAlpha=.25;ctx.fillStyle='#080706';ctx.beginPath();ctx.ellipse(3,34,30,4,0,0,Math.PI*2);ctx.fill();ctx.restore();
+    curve(ctx,[{x:-33,y:31},{x:-8,y:4},{x:18,y:-19}], '#604631', 7, .92);
     path(ctx,'M 11 -30 C 24 -35 36 -28 37 -16 C 37 -5 27 3 16 1 C 10 -8 8 -19 11 -30 Z',fill,INK,1.4);
     curve(ctx,[{x:30,y:-31},{x:37,y:-40},{x:31,y:-48}], '#8b8b84',1.1,.35);
   } else if (v === 'bamboo') {
@@ -852,10 +1058,18 @@ export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasSt
     curve(ctx,[{x:10,y:44},{x:15,y:-42}], '#7f8b5c', 7,.95);
     for(const y of [-28,-8,13,33]){curve(ctx,[{x:-16,y},{x:-10,y}],INK,.8,.45);curve(ctx,[{x:11,y},{x:16,y}],INK,.8,.45);}
   } else if (v === 'table') {
-    path(ctx,'M -46 -14 L 46 -14 L 42 2 L -42 2 Z',fill,INK,1.8);
-    curve(ctx,[{x:-34,y:1},{x:-30,y:42}],INK,4);
-    curve(ctx,[{x:34,y:1},{x:30,y:42}],INK,4);
-    hatch(ctx, [[{x:-32,y:-9},{x:34,y:-7}]], secondary,.8,.32);
+    // Designed furniture: perspective top, apron, four readable legs and grain.
+    path(ctx,'M -48 -15 L 44 -15 L 48 -3 L -43 1 Z',fill,INK,profile.lineWeight+.35);
+    path(ctx,'M -43 1 L 48 -3 L 45 7 L -41 10 Z',secondary,profile.shadow,.9,.74);
+    // Back legs are lighter and slightly shorter; front legs own the silhouette.
+    curve(ctx,[{x:-35,y:7},{x:-33,y:38}],profile.shadow,2.6,.62);
+    curve(ctx,[{x:35,y:5},{x:33,y:38}],profile.shadow,2.6,.62);
+    curve(ctx,[{x:-30,y:8},{x:-26,y:44}],INK,4.4,.96);
+    curve(ctx,[{x:30,y:6},{x:27,y:44}],INK,4.4,.96);
+    curve(ctx,[{x:-25,y:28},{x:26,y:27}],secondary,2.1,.62);
+    forgeGrain(ctx,profile,{left:-42,top:-12,right:42,bottom:-1},false);
+    forgeWear(ctx,profile,[{x:-44,y:-13},{x:44,y:-13},{x:-40,y:1},{x:46,y:-2}]);
+    forgeFastener(ctx,profile,-34,6,.9);forgeFastener(ctx,profile,35,4,.9);
   } else if (v === 'chair') {
     path(ctx,'M -25 -36 L 25 -36 L 22 3 L -22 3 Z',fill,INK,1.7);
     path(ctx,'M -29 2 L 29 2 L 26 15 L -26 15 Z',secondary,INK,1.4);
@@ -868,22 +1082,40 @@ export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasSt
       halo.addColorStop(0,`rgba(255,190,74,${.55*light})`);halo.addColorStop(1,'rgba(255,190,74,0)');
       ctx.fillStyle=halo;ctx.fillRect(-92,-90,184,184);
     }
-    // Metal frame stays visible when the flame is shaded for a signal.
-    path(ctx,'M -7 -32 Q -16 -51 0 -51 Q 16 -51 7 -32',undefined,'#a59680',2);
-    path(ctx,'M -16 -30 Q -23 -22 -18 -18 L 18 -18 Q 23 -22 16 -30 Z','#716250',INK,1.6);
+    // Real lantern construction: carry handle, vented cap, glass chamber,
+    // cage rods, burner and weighted base.
+    path(ctx,'M -7 -32 Q -16 -51 0 -51 Q 16 -51 7 -32',undefined,'#a59680',2.1);
+    path(ctx,'M -16 -30 Q -23 -22 -18 -18 L 18 -18 Q 23 -22 16 -30 Z','#716250',INK,profile.lineWeight+.2);
+    for(const x of [-9,0,9])curve(ctx,[{x,y:-29},{x:x*.8,y:-20}],'#b3a187',.65,.55);
     path(ctx,'M -15 -18 Q -25 8 -16 27 L 16 27 Q 25 8 15 -18 Z','#514d42',INK,1.2);
     if(light>0) {
       path(ctx,'M -14 -17 Q -23 8 -15 26 L 15 26 Q 23 8 14 -17 Z','#e9b95d',undefined,0,.75*light);
       path(ctx,'M 0 21 Q -10 10 -4 1 Q 0 -7 1 -14 Q 4 -2 7 4 Q 11 15 0 21 Z','#ffe6a0',undefined,0,light);
     }
-    for(const x of [-21,21])curve(ctx,[{x,y:-22},{x:x*1.2,y:8},{x,y:31}],'#9b8868',2);
-    path(ctx,'M -23 28 Q 0 21 23 28 L 20 40 L -20 40 Z','#665747',INK,1.8);
+    for(const x of [-21,-10,10,21])curve(ctx,[{x,y:-22},{x:x*1.12,y:8},{x,y:31}],'#9b8868',x===-21||x===21?2:1.05,.88);
+    path(ctx,'M -23 28 Q 0 21 23 28 L 20 40 L -20 40 Z','#665747',INK,profile.lineWeight+.25);
+    path(ctx,'M -10 29 Q 0 25 10 29 L 8 36 L -8 36 Z','#3d342d',profile.shadow,.7,.75);
+    forgeFastener(ctx,profile,-18,32,.8);forgeFastener(ctx,profile,18,32,.8);
+    forgeWear(ctx,profile,[{x:-18,y:-24},{x:18,y:-24},{x:-18,y:35},{x:18,y:35}]);
     curve(ctx,[{x:-11,y:-13},{x:-16,y:15}],'#f9eaca',1,.25);
   } else if (v === 'note') {
-    path(ctx,'M -44 -34 L 38 -37 L 44 29 L -39 35 Z',fill || '#d5bf92',INK,1.2);
-    ctx.save();ctx.fillStyle='#514737';ctx.font='bold 8px Arial';ctx.textAlign='center';
-    const lines=(object.text || '• • ━\nCẦN GIÚP ĐỠ\n━ • •\nĐÃ NHÌN THẤY').split('\n');
-    lines.slice(0,5).forEach((line,i)=>ctx.fillText(line,0,-19+i*12,75));ctx.restore();
+    // Uneven handled paper: the silhouette itself carries production value.
+    path(ctx,'M -44 -33 L -17 -37 L 5 -35 L 38 -38 L 44 28 L 21 31 L -5 29 L -39 35 Z',fill || '#d5bf92',INK,profile.lineWeight);
+    // Fold memory, handling stains and a tiny torn corner.
+    curve(ctx,[{x:-36,y:-6},{x:34,y:-9}],profile.shadow,.65,.16+profile.wear*.16);
+    curve(ctx,[{x:8,y:-34},{x:5,y:29}],profile.shadow,.6,.12+profile.wear*.12);
+    path(ctx,'M 31 29 L 43 18 L 44 28 Z','#b9a477',profile.shadow,.5,.55);
+    ctx.save();ctx.globalAlpha=.08+profile.wear*.08;ctx.fillStyle='#775d40';
+    ctx.beginPath();ctx.ellipse(-25,20,8,5,.2,0,Math.PI*2);ctx.fill();ctx.restore();
+    forgeWear(ctx,profile,[{x:-42,y:-31},{x:36,y:-36},{x:-37,y:32},{x:39,y:26}]);
+    const reveal=Math.max(0,Math.min(1,object.revealProgress ?? 1));
+    ctx.save();
+    ctx.beginPath();ctx.rect(-48,-40,96,80*reveal);ctx.clip();
+    ctx.fillStyle='#342d24';ctx.font='700 11px Arial';ctx.textAlign='center';
+    const lines=(object.text || 'CẦN GIÚP ĐỠ\nĐỪNG MỞ CỬA\nNÓ ĐANG NHÌN').split('\n');
+    const visible=lines.slice(0,4);
+    const startY=-((visible.length-1)*13)/2;
+    visible.forEach((line,i)=>ctx.fillText(line,0,startY+i*13,78));ctx.restore();
   } else if (v === 'sandals') {
     // Two distinct soles, toe straps and wet highlights; no generic box fallback.
     for(const [x,y,angle] of [[-22,5,-.16],[23,-5,.18]]){
@@ -903,14 +1135,21 @@ export function drawAuthoredProp(ctx: CanvasRenderingContext2D, object: CanvasSt
     dot(ctx,-2,-21,3,'#705a3d');
     curve(ctx,[{x:-22,y:4},{x:-20,y:18},{x:-7,y:22}],'#d2b68b',1,.55);
   } else if (v === 'oar') {
-    curve(ctx,[{x:-12,y:0},{x:35,y:0}],'#b79266',3);
+    curve(ctx,[{x:-32,y:0},{x:35,y:0}],'#b79266',3);
     path(ctx,'M 32 -6 Q 45 -8 49 -3 L 49 3 Q 45 8 32 6 Z','#a87950',INK,1);
     curve(ctx,[{x:36,y:0},{x:46,y:0}],'#d4b17c',.8,.7);
   } else if (v === 'phone') {
-    path(ctx,'M -21 -43 Q -25 -43 -25 -37 L -25 37 Q -25 43 -19 43 L 19 43 Q 25 43 25 37 L 25 -37 Q 25 -43 19 -43 Z','#292e32',INK,1.5);
-    path(ctx,'M -20 -33 L 20 -33 L 20 31 L -20 31 Z','#57787f',INK,.7);
+    path(ctx,'M -21 -43 Q -25 -43 -25 -37 L -25 37 Q -25 43 -19 43 L 19 43 Q 25 43 25 37 L 25 -37 Q 25 -43 19 -43 Z','#292e32',INK,profile.lineWeight+.1);
+    path(ctx,'M -20 -33 L 20 -33 L 20 31 L -20 31 Z','#57787f',profile.shadow,.7);
+    // Speaker slot, camera and glass reflection keep it from reading as a
+    // featureless rounded rectangle in close inserts.
+    curve(ctx,[{x:-6,y:-38},{x:6,y:-38}],'#8b9597',1,.72);
+    dot(ctx,12,-38,1.15,'#131718');
+    curve(ctx,[{x:-16,y:-29},{x:9,y:-29}],profile.highlight,.7,.26);
+    curve(ctx,[{x:-16,y:27},{x:10,y:-29}],'#d5e3df',.6,.12);
     ctx.save();ctx.fillStyle='#e5f2e8';ctx.font='6px Arial';ctx.textAlign='center';ctx.fillText(object.text || 'ĐANG GỌI',0,-5,37);
     ctx.fillStyle='#8eba9c';ctx.beginPath();ctx.arc(0,16,6,0,Math.PI*2);ctx.fill();ctx.restore();
+    if(profile.wear>.55)curve(ctx,[{x:15,y:-17},{x:5,y:-5},{x:13,y:6}],profile.highlight,.55,.34);
   } else if (v === 'bed') {
     // Mattress, pillow and frame share one perspective and a visible baseline.
     path(ctx,'M -46 -18 L 37 -28 L 48 1 L -37 13 Z','#a68b68',INK,1.35);

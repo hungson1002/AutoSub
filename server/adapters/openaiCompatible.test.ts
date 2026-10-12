@@ -3,6 +3,46 @@ import test from 'node:test';
 import type { AIProvider } from '../types';
 import { buildTranslationGuide, chat, listModels, normalizeSttLanguage, synthesize, testModel, transcribe, translateBatch } from './openaiCompatible';
 
+const longChatProvider: AIProvider = {
+  id: 'long-chat', name: 'Long scene planner', baseUrl: 'http://provider.test/v1', enabled: true,
+  models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true },
+};
+
+test('large scene plans use streaming and decode fragmented Vietnamese content', async () => {
+  const originalFetch = globalThis.fetch;
+  let request: { stream?: boolean; max_tokens?: number } | undefined;
+  const wire = new TextEncoder().encode(': heartbeat\r\n\r\ndata: {"choices":[{"delta":{"reasoning_content":"private"}}]}\r\n\r\ndata: {"choices":[{"delta":{"content":"```json\\n{\\\"title\\\":\\\"Heo năm móng\\\"}"}}]}\n\ndata: {"choices":[{"delta":{"content":"\\n```"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+  globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    request = JSON.parse(String(init?.body));
+    return new Response(new ReadableStream({ start(controller) {
+      for (let i = 0; i < wire.length; i += 7) controller.enqueue(wire.slice(i, i + 7));
+      controller.close();
+    } }), { headers: { 'content-type': 'text/event-stream' } });
+  }) as typeof fetch;
+  try {
+    assert.equal(await chat(longChatProvider, 'model', [{ role: 'user', content: 'plan' }], undefined, 61_200), '{"title":"Heo năm móng"}');
+    assert.equal(request?.stream, true);
+    assert.equal(request?.max_tokens, 61_200);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('scene streaming rejects broken or token-limited output instead of accepting partial JSON', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const ending of ['', 'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n']) {
+      globalThis.fetch = (async () => new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n' + ending, { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch;
+      await assert.rejects(() => chat(longChatProvider, 'model', [], undefined, 61_200), /ngắt stream|giới hạn token/);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('large plans still accept complete JSON from providers that ignore streaming', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"complete":true}' } }] }), { headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  try { assert.equal(await chat(longChatProvider, 'model', [], undefined, 61_200), '{"complete":true}'); }
+  finally { globalThis.fetch = originalFetch; }
+});
+
 test('chat reports the failing script provider and endpoint on network errors', async () => {
   const originalFetch = globalThis.fetch;
   const provider: AIProvider = {

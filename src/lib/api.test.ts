@@ -3,11 +3,53 @@ import test from "node:test";
 import { defaultStyle, type AIProvider, type SubtitleCue } from "../types";
 import { api, buildRequestInit, buildTranslationMemory, friendlyErrorMessage } from "./api";
 
+test('background export cancellation targets the correct queue with a valid JSON body',async()=>{
+  const originalFetch=globalThis.fetch;
+  const calls:Array<{url:string;init?:RequestInit}>=[];
+  globalThis.fetch=(async(input,init)=>{calls.push({url:String(input),init});return new Response('{}',{headers:{'content-type':'application/json'}});}) as typeof fetch;
+  try{
+    const job={id:'my-job',name:'video',status:'queued' as const,progress:0,stage:'',createdAt:'',updatedAt:''};
+    await api.cancelBackgroundExport({...job,kind:'video-export'});
+    await api.cancelBackgroundExport({...job,kind:'animation-render'});
+    assert.equal(calls[0]!.url,'/api/export/cancel/my-job');
+    assert.equal(calls[1]!.url,'/api/animation-studio/render-jobs/my-job/cancel');
+    for(const call of calls){assert.equal(call.init?.method,'POST');assert.equal(call.init?.body,'{}');assert.equal(new Headers(call.init?.headers).get('content-type'),'application/json');}
+  }finally{globalThis.fetch=originalFetch;}
+});
+
+test('cancellation from the background panel also releases the original export caller',async()=>{
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=(async()=>new Response(JSON.stringify({error:'Đã hủy xuất video.',code:'EXPORT_CANCELLED'}),{status:409,headers:{'content-type':'application/json'}})) as typeof fetch;
+  try{
+    await assert.rejects(api.exportVideo(undefined,[],defaultStyle,{exportId:'cancelled',uploadId:'source',resolution:'original',crf:20,originalVolume:0,keepAudio:true,burnSubtitles:false,separateVocals:false}),error=>error instanceof DOMException&&error.name==='AbortError');
+  }finally{globalThis.fetch=originalFetch;}
+});
+
 test("preserves actionable script-provider connection errors", () => {
   const message = "Không thể kết nối provider viết kịch bản “Local AI” tại http://127.0.0.1:9999/v1/chat/completions. Mã mạng: ECONNREFUSED.";
   assert.equal(friendlyErrorMessage(new Error(message)), message);
 });
 import { LatestUploadGuard } from "./latestUpload";
+test('STT abort sends a separate backend cancellation request', async () => {
+  const originalFetch = globalThis.fetch;
+  const controller = new AbortController();
+  const calls: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith('/cancel')) {
+      assert.equal(init?.signal, undefined);
+      return new Response(JSON.stringify({ cancelled: true }), { status: 200 });
+    }
+    return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }));
+  }) as typeof fetch;
+  try {
+    const running = api.extractStt('upload', { id: 'p', name: 'p', baseUrl: 'local://whisper.cpp', enabled: true, models: [], providerType: 'whisper-local', authType: 'none', capabilities: { stt: true } }, 'faster-small-int8', 'auto', controller.signal, 'cancel-api');
+    controller.abort();
+    await assert.rejects(running);
+    assert.ok(calls.some(url => url.endsWith('/api/extract/progress/cancel-api/cancel')));
+  } finally { globalThis.fetch = originalFetch; }
+});
 test("local export preserves HTTP 500 render diagnostics through the UI formatter", async () => {
   const originalFetch = globalThis.fetch;
   const message = "FFmpeg: Permission denied while writing output.mp4";

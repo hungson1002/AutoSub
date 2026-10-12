@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {parseCanvasCoverageReview} from './canvasNarrativeCoverage';
+import {canvasCoverageReviewTimeoutMs,parseCanvasCoverageReview} from './canvasNarrativeCoverage';
 import {reviewCanvasNarrativeCoverage} from './canvasNarrativeCoverage';
 import {createServer} from 'node:http';
 import {parsePlan} from './canvasAnimationDirector';
 import {repairCanvasVisualPlan} from './canvasAnimationDirector';
 import {evaluateCanvasVisualQuality} from '../../shared/canvasVisualQuality';
 const project=parsePlan(JSON.stringify({name:'Test',scenes:[{name:'Getting coat',narration:'Minh lấy áo khoác rồi gọi trưởng bản.',objects:[]}]}),'horror story');
+test('coverage review timeout scales for long-form projects',()=>{
+  const short=structuredClone(project);short.scenes[0]!.durationMs=12_000;
+  const long=structuredClone(project);long.scenes=Array.from({length:15},(_,index)=>({...structuredClone(project.scenes[0]!),id:`scene-${index}`,durationMs:12_000}));
+  assert.equal(canvasCoverageReviewTimeoutMs(short),180_000);
+  assert.ok(canvasCoverageReviewTimeoutMs(long)>=400_000);
+  assert.ok(canvasCoverageReviewTimeoutMs(long)<=600_000);
+});
+
 test('semantic review catches actions outside the deterministic vocabulary',()=>{
   const issues=parseCanvasCoverageReview(JSON.stringify({pass:false,issues:[{sceneIndex:0,cue:'lấy áo khoác',missing:'No coat or action is visible',fix:'Show handling a coat before the phone call in a detail shot'}]}),project);
   assert.equal(issues.length,1);assert.equal(issues[0]!.sceneId,project.scenes[0]!.id);

@@ -1,5 +1,4 @@
-import {canvasCharacterHand} from './characters/characterStaging';
-import { compileCanvasSceneLayout } from '../../shared/canvasLayoutCompiler';
+import {evaluateAttachedProp,resolveCanvasLight} from './propAttachment';
 import { evaluateCanvasCamera, evaluateCanvasObject } from './runtime';
 import { resolveSpriteAct, spriteFrameAt } from './spriteFrames';
 import { spriteContentBounds, type SpriteContentBounds } from './spriteContentBounds';
@@ -24,20 +23,16 @@ import { drawProceduralBackgroundBase, drawProceduralBackgroundDetails, drawProc
 import { drawAuthoredCharacter, drawAuthoredProp, drawAuthoredShip, drawAuthoredStake } from './authoredVectorAssets';
 import { drawAuthoredBackground } from './authoredBackgrounds';
 import { openPeepsCharacterDataUri } from './openPeepsSvg';
-import { drawCharacterV2 } from './characters/characterRenderer';
+import { drawCharacterV2, drawCharacterContactArms, drawHorrorCharacter } from './characters/characterRenderer';
+import {canvasCharacterLocalGroundOffset} from './characters/characterStaging';
 import {drawWaterSpirit} from './characters/waterSpirit';
+import { drawFolkCharacter, drawFolkTree, drawFolkBackground, drawFolkContactLimbs, hideFolkBackgroundSpirit } from './folkHorrorRenderer';
+import { isFolkHorrorScene } from '../../shared/canvasFolkHorror';
+import {canvasFloorPropBottomRatio,canvasUnderwaterInsert,canvasLampMountedOnPost,canvasLanternUsesHandlePivot} from '../../shared/canvasSpatialRelations';
 import type { CanvasSceneEffect, CanvasStudioObject, CanvasStudioScene } from './types';
+import {drawVectorScene} from './vectorSceneRenderer';
 
 const imageCache = new Map<string, HTMLImageElement>();
-const preparedScenes=new WeakMap<CanvasStudioScene,{width:number;height:number;scene:CanvasStudioScene}>();
-function preparedScene(scene:CanvasStudioScene,width:number,height:number){
-  const cached=preparedScenes.get(scene);
-  if(cached?.width===width&&cached.height===height)return cached.scene;
-  const compiled=compileCanvasSceneLayout(scene,width,height);
-  preparedScenes.set(scene,{width,height,scene:compiled});
-  return compiled;
-}
-
 function resolveAssetUrl(src: string, assetOrigin?: string) {
   if (!src) return src;
   if (/^(?:data:|blob:|https?:)/i.test(src)) return src;
@@ -56,6 +51,13 @@ function getImage(src: string, assetOrigin?: string) {
     imageCache.set(resolved, image);
   }
   return image;
+}
+
+export function clearCanvasImageCache() {
+  for (const image of imageCache.values()) {
+    try { image.removeAttribute('src'); image.src = ''; } catch { /* best-effort decoded bitmap release */ }
+  }
+  imageCache.clear();
 }
 
 export async function preloadCanvasSceneImages(scene: CanvasStudioScene, assetOrigin?: string) {
@@ -415,8 +417,8 @@ function drawText(ctx: CanvasRenderingContext2D, object: CanvasStudioObject) {
   const firstY = -((lines.length - 1) * lineHeight) / 2;
   const isTitle = object.slot === 'caption-top' || object.slot === 'caption-bottom';
   const isChip = object.slot === 'caption-bottom' && (object.sizeClass === 'small' || !object.sizeClass);
-  // Sub phim kiểu Ma Xó: caption-bottom + size medium + câu dài = chữ trắng viền đen,
-  // nền trong suốt. Tiêu đề ngắn vẫn giữ kiểu gạch đỏ.
+  // Sub phim kiểu Ma Xó: caption-bottom + size medium + câu dài = chữ trắng
+  // viền đen trên nền đen bán trong suốt, được vẽ cùng text để khung không lệch.
   const isSub = object.slot === 'caption-bottom' && object.sizeClass === 'medium' && raw.length > 24;
   if (isSub) {
     const tagMatch = lines.length > 1 && /^[A-ZÀ-Ỹ0-9 ]{2,14}$/.test(lines[0]!.trim()) ? lines.shift()! : undefined;
@@ -432,6 +434,17 @@ function drawText(ctx: CanvasRenderingContext2D, object: CanvasStudioObject) {
       ctx.fillText(tagMatch.trim(), 0, -((lines.length - 1) * subLineHeight) / 2 - subFont * .55, object.width);
       ctx.font = `600 ${subFont}px system-ui, sans-serif`;
     }
+    const widths = lines.map((line) => ctx.measureText(line).width);
+    const boxW = Math.min(object.width - 22, Math.max(...widths, 1) + subFont * 1.65);
+    const boxH = lines.length * subLineHeight + subFont * .7;
+    ctx.fillStyle = 'rgba(11,8,7,.88)';
+    ctx.strokeStyle = 'rgba(255,255,255,.08)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    if (typeof (ctx as any).roundRect === 'function') (ctx as any).roundRect(-boxW / 2, -boxH / 2, boxW, boxH, Math.max(8, subFont * .28));
+    else ctx.rect(-boxW / 2, -boxH / 2, boxW, boxH);
+    ctx.fill();
+    ctx.stroke();
     ctx.lineWidth = Math.max(3, subFont * .12);
     ctx.strokeStyle = 'rgba(0,0,0,.9)';
     ctx.fillStyle = '#ffffff';
@@ -574,6 +587,121 @@ function drawProp(ctx: CanvasRenderingContext2D, object: CanvasStudioObject) {
 }
 
 
+function atmosphereHash(value:string){
+  let hash=2166136261;
+  for(let index=0;index<value.length;index++){hash^=value.charCodeAt(index);hash=Math.imul(hash,16777619);}
+  return hash>>>0;
+}
+
+function atmosphereRandom(seed:number,index:number){
+  let x=(seed+Math.imul(index+1,2654435761))>>>0;
+  x^=x>>>16;x=Math.imul(x,2246822519)>>>0;x^=x>>>13;x=Math.imul(x,3266489917)>>>0;x^=x>>>16;
+  return (x>>>0)/4294967295;
+}
+
+function ambientObjectMotion(object:CanvasStudioObject,scene:CanvasStudioScene,timeMs:number){
+  const wind=Math.max(0,Math.min(1,scene.atmosphere?.wind||0));
+  if(!wind||object.heldBy||object.onBoat)return {dx:0,dy:0,rotation:0};
+  const elapsed=timeMs+(scene.atmosphere?.timeOffsetMs||0);
+  const phase=(object.id.length%13)*.47;
+  if(object.kind==='prop'&&(object.variant==='bamboo'||object.variant==='tree')){
+    const depth=object.depth==='background'?.55:object.depth==='foreground'?1.15:.82;
+    return {
+      dx:Math.sin(elapsed/1800+phase)*1.5*wind*depth,
+      dy:0,
+      rotation:Math.sin(elapsed/2100+phase)*.8*wind*depth,
+    };
+  }
+  // A hanging lantern can react slightly to wind, but a lamp sitting on a
+  // table/floor stays physically grounded.
+  if(object.kind==='prop'&&object.variant==='lantern'&&/(treo|hanging|eave|hien|mai)/iu.test(object.designNotes||'')){
+    return {dx:Math.sin(elapsed/1500+phase)*.7*wind,dy:0,rotation:Math.sin(elapsed/1700+phase)*.55*wind};
+  }
+  return {dx:0,dy:0,rotation:0};
+}
+
+function drawAmbientAtmosphere(
+  ctx:CanvasRenderingContext2D,
+  scene:CanvasStudioScene,
+  timeMs:number,
+  width:number,
+  height:number,
+  phase:'back'|'front',
+){
+  const atmosphere=scene.atmosphere;
+  if(!atmosphere)return;
+  const elapsed=timeMs+(atmosphere.timeOffsetMs||0);
+  const seed=atmosphereHash(scene.stageId||scene.backgroundRef||scene.id);
+  if(phase==='back'){
+    const fog=Math.max(0,Math.min(1,atmosphere.fogDrift||0));
+    if(fog>0){
+      ctx.save();ctx.filter='blur(14px)';ctx.fillStyle='#c9d0cc';
+      for(let index=0;index<4;index++){
+        const span=width*(.38+atmosphereRandom(seed,index)*.22);
+        const drift=((elapsed*(.005+.002*index)+atmosphereRandom(seed,index+10)*width*1.6)%(width+span))-span;
+        const y=height*(.56+index*.075)+Math.sin(elapsed/2200+index)*height*.012;
+        ctx.globalAlpha=fog*(.025+index*.009);
+        ctx.beginPath();ctx.ellipse(drift,y,span*.62,height*(.025+.007*index),-.03,0,Math.PI*2);ctx.fill();
+      }
+      ctx.restore();
+    }
+    const dust=Math.max(0,Math.min(1,atmosphere.dustMotes||0));
+    if(dust>0){
+      ctx.save();ctx.fillStyle='#ddd5c0';
+      const count=Math.round(10+dust*20);
+      for(let index=0;index<count;index++){
+        const speed=.004+atmosphereRandom(seed,index+200)*.006;
+        const x=(atmosphereRandom(seed,index+300)*width+Math.sin(elapsed/1700+index)*8*dust+width)%width;
+        const base=atmosphereRandom(seed,index+400)*height;
+        const y=((base-elapsed*speed)%(height+30)+height+30)%(height+30)-15;
+        const radius=.45+atmosphereRandom(seed,index+500)*1.2;
+        ctx.globalAlpha=dust*(.025+atmosphereRandom(seed,index+600)*.06);
+        ctx.beginPath();ctx.arc(x,y,radius,0,Math.PI*2);ctx.fill();
+      }
+      ctx.restore();
+    }
+    const lightPulse=(object:CanvasStudioObject,amount:number)=>{
+      const frame=evaluateCanvasObject(object,scene,timeMs);
+      const pulse=.5+.5*Math.sin(elapsed/(object.variant==='fire'?185:430)+atmosphereRandom(seed,object.id.length)*Math.PI*2);
+      const radius=Math.max(object.width,object.height)*(1.1+amount*.8);
+      const alpha=(.025+.035*pulse)*amount;
+      const gradient=ctx.createRadialGradient(frame.x,frame.y,2,frame.x,frame.y,radius);
+      gradient.addColorStop(0,`rgba(235,158,77,${alpha})`);
+      gradient.addColorStop(1,'rgba(235,158,77,0)');
+      ctx.fillStyle=gradient;ctx.fillRect(frame.x-radius,frame.y-radius,radius*2,radius*2);
+    };
+    const fire=Math.max(0,Math.min(1,atmosphere.fireFlicker||0));
+    if(fire>0)for(const object of scene.objects.filter(item=>item.kind==='prop'&&item.variant==='fire'))lightPulse(object,fire);
+    const lamp=Math.max(0,Math.min(1,atmosphere.lampBreath||0));
+    if(lamp>0)for(const object of scene.objects.filter(item=>item.kind==='prop'&&item.variant==='lantern'))lightPulse(object,lamp*.72);
+  } else {
+    const shadow=Math.max(0,Math.min(1,atmosphere.shadowBreath||0));
+    if(shadow>0){
+      const breath=.72+.28*Math.sin(elapsed/2600);
+      const gradient=ctx.createRadialGradient(width*.5,height*.48,height*.16,width*.5,height*.48,Math.max(width,height)*.72);
+      gradient.addColorStop(0,'rgba(0,0,0,0)');
+      gradient.addColorStop(.66,`rgba(0,0,0,${.05*shadow*breath})`);
+      gradient.addColorStop(1,`rgba(0,0,0,${.20*shadow*breath})`);
+      ctx.fillStyle=gradient;ctx.fillRect(0,0,width,height);
+    }
+    const grain=Math.max(0,Math.min(1,atmosphere.filmGrain||0));
+    if(grain>0){
+      const frame=Math.floor(elapsed/120);
+      const frameSeed=(seed+Math.imul(frame,977))>>>0;
+      ctx.save();ctx.fillStyle='#fff';
+      const count=Math.round(50+grain*90);
+      for(let index=0;index<count;index++){
+        const x=atmosphereRandom(frameSeed,index)*width;
+        const y=atmosphereRandom(frameSeed,index+1000)*height;
+        ctx.globalAlpha=grain*(.006+atmosphereRandom(frameSeed,index+2000)*.018);
+        const size=.35+atmosphereRandom(frameSeed,index+3000)*.7;
+        ctx.fillRect(x,y,size,size);
+      }
+      ctx.restore();
+    }
+  }
+}
+
 function effectProgress(effect: CanvasSceneEffect, timeMs: number) {
   const start = Math.max(0, effect.startMs || 0);
   const duration = Math.max(120, effect.durationMs || 900);
@@ -582,6 +710,7 @@ function effectProgress(effect: CanvasSceneEffect, timeMs: number) {
 }
 
 function drawSceneEffect(ctx: CanvasRenderingContext2D, effect: CanvasSceneEffect, timeMs: number) {
+  if(effect.intensity===0)return;
   const progress = effectProgress(effect, timeMs);
   if (progress < 0) return;
   const strength = Math.max(.2, Math.min(3, effect.intensity || 1));
@@ -692,11 +821,17 @@ function drawSceneEffect(ctx: CanvasRenderingContext2D, effect: CanvasSceneEffec
       ctx.restore();
     }
   } else if (effect.type === 'glow') {
-    const pulse = .55 + Math.sin(progress * Math.PI * 2) * .18;
-    ctx.globalAlpha = .18 * strength;
-    ctx.beginPath();
-    ctx.arc(0, 0, 90 * pulse * strength, 0, Math.PI * 2);
-    ctx.fill();
+    // Practical lights must visibly own a small island of exposure. Their
+    // intensity is already multiplied by lightLevel in resolveCanvasLight, so
+    // a 1 -> .05 beat now creates a perceptible fade instead of a metadata-only
+    // change while remaining local to the lamp.
+    const radius=120*strength*(1+Math.sin(timeMs/170)*.025+Math.sin(timeMs/311)*.015);
+    const halo=ctx.createRadialGradient(0,0,0,0,0,radius);
+    halo.addColorStop(0,'rgba(255,205,125,.40)');
+    halo.addColorStop(.32,'rgba(255,184,92,.19)');
+    halo.addColorStop(.72,'rgba(255,166,75,.07)');
+    halo.addColorStop(1,'rgba(255,180,90,0)');
+    ctx.fillStyle=halo;ctx.fillRect(-radius,-radius,radius*2,radius*2);
   } else if (effect.type === 'vignette') {
     // Tối 4 góc kiểu Ma Xó, giữ nguyên suốt cảnh (bỏ qua progress).
     ctx.globalAlpha = .88 * Math.min(1.2, strength);
@@ -709,7 +844,7 @@ function drawSceneEffect(ctx: CanvasRenderingContext2D, effect: CanvasSceneEffec
     ctx.fillRect(-2000, -2000, 4000, 4000);
   } else if (effect.type === 'flashlight') {
     // Vũng sáng đèn pin ấm: trung tâm tỏ, rìa chìm vào tối.
-    ctx.globalAlpha = .9;
+    ctx.globalAlpha = .9*Math.min(1,strength);
     const r = 340 * scale * (0.9 + progress * .2);
     const g = ctx.createRadialGradient(0, 0, 10, 0, 0, r);
     g.addColorStop(0, 'rgba(255,196,110,.34)');
@@ -853,7 +988,7 @@ function drawSpriteFrame(
   return true;
 }
 
-function drawObject(ctx: CanvasRenderingContext2D, object: CanvasStudioObject, scene: CanvasStudioScene, timeMs: number, assetOrigin?: string) {
+function drawObject(ctx: CanvasRenderingContext2D, object: CanvasStudioObject, scene: CanvasStudioScene, timeMs: number, assetOrigin?: string, contactBodyOnly=false) {
   // Generated illustrated cutouts are authoritative. Procedural drawing is only
   // a resilient fallback when an approved asset is unavailable.
   if (object.kind === 'image') drawImageLayer(ctx, object, assetOrigin);
@@ -865,19 +1000,84 @@ function drawObject(ctx: CanvasRenderingContext2D, object: CanvasStudioObject, s
   else if (object.kind === 'character') {
     // CharacterRendererV2 owns production procedural actors. Identity, anatomy,
     // facial state, IK and LOD stay deterministic across every scene.
-    if(object.appearance==='water-spirit')drawWaterSpirit(ctx,object,scene,timeMs);
-    else drawCharacterV2(ctx, object, scene, timeMs, isCanvasActorSpeaking(scene, object, timeMs) ?? isVoiceActiveAt(resolveVoiceWindows(scene), timeMs),canvasActorSpeechLevel(scene,object,timeMs));
+    if(object.visualStyle==='folk-horror')drawFolkCharacter(ctx,object,scene,timeMs,isCanvasActorSpeaking(scene,object,timeMs) === true);
+    else if(object.appearance==='water-spirit')drawWaterSpirit(ctx,object,scene,timeMs,contactBodyOnly?'body':'full');
+    else {
+      const dialogueSpeaking = isCanvasActorSpeaking(scene, object, timeMs);
+      const horrorTalkBeat = object.visualStyle === 'horror'
+        ? scene.animationBeats?.some(beat => beat.action === 'talk'
+          && beat.targetIds.includes(object.id)
+          && timeMs >= beat.atMs
+          && timeMs < beat.atMs + beat.durationMs) === true
+        : false;
+      // Legacy projects may animate from scene-wide voice windows. Horror actors
+      // must never flap their mouths to narrator audio: only their own dialogue
+      // or an explicit targeted talk beat can activate lip sync.
+      const voiceActive = dialogueSpeaking
+        ?? (object.visualStyle === 'horror' ? horrorTalkBeat : isVoiceActiveAt(resolveVoiceWindows(scene), timeMs));
+      if(object.visualStyle==='horror'&&!contactBodyOnly){
+        drawHorrorCharacter(
+          ctx,
+          object,
+          scene,
+          timeMs,
+          voiceActive,
+          voiceActive ? canvasActorSpeechLevel(scene, object, timeMs) : 0,
+        );
+      }else{
+        drawCharacterV2(
+          ctx,
+          object,
+          scene,
+          timeMs,
+          voiceActive,
+          voiceActive ? canvasActorSpeechLevel(scene, object, timeMs) : 0,
+          !contactBodyOnly,
+        );
+      }
+    }
   }
-  else if (object.kind === 'ship') drawAuthoredShip(ctx, object);
+  else if (object.kind === 'ship') drawAuthoredShip(ctx, object, !scene.objects.some(prop=>
+    prop.variant==='oar' && prop.heldBy && scene.objects.some(actor=>actor.id===prop.heldBy && actor.onBoat===object.id)));
   else if (object.kind === 'stake') drawAuthoredStake(ctx, object);
   else if (object.kind === 'text') drawText(ctx, object);
   else if (object.kind === 'prop') {
-    const handled = drawAuthoredProp(ctx, object, timeMs);
+    if (object.variant === 'tree' && isFolkHorrorScene(scene)) { drawFolkTree(ctx, object); return; }
+    const handled = drawAuthoredProp(ctx, object, timeMs + (scene.atmosphere?.timeOffsetMs || 0), scene);
     // Legacy/manual projects without assetRef keep the old fallback so the editor
     // remains backward-compatible. Production plans assign assetRef and are
     // rejected by visual QC before render if no authored asset exists.
     if (!handled && !object.assetRef) drawProceduralProp(ctx, object);
   } else drawShape(ctx, object);
+}
+
+function canvasSceneObjectFilter(scene:CanvasStudioScene,object:CanvasStudioObject){
+  if(object.kind==='text'||object.kind==='shape')return 'none';
+  const night=scene.atmosphere?.timeOfDay==='night'
+    ||['bg:city-hallway','bg:city-alley-night','bg:room-simple-night','bg:room-stilt-house','bg:room-underfloor','bg:night-stilt-house'].includes(scene.backgroundRef||'');
+  if(!night)return 'none';
+  // Depth haze belongs to the same lighting grammar as the authored set.
+  // Background cutouts should not keep the same clean/saturated palette as
+  // foreground actors because that makes them read as pasted stickers.
+  let brightness=object.depth==='background'?.68:object.depth==='foreground'?.90:.80;
+  let saturation=object.depth==='background'?.72:object.depth==='foreground'?.88:.80;
+  if(object.role==='focal'){brightness=Math.min(1,brightness+.06);saturation=Math.min(1,saturation+.05);}
+  if(object.variant==='lantern'||object.variant==='fire'){brightness=1;saturation=1;}
+  return `brightness(${brightness}) saturate(${saturation})`;
+}
+
+function drawCanvasPropContactShadow(ctx:CanvasRenderingContext2D,object:CanvasStudioObject){
+  if(object.kind!=='prop'||object.heldBy||object.onBoat||object.handling||object.restingOn||object.environmentAnchor==='doorway')return;
+  const bottom=canvasFloorPropBottomRatio(object);
+  if(bottom===undefined)return;
+  const depthAlpha=object.depth==='background'?.10:object.depth==='foreground'?.17:.14;
+  ctx.save();
+  ctx.globalAlpha=depthAlpha;
+  ctx.fillStyle='#080a0a';
+  ctx.beginPath();
+  ctx.ellipse(0,object.height*bottom,Math.max(8,object.width*.34),Math.max(2.2,object.height*.025),0,0,Math.PI*2);
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawGeneratedBackground(
@@ -910,11 +1110,14 @@ export function renderCanvasScene(
   ctx.fillStyle = '#f5f1e7';
   ctx.fillRect(0, 0, width, height);
 
-  const compiledScene = preparedScene(scene, width, height);
+  if(drawVectorScene(ctx,scene,timeMs,width,height)){ctx.restore();return;}
+
+  // Project preparation owns geometry. Recompiling one shot here discards
+  // the room and cast anchors already shared by preview and export.
+  const compiledScene = scene;
   // A grip below the surface needs an actual underwater insert, not a splash
   // obscuring the actor. Keep the same anatomy/contact coordinates across it.
-  const grab=compiledScene.animationBeats?.find(b=>b.action==='grab');
-  const underwaterShot=Boolean(grab&&timeMs>=grab.atMs-250);
+  const underwaterShot=canvasUnderwaterInsert(compiledScene,timeMs);
   const environment=underwaterShot?{...compiledScene,background:'underwater' as const,backgroundRef:'bg:underwater-stakes'}:compiledScene;
   const camera = evaluateCanvasCamera(compiledScene, timeMs, width, height);
   ctx.translate(camera.offsetX, camera.offsetY);
@@ -924,7 +1127,8 @@ export function renderCanvasScene(
   ctx.translate(-camera.focusX, -camera.focusY);
 
   const hasGeneratedBackground = drawGeneratedBackground(ctx, environment, width, height, assetOrigin);
-  const hasAuthoredBackground = !hasGeneratedBackground && drawAuthoredBackground(ctx, environment, width, height, timeMs);
+  const hasAuthoredBackground = !hasGeneratedBackground && (drawFolkBackground(ctx, environment, width, height)
+    || drawAuthoredBackground(ctx, environment, width, height, timeMs));
   if (!hasGeneratedBackground && !hasAuthoredBackground) {
     // Legacy/manual projects retain the procedural environment fallback.
     // Production plans carry backgroundRef and are rejected by QC before render
@@ -932,43 +1136,82 @@ export function renderCanvasScene(
     drawProceduralBackgroundBase(ctx, compiledScene, width, height);
     drawProceduralBackgroundDetails(ctx, compiledScene, width, height);
   }
+  drawAmbientAtmosphere(ctx,compiledScene,timeMs,width,height,'back');
 
   const effects = [...(compiledScene.effects || [])].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
-  for (const effect of effects.filter((item) => (item.zIndex || 0) < 15)) drawSceneEffect(ctx, effect, timeMs);
+  for (const effect of effects.filter((item) => (item.zIndex || 0) < 15)) drawSceneEffect(ctx, resolveCanvasLight(effect,compiledScene,timeMs), timeMs);
 
   const sorted = compiledScene.objects.map(object=>{
-    const holder=object.heldBy?compiledScene.objects.find(o=>o.id===object.heldBy):undefined;
+    const holderId=object.heldBy||object.handling?.actorId;
+    const holder=holderId?compiledScene.objects.find(o=>o.id===holderId):undefined;
     const boat=holder?.onBoat?compiledScene.objects.find(o=>o.id===holder.onBoat):undefined;
     return holder?{...object,zIndex:Math.max(object.zIndex,holder.zIndex+1,boat?boat.zIndex+1:0)}:object;
   }).sort((a, b) => a.zIndex - b.zIndex);
-  for (const object of sorted) {
+  // An open vessel has two depth planes: interior behind occupants, near
+  // hull in front. Drawing its entire deck over people makes them look like
+  // they are standing behind the boat rather than seated inside it.
+  const splitBoats=new Set(sorted.filter(o=>o.kind==='ship'&&!o.imageUrl&&o.assetRef==='ship:wooden-ferry'
+    &&sorted.some(actor=>actor.kind==='character'&&actor.onBoat===o.id)).map(o=>o.id));
+  const layers=sorted.flatMap<{object:CanvasStudioObject;phase:'back'|'front'|'full';z:number}>(object=>splitBoats.has(object.id)
+    ?[{object,phase:'back' as const,z:Math.min(...sorted.filter(o=>o.onBoat===object.id).map(o=>o.zIndex))-0.5},
+      {object,phase:'front' as const,z:object.zIndex}]
+    :[{object,phase:'full' as const,z:object.zIndex}]).sort((a,b)=>a.z-b.z);
+  const contactActors=sorted.filter(object=>{
+    if(object.kind!=='character'||object.imageUrl||object.sprite||object.spriteActs?.length)return false;
+    const state=applyCanvasChoreographyState(object,compiledScene,timeMs);
+    return state.pose==='reach'&&compiledScene.objects.some(o=>o.id===state.lookAtId&&o.kind==='ship')
+      &&compiledScene.animationBeats?.some(b=>b.action==='grab'&&b.targetIds.includes(object.id)&&b.focusTargetId===state.lookAtId&&timeMs>=b.atMs);
+  });
+  for (const {object,phase} of layers) {
+    if (hideFolkBackgroundSpirit(compiledScene, object)) continue;
     const animatedObject = applyCanvasChoreographyState(object, compiledScene, timeMs);
     if(object.variant==='rope'&&object.tiedTo){
       const tie=compiledScene.animationBeats?.find(beat=>beat.action==='tie'&&beat.focusTargetId===object.id);
       animatedObject.tieProgress=tie?Math.max(0,Math.min(1,(timeMs-tie.atMs)/tie.durationMs)):1;
     }
-    const transform = evaluateCanvasObject(animatedObject, compiledScene, timeMs);
-    const holder=object.heldBy&&compiledScene.objects.find(actor=>actor.id===object.heldBy&&actor.kind==='character'&&!actor.imageUrl);
-    if(holder) {
-      const actor=applyCanvasChoreographyState(holder,compiledScene,timeMs);
-      const hand=canvasCharacterHand(actor,compiledScene,timeMs,isCanvasActorSpeaking(compiledScene,actor,timeMs) ?? false);
-      transform.x=hand.x;
-      if(object.variant==='teapot')transform.x+=object.width*.45*transform.scale;
-      // The lantern's handle, rather than its center, rests in the hand.
-      transform.y=hand.y+(object.variant==='lantern'?object.height*.51*transform.scale:object.variant==='phone'?-object.height*.15*transform.scale:0);
-    }
+    const transform = evaluateAttachedProp(object, compiledScene, timeMs);
+    const ambient=ambientObjectMotion(object,compiledScene,timeMs);
     ctx.save();
+    if(object.kind==='character'&&object.onBoat){
+      const vessel=compiledScene.objects.find(o=>o.id===object.onBoat&&o.kind==='ship');
+      if(vessel){
+        // The front hull occludes legs even when a seated actor crouches.
+        // Clip in the vessel's frame so a tilted boat cannot expose feet below it.
+        const frame=evaluateAttachedProp(vessel,compiledScene,timeMs),angle=frame.rotation*Math.PI/180;
+        ctx.translate(frame.x,frame.y);ctx.rotate(angle);
+        ctx.beginPath();ctx.rect(-width*4,-height*4,width*8,height*4+vessel.height*.06*frame.scale);ctx.clip();
+        ctx.rotate(-angle);ctx.translate(-frame.x,-frame.y);
+      }
+    }
     if(object.waterlineY!==undefined&&!underwaterShot){
       ctx.beginPath();ctx.rect(-width*4,-height*4,width*8,object.waterlineY+height*4);ctx.clip();
     }
     ctx.globalAlpha = Math.max(0, Math.min(1, transform.opacity));
-    ctx.translate(transform.x, transform.y);
-    const hanging = object.kind === 'prop' && object.variant === 'lantern' && !object.imageUrl;
+    if(canvasLampMountedOnPost(object)){
+      const top=transform.y+object.height*.40*transform.scale;
+      const bottom=Math.max(top+object.height,height*.94);
+      const postWidth=Math.max(5,object.width*.15*transform.scale);
+      ctx.fillStyle='#604736';ctx.strokeStyle='#302b25';ctx.lineWidth=2;
+      ctx.fillRect(transform.x-postWidth/2,top,postWidth,bottom-top);
+      ctx.strokeRect(transform.x-postWidth/2,top,postWidth,bottom-top);
+    }
+    const propBottom=canvasFloorPropBottomRatio(animatedObject);
+    const groundShiftY=object.kind==='character'&&animatedObject.visualStyle==='horror'&&Number.isFinite(animatedObject.groundY)
+      ? (animatedObject.groundY as number)-(transform.y+canvasCharacterLocalGroundOffset(animatedObject,compiledScene,timeMs)*transform.scale)
+      :object.kind==='prop'&&propBottom!==undefined&&Number.isFinite(animatedObject.groundY)&&!animatedObject.restingOn
+        ? (animatedObject.groundY as number)-(transform.y+propBottom*object.height*transform.scale)
+        :0;
+    ctx.translate(transform.x+ambient.dx, transform.y+ambient.dy+groundShiftY);
+    const hanging = object.kind === 'prop' && canvasLanternUsesHandlePivot(object);
     if (hanging) ctx.translate(0,-object.height*.51*transform.scale);
-    ctx.rotate((transform.rotation * Math.PI) / 180);
+    ctx.rotate(((transform.rotation+ambient.rotation) * Math.PI) / 180);
     ctx.scale(transform.scale, transform.scale);
     if (hanging) ctx.translate(0,object.height*.51);
-    drawObject(ctx, animatedObject, compiledScene, timeMs, assetOrigin);
+    if(phase==='full')drawCanvasPropContactShadow(ctx,animatedObject);
+    ctx.filter=canvasSceneObjectFilter(compiledScene,animatedObject);
+    if(phase!=='full')drawAuthoredShip(ctx,animatedObject,!compiledScene.objects.some(prop=>prop.variant==='oar'&&prop.heldBy
+      &&compiledScene.objects.some(actor=>actor.id===prop.heldBy&&actor.onBoat===object.id)),phase);
+    else drawObject(ctx, animatedObject, compiledScene, timeMs, assetOrigin,contactActors.some(actor=>actor.id===object.id));
     ctx.restore();
     if(object.waterlineY!==undefined&&!underwaterShot&&transform.opacity>.05){
       ctx.save();ctx.strokeStyle='rgba(160,193,185,.42)';ctx.lineWidth=1.5;
@@ -991,8 +1234,37 @@ export function renderCanvasScene(
     }
   }
 
-  for (const effect of effects.filter((item) => (item.zIndex || 0) >= 15)) drawSceneEffect(ctx, effect, timeMs);
+  // Under-floor horror keeps the threat partially occluded by a near post.
+  // This foreground plane is drawn after actors so a shadow figure never reads
+  // as a clean icon pasted on top of the architecture.
+  if (compiledScene.backgroundRef === 'bg:room-underfloor') {
+    ctx.save();
+    const postX = width * .805;
+    const postWidth = width * .025;
+    const post = ctx.createLinearGradient(postX - postWidth, 0, postX + postWidth, 0);
+    post.addColorStop(0, '#15110f');
+    post.addColorStop(.48, '#34261f');
+    post.addColorStop(1, '#110f0e');
+    ctx.fillStyle = post;
+    ctx.fillRect(postX - postWidth * .5, height * .29, postWidth, height * .58);
+    ctx.fillStyle = 'rgba(0,0,0,.52)';
+    ctx.fillRect(0, height * .86, width, height * .14);
+    ctx.restore();
+  }
+
+  // A submerged torso stays behind the surface; the gripping limbs sit on
+  // the near rim, above its hull. One world transform owns both passes.
+  for(const actor of contactActors){
+    const state=applyCanvasChoreographyState(actor,compiledScene,timeMs),frame=evaluateCanvasObject(actor,compiledScene,timeMs);
+    ctx.save();ctx.globalAlpha=frame.opacity;ctx.translate(frame.x,frame.y);ctx.rotate(frame.rotation*Math.PI/180);ctx.scale(frame.scale,frame.scale);
+    if(actor.appearance==='water-spirit')drawWaterSpirit(ctx,state,compiledScene,timeMs,'arms');
+    else drawCharacterContactArms(ctx,state,compiledScene,timeMs);
+    ctx.restore();
+  }
+  drawFolkContactLimbs(ctx, compiledScene, timeMs);
+  for (const effect of effects.filter((item) => (item.zIndex || 0) >= 15)) drawSceneEffect(ctx, resolveCanvasLight(effect,compiledScene,timeMs), timeMs);
   drawCanvasRain(ctx,compiledScene,timeMs,width,height);
+  drawAmbientAtmosphere(ctx,compiledScene,timeMs,width,height,'front');
   ctx.restore();
 
   drawSceneCredits(ctx, compiledScene, width, height);

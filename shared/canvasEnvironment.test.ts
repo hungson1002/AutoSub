@@ -6,6 +6,18 @@ import {canvasEnvironmentDoorway,CANVAS_DOOR_PANEL} from './canvasEnvironment';
 import {evaluateCanvasObject} from '../src/canvasAnimationStudio/runtime';
 import {applyCanvasChoreographyState} from '../src/canvasAnimationStudio/choreography';
 
+test('opening/reach choreography never relocates the architectural panel beside an actor',()=>{
+  const scene=createCanvasScene();scene.template='two-shot';scene.backgroundRef='bg:room-stilt-house';
+  scene.objects=[createCanvasObject('character',{id:'actor',role:'focal'}),createCanvasObject('prop',{id:'door',variant:'door'})];
+  scene.animationBeats=[{id:'open',action:'reveal',targetIds:['door'],atMs:0,durationMs:900},
+    {id:'reach',action:'reach',targetIds:['actor'],focusTargetId:'door',atMs:0,durationMs:1000}];
+  const compiled=compileCanvasSceneLayout(scene,1280,720),door=compiled.objects[1]!;
+  const opening=canvasEnvironmentDoorway(scene.backgroundRef,1280,720)!;
+  assert.equal(door.x-CANVAS_DOOR_PANEL.width*.5*door.width/100,opening.x);
+  assert.equal(applyCanvasChoreographyState(door,compiled,1000).doorOpen,.72);
+  assert.deepEqual(compileCanvasSceneLayout(compiled,1280,720),compiled);
+});
+
 test('door panel exactly covers its background opening when closed at multiple resolutions and in raw/semantic layouts',()=>{
   for(const [width,height] of [[1280,720],[1920,1080],[720,1280]] as Array<[number,number]>)for(const semantic of [false,true]) {
     const scene=createCanvasScene(0);scene.backgroundRef='bg:room-stilt-house';

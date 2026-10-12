@@ -11,6 +11,23 @@ const plan=(action:CanvasAnimationAction='point'):CanvasStudioProject=>({version
   animationBeats:[{id:'action',action,targetIds:['minh'],speechCue:'lau lại kính',focusTargetId:'lamp',atMs:300,durationMs:1800}],
 }]});
 
+test('restlessness is not a literal sitting event while real sitting remains required',()=>{
+ const p=plan('wipe');p.scenes[0]!.narration='Ông không thể ngồi yên, chạy ra ngoài tìm người.';
+ assert.ok(!evaluateCanvasActionCoverage(p).some(i=>i.cue==='ngồi'));
+ p.scenes[0]!.narration='Ông ngồi yên trên ghế.';
+ assert.ok(evaluateCanvasActionCoverage(p).some(i=>i.cue==='ngồi'));
+});
+
+test('physical contact is allowed to overlap, but unrelated body collisions remain reported by name',()=>{
+ const p=plan('wipe');const scene=p.scenes[0]!;
+ scene.template='hero-left';scene.objects[0]!.slot='hero-left';scene.objects[1]!.slot='hero-left';
+ assert.ok(!evaluateCanvasVisualQuality(p).issues.some(i=>i.code==='large-overlap'));
+ scene.animationBeats=[];scene.narration='Minh đứng cạnh Nam.';
+ scene.objects[1]=createCanvasObject('character',{id:'nam',label:'Nam',slot:'hero-left',role:'support'});
+ const collision=evaluateCanvasVisualQuality(p).issues.find(i=>i.code==='large-overlap');
+ assert.ok(collision);assert.match(collision.message,/Minh|minh/);assert.match(collision.message,/Nam/);
+});
+
 test('standing/pointing is rejected for lamp cleaning but wiping its actual target passes',()=>{
   const incomplete=plan(),complete=plan('wipe');
   assert.equal(evaluateCanvasActionCoverage(incomplete).length,1);

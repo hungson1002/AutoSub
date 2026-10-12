@@ -1,8 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import type { AIProvider, TranslationItem, TranslationMemoryItem } from '../types';
 import { buildTranslationGuide, ProviderError, TranslationValidationError, translateBatch } from '../adapters';
+import { cancelTranslationJob, createTranslationJob, getTranslationJob, initializeTranslationJobs } from '../services/translationJobs';
 
 interface Body {
+  jobId?: string;
   provider?: AIProvider;
   model?: string;
   items?: TranslationItem[];
@@ -21,6 +23,56 @@ function sendProviderError(reply: { code: (status: number) => { send: (body: unk
 }
 
 export async function translationRoutes(app: FastifyInstance) {
+  await initializeTranslationJobs();
+
+  app.post('/api/translate/jobs', async (request, reply) => {
+    const body = request.body as Body;
+    if (!body.provider?.baseUrl || !body.model || !body.items?.length) {
+      return reply.code(400).send({ error: 'Translation job cần provider, model và items.' });
+    }
+    try {
+      const job = await createTranslationJob({
+        provider: body.provider,
+        model: body.model,
+        items: body.items,
+        sourceLanguage: body.sourceLanguage || 'Auto Detect',
+        targetLanguage: body.targetLanguage || 'Tiếng Việt',
+        style: body.style || 'Phổ thông',
+        customPrompt: body.customPrompt || '',
+        glossary: body.glossary || [],
+        translationMemory: body.translationMemory || [],
+        translationGuide: body.translationGuide || '',
+      }, body.jobId);
+      return reply.code(202).send({ id: job.id, status: job.status, stage: job.stage });
+    } catch (error) {
+      return sendProviderError(reply, error, 'Không thể tạo translation job.');
+    }
+  });
+
+  app.get('/api/translate/jobs/:id', async (request, reply) => {
+    try {
+      const job = await getTranslationJob(String((request.params as { id?: string }).id || ''));
+      return reply.send({
+        id: job.id,
+        status: job.status,
+        stage: job.stage,
+        error: job.error,
+        result: job.result,
+      });
+    } catch {
+      return reply.code(404).send({ error: 'Không tìm thấy translation job.' });
+    }
+  });
+
+  app.post('/api/translate/jobs/:id/cancel', async (request, reply) => {
+    try {
+      const job = await cancelTranslationJob(String((request.params as { id?: string }).id || ''));
+      return reply.send({ id: job.id, status: job.status, stage: job.stage });
+    } catch {
+      return reply.code(404).send({ error: 'Không tìm thấy translation job.' });
+    }
+  });
+
   app.post('/api/translate/guide', async (request, reply) => {
     const body = request.body as Body;
     if (!body.provider?.baseUrl || !body.model || !body.items?.length) return reply.code(400).send({ error: 'Translation guide cần provider, model và items.' });

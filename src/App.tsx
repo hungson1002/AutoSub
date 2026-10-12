@@ -18,9 +18,11 @@ import { CanvasAnimationStudioPage } from "./pages/CanvasAnimationStudioPage";
 import { StoragePage } from "./pages/StoragePage";
 import { X, Check } from "./components/Icons";
 import { ensureBuiltInProviders } from "./lib/providers";
+import { api } from "./lib/api";
 import {
   capabilityAssignments,
   updateCapabilityAssignments,
+  reconcileLocalSttAssignments,
 } from "./lib/settings";
 import { repairRunawayOcrCueEnds } from "./lib/subtitles";
 
@@ -28,7 +30,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("translate");
   const [douyinDraft, setDouyinDraft] = useState('');
   const [providers, setProviders] = useState<AIProvider[]>(() =>
-    storage.providers(),
+    ensureBuiltInProviders(storage.providers()),
   );
   const [settings, setSettings] = useState<AppSettings>(storage.settings);
   const [cues, setCues] = useState<SubtitleCue[]>(storage.cues);
@@ -60,8 +62,33 @@ export default function App() {
     return () => window.clearTimeout(id);
   }, [toast]);
   useEffect(() => {
-    setProviders((current) => ensureBuiltInProviders(current));
-  }, []);
+    setProviders((current) => {
+      const ensured = ensureBuiltInProviders(current);
+      const currentSignature = current.map((provider) => [
+        provider.id,
+        provider.providerType,
+        provider.models.map((model) => model.id).join(','),
+      ].join(':')).join('|');
+      const ensuredSignature = ensured.map((provider) => [
+        provider.id,
+        provider.providerType,
+        provider.models.map((model) => model.id).join(','),
+      ].join(':')).join('|');
+      return currentSignature === ensuredSignature ? current : ensured;
+    });
+  }, [providers.length, ensureBuiltInProviders]);
+  useEffect(() => {
+    const controller = new AbortController();
+    const local = providers.filter(provider => ['whisper-local', 'funasr-local', 'qwen3-asr-local'].includes(provider.providerType));
+    void Promise.allSettled(local.map(async provider => ({ id: provider.id, models: (await api.listModels(provider, controller.signal)).models }))).then(results => {
+      if (controller.signal.aborted) return;
+      const catalogs = new Map(results.flatMap(result => result.status === 'fulfilled' ? [[result.value.id, result.value.models] as const] : []));
+      if (!catalogs.size) return;
+      setProviders(current => current.map(provider => catalogs.has(provider.id) ? { ...provider, models: catalogs.get(provider.id)! } : provider));
+      setSettings(current => reconcileLocalSttAssignments(current, catalogs));
+    });
+    return () => controller.abort();
+  }, [providers.length]);
   const notice = useCallback(
     (message: string, kind: "success" | "error" = "success") =>
       setToast({ message, kind }),

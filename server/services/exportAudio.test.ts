@@ -119,6 +119,18 @@ test('export applies independent original and dubbing volume controls', () => {
   assert.match(filter, /amix=inputs=2:duration=longest/);
 });
 
+test('export allows dubbing gain up to 500 percent', () => {
+  const filter = buildExportAudioFilter({
+    hasDub: true,
+    dubInputIndex: 1,
+    keepAudio: false,
+    dubVolume: 5,
+  });
+
+  assert.match(filter, /\[1:a\]volume=5\.000,/);
+  assert.match(buildExportAudioFilter({ hasDub: true, dubInputIndex: 1, keepAudio: false, dubVolume: 9 }), /volume=5\.000,/);
+});
+
 test('export audio is padded then trimmed to the exact render duration', () => {
   const filter = buildExportAudioFilter({
     hasDub: true,

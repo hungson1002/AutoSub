@@ -63,7 +63,7 @@ export function characterRnd(seed: number, n: number) {
 }
 
 const HORROR_REFS = new Set(['bg:night-stilt-house', 'bg:room-stilt-house', 'bg:room-stilt-day', 'bg:room-underfloor', 'bg:room-floor-detail']);
-const BODY_POSES = new Set(['lie-down', 'cover-face', 'float-body', 'struggle', 'grab', 'sink', 'surface', 'sit', 'aid', 'assist', 'reach', 'tie', 'wipe', 'write', 'run', 'row', 'brace', 'celebrate']);
+const BODY_POSES = new Set(['lie-down', 'cover-face', 'float-body', 'struggle', 'grab', 'sink', 'surface', 'sit', 'aid', 'assist', 'reach', 'tie', 'wipe', 'write', 'run', 'row', 'react', 'brace', 'celebrate']);
 
 function resolveLod(object: CanvasStudioObject, scene: CanvasStudioScene): CharacterLod {
   if (object.pose === 'lie-down' || object.pose === 'cover-face' || object.pose === 'float-body') return 'medium';
@@ -145,8 +145,8 @@ export function resolveCharacterModel(object: CanvasStudioObject, scene: CanvasS
   const baseWidth = faceShape === 'narrow' ? 38.5 : faceShape === 'long' ? 40 : faceShape === 'round' ? 44 : faceShape === 'angular' ? 41.5 : 42;
   const baseHeight = faceShape === 'long' ? 39 : faceShape === 'round' ? 35 : older ? 38 : 36;
 
-  const faceWidth = (baseWidth + (characterRnd(seed, 3) - .5) * 2.2)*(horror?.76:1);
-  const faceHeight = (baseHeight + (characterRnd(seed, 4) - .5) * 1.6)*(horror?.9:1);
+  const faceWidth = (baseWidth + (characterRnd(seed, 3) - .5) * 2.2)*(horror?.90:1);
+  const faceHeight = (baseHeight + (characterRnd(seed, 4) - .5) * 1.6)*(horror?.94:1);
   const primary = object.color || palette[0];
   const secondary = object.secondaryColor || palette[1];
   const skin = object.skinTone || palette[2];
@@ -164,15 +164,19 @@ export function resolveCharacterModel(object: CanvasStudioObject, scene: CanvasS
     faceHeight,
     jawWidth: faceWidth * (jawRatio + characterRnd(seed, 5) * .035),
     chinLength: chinBase + characterRnd(seed, 6) * .85,
-    eyeScale: horror ? .74 + characterRnd(seed, 7) * .07 : .84 + characterRnd(seed, 7) * .08,
-    eyeSpacing: ((faceShape === 'narrow' ? 6.6 : faceShape === 'round' ? 7.5 : 7) + characterRnd(seed, 8) * 1.0) * (horror ? .9 : 1),
-    shoulderWidth: (object.archetype === 'warrior' ? 40 : object.archetype === 'worker' ? 37.5 : 36) + characterRnd(seed, 9) * 2.6,
-    waistWidth: 28 + characterRnd(seed, 10) * 2.4,
-    torsoHeight: 34 + characterRnd(seed, 11) * 2,
-    armLength: 14.5 + characterRnd(seed, 12) * 1.4,
-    forearmLength: 13.5 + characterRnd(seed, 13) * 1.4,
-    thighLength: 14.2 + characterRnd(seed, 14) * 1.1,
-    shinLength: 14.2 + characterRnd(seed, 15) * 1.1,
+    eyeScale: horror ? .72 + characterRnd(seed, 7) * .05 : .84 + characterRnd(seed, 7) * .08,
+    eyeSpacing: ((faceShape === 'narrow' ? 6.6 : faceShape === 'round' ? 7.5 : 7) + characterRnd(seed, 8) * 1.0) * (horror ? .88 : 1),
+    // Horror cast uses a compact editorial silhouette: short neck,
+    // fuller torso and slightly shorter limbs. The previous multipliers made
+    // every actor read like a stretched mannequin once the large horror head
+    // was attached to the generic skeleton.
+    shoulderWidth: ((object.archetype === 'warrior' ? 40 : object.archetype === 'worker' ? 37.5 : 36) + characterRnd(seed, 9) * 2.6) * (horror ? 1.04 : 1),
+    waistWidth: (28 + characterRnd(seed, 10) * 2.4) * (horror ? 1.02 : 1),
+    torsoHeight: (34 + characterRnd(seed, 11) * 2) * (horror ? 1.12 : 1),
+    armLength: (14.5 + characterRnd(seed, 12) * 1.4) * (horror ? .90 : 1),
+    forearmLength: (13.5 + characterRnd(seed, 13) * 1.4) * (horror ? .92 : 1),
+    thighLength: (14.2 + characterRnd(seed, 14) * 1.1) * (horror ? .91 : 1),
+    shinLength: (14.2 + characterRnd(seed, 15) * 1.1) * (horror ? .93 : 1),
     skin,
     primary,
     secondary,
@@ -204,7 +208,7 @@ export function resolveFaceParams(object: CanvasStudioObject, model: CharacterMo
     browTilt: 0,
     mouthOpen: talk * (model.horror?.75:.9),
     mouthCurve: model.horror ? -.04 : .02,
-    mouthWidth: model.horror ? .72 : .82,
+    mouthWidth: (model.horror ? .72 : .82) + talk*.18,
     headTilt: 0,
   };
 
@@ -215,7 +219,7 @@ export function resolveFaceParams(object: CanvasStudioObject, model: CharacterMo
     return { ...base, eyesOpen: .06, mouthOpen: 0, mouthCurve: 0, headTilt: 0 };
   }
   if (expression === 'surprised') {
-    return { ...base, eyesOpen: model.horror ? .9 : 1, browLift: -.18, browTilt: -.08, mouthOpen: Math.max(.3, base.mouthOpen), mouthCurve: -.04, mouthWidth: .58, headTilt: -1.5 };
+    return { ...base, eyesOpen: model.horror ? .9 : 1, browLift: -.18, browTilt: -.08, mouthOpen: speaking ? Math.max(.3, base.mouthOpen) : 0, mouthCurve: -.04, mouthWidth: .58, headTilt: -1.5 };
   }
   if (expression === 'sad') {
     return { ...base, eyesOpen: .58, pupilY: .08, browLift: -.02, browTilt: .2, mouthCurve: -.5, mouthWidth: .7, headTilt: -2.2 };

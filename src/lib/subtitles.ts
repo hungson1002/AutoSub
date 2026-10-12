@@ -49,6 +49,13 @@ export function cuesForDubbingTimeline(cues: SubtitleCue[], enabled: boolean) {
   });
 }
 
+export function hasDubbingTimeline(cues: SubtitleCue[]) {
+  return cues.some((cue) =>
+    Number.isFinite(cue.dubbing?.timelineStartMs)
+    && Number.isFinite(cue.dubbing?.timelineEndMs)
+  );
+}
+
 export function isDubbableSubtitleCue(cue: SubtitleCue) {
   return cue.sourceKind !== 'onscreen-text' && cue.enabled && Boolean((cue.translatedText || cue.originalText).trim());
 }
@@ -83,6 +90,12 @@ const assTime = (ms: number) => { const safe = Math.max(0, Math.round(ms)); cons
 const assColor = (hex: string) => { const rgb = hex.replace('#', '').length === 6 ? hex.replace('#', '') : 'ffffff'; return `&H00${rgb.slice(4, 6)}${rgb.slice(2, 4)}${rgb.slice(0, 2)}`.toUpperCase(); };
 const assAlpha = (opacity: number) =>
   `&H${Math.round((1 - Math.max(0, Math.min(1, opacity))) * 255).toString(16).padStart(2, '0').toUpperCase()}&`;
+const assFade = (startMs: number, endMs: number) => {
+  const durationMs = Math.max(0, Math.round(endMs - startMs));
+  const fadeInMs = Math.min(90, Math.floor(durationMs / 3));
+  const fadeOutMs = Math.min(60, Math.floor(durationMs / 4));
+  return fadeInMs > 0 || fadeOutMs > 0 ? `\\fad(${fadeInMs},${fadeOutMs})` : '';
+};
 // Calibrated against Chromium and the Windows libass renderer at PlayRes
 // 1920x1080. Equal numeric sizes made libass glyphs about 9% shorter than
 // the editor preview, so apply the measured correction once to ASS values.
@@ -193,8 +206,9 @@ const subtitleBoxLayers = (effective: SubtitleStyle, bounds: ReturnType<typeof s
   if (effective.background !== 'box') return [];
   const { left, top, width, height, borderWidth } = bounds;
   const radius = Math.max(0, effective.boxBorderRadius ?? 0);
+  const fade = assFade(startMs, endMs);
   const drawing = (drawLayer: number, x: number, y: number, w: number, h: number, r: number, color: string, opacity: number) =>
-    `Dialogue: ${drawLayer},${assTime(startMs)},${assTime(endMs)},None,,0,0,0,,{\\an7\\pos(${Math.round(x)},${Math.round(y)})\\p1\\bord0\\shad0\\1c${assColor(color)}\\1a${assAlpha(opacity)}}${roundedRectDrawing(w, h, r)}{\\p0}`;
+    `Dialogue: ${drawLayer},${assTime(startMs)},${assTime(endMs)},None,,0,0,0,,{\\an7\\pos(${Math.round(x)},${Math.round(y)})${fade}\\p1\\bord0\\shad0\\1c${assColor(color)}\\1a${assAlpha(opacity)}}${roundedRectDrawing(w, h, r)}{\\p0}`;
   const background = drawing(layer + 1, left, top, width, height, radius, effective.backgroundColor ?? effective.outlineColor, effective.backgroundOpacity ?? .72);
   if (borderWidth <= 0) return [background];
   const border = drawing(layer, left, top, width, height, radius, effective.boxBorderColor ?? '#ffffff', 1);
@@ -221,7 +235,7 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
   const layerLayout = layoutTimelineCues(enabledCues);
   const layers = new Map(layerLayout.items.map(({ cue, lane }) => [cue.id, layerLayout.laneCount - lane]));
   const lines = enabledCues.flatMap((cue) => {
-    const individualStyle = cue.sourceKind === 'onscreen-text' ? cue.styleOverrides : undefined;
+    const individualStyle = cue.styleOverrides;
     const effective = individualStyle ? { ...style, ...individualStyle } : style;
     const effectiveStyleTag = individualStyle ? cueStyleTag(effective) : defaultStyleTag;
     const translated = cue.translatedText || cue.originalText;
@@ -239,7 +253,8 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
     const positionTag = `{\\an${nativeEdge ? edgeAnchor === 1 ? 2 : 8 : 5}\\pos(${Math.round(bounds.left + bounds.width / 2)},${textY})}`;
     const styleName = effective.background === 'box' ? 'Box' : effective.background === 'none' ? 'None' : 'Outline';
     const renderLayer = (layers.get(cue.id) ?? 0) * 4;
-    const dialogue = (layer: number, tags: string) => `Dialogue: ${layer},${assTime(cue.startMs)},${assTime(cue.endMs)},${styleName},,154,154,0,,${positionTag}${effectiveStyleTag}${tags}${escaped}`;
+    const fadeTag = assFade(cue.startMs, cue.endMs);
+    const dialogue = (layer: number, tags: string) => `Dialogue: ${layer},${assTime(cue.startMs)},${assTime(cue.endMs)},${styleName},,154,154,0,,${positionTag}${effectiveStyleTag}{${fadeTag}}${tags}${escaped}`;
     const boxes = subtitleBoxLayers(effective, bounds, cue.startMs, cue.endMs, renderLayer);
     return [...boxes, dialogue(renderLayer + 3, '')];
   });

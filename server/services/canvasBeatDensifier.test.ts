@@ -4,13 +4,20 @@ import { createCanvasObject, createCanvasProject } from '../../shared/canvasAnim
 import { densifyAnimationBeats } from './canvasBeatDensifier';
 
 describe('semantic beat completion', () => {
+  it('does not fill a conversation pause with repeated acting',()=>{
+    const project=createCanvasProject(),scene=project.scenes[0]!;
+    scene.durationMs=6000;scene.objects=[createCanvasObject('character',{characterKey:'minh',pose:'talk'})];
+    scene.dialogue=[{id:'line',speaker:'Minh',characterKey:'minh',text:'Ngày mai nhé.',durationMs:4000}];
+    scene.animationBeats=[];
+    assert.deepEqual(densifyAnimationBeats(project),project);
+  });
   it('does not fabricate gestures around a phrase-directed action',()=>{
     const project=createCanvasProject(),scene=project.scenes[0]!;
     scene.durationMs=6000;scene.objects=[createCanvasObject('character',{pose:'point'})];
     scene.animationBeats=[{id:'point',action:'point',atMs:500,durationMs:1000,targetIds:[scene.objects[0]!.id],speechCue:'chiếc đèn'}];
     assert.deepEqual(densifyAnimationBeats(project),project);
   });
-  it('fills gaps with the requested action without changing expression', () => {
+  it('adds the requested action once without replaying it or changing expression', () => {
     const project = createCanvasProject();
     const actor = createCanvasObject('character', { pose: 'brace', expression: 'sad' });
     project.scenes[0].durationMs = 4200;
@@ -18,7 +25,7 @@ describe('semantic beat completion', () => {
     project.scenes[0].animationBeats = [];
     const result = densifyAnimationBeats(project);
     const beats = result.scenes[0].animationBeats!;
-    assert.equal(beats.length, 3);
+    assert.equal(beats.length, 1);
     assert.ok(beats.every((beat) => beat.action === 'brace' && beat.targetIds[0] === actor.id));
     assert.ok(beats.every((beat) => beat.atMs >= 0 && beat.atMs + beat.durationMs <= 4200));
     assert.equal(result.scenes[0].objects[0].expression, 'sad');

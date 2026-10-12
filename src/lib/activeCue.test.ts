@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { SubtitleCue } from '../types';
-import { buildActiveCueIndex, findActiveCue, findActiveCues } from './activeCue';
+import { buildActiveCueIndex, filterPreviewActiveCues, findActiveCue, findActiveCues, findPreviewActiveCue } from './activeCue';
 
 const cue = (id: string, index: number, startMs: number, endMs: number, enabled = true): SubtitleCue => ({
   id,
@@ -54,4 +54,25 @@ test('active cue index returns every overlapping cue in reading order', () => {
   ]);
 
   assert.deepEqual(findActiveCues(index, 2_000).map((item) => item.id), ['top', 'middle', 'bottom']);
+});
+
+test('preview active cues hide stale overlapped subtitles and keep latest cue visible', () => {
+  const previous = cue('previous', 1, 0, 5_000);
+  const next = cue('next', 2, 3_000, 6_000);
+  const manualText = { ...cue('manual', 3, 0, 6_000), sourceKind: 'onscreen-text' as const, textOrigin: 'manual' as const };
+  const staleOcr = { ...cue('old-ocr', 4, 0, 5_000), sourceKind: 'onscreen-text' as const, textOrigin: 'ocr' as const };
+  const latestOcr = { ...cue('new-ocr', 5, 3_000, 6_000), sourceKind: 'onscreen-text' as const, textOrigin: 'ocr' as const };
+  const active = [previous, next, manualText, staleOcr, latestOcr];
+
+  assert.deepEqual(filterPreviewActiveCues(active).map((item) => item.id), ['next', 'manual', 'new-ocr']);
+});
+
+test('preview active cue prioritizes the latest subtitle over OCR text', () => {
+  const index = buildActiveCueIndex([
+    cue('previous', 1, 0, 5_000),
+    cue('next', 2, 3_000, 6_000),
+    { ...cue('ocr', 3, 3_000, 6_000), sourceKind: 'onscreen-text', textOrigin: 'ocr' },
+  ]);
+
+  assert.equal(findPreviewActiveCue(index, 3_500)?.id, 'next');
 });

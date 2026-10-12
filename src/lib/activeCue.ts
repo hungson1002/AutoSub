@@ -21,6 +21,31 @@ export function buildActiveCueIndex(cues: SubtitleCue[]): ActiveCueIndex {
   return { cues: enabled, maxEndMs };
 }
 
+const latestCue = (cues: SubtitleCue[]) => cues.reduce<SubtitleCue | undefined>((best, cue) => {
+  if (!best) return cue;
+  if (cue.startMs !== best.startMs) return cue.startMs > best.startMs ? cue : best;
+  return cue.index >= best.index ? cue : best;
+}, undefined);
+
+export function filterPreviewActiveCues(cues: SubtitleCue[]): SubtitleCue[] {
+  const manualText = cues.filter((cue) => cue.sourceKind === 'onscreen-text' && cue.textOrigin === 'manual');
+  const latestOcrText = latestCue(cues.filter((cue) => cue.sourceKind === 'onscreen-text' && cue.textOrigin !== 'manual'));
+  const latestSubtitle = latestCue(cues.filter((cue) => cue.sourceKind !== 'onscreen-text'));
+  const keep = new Set([
+    ...manualText.map((cue) => cue.id),
+    latestOcrText?.id,
+    latestSubtitle?.id,
+  ].filter(Boolean));
+  return cues.filter((cue) => keep.has(cue.id));
+}
+
+export function findPreviewActiveCue(index: ActiveCueIndex, timeMs: number): SubtitleCue | undefined {
+  const active = filterPreviewActiveCues(findActiveCues(index, timeMs));
+  return latestCue(active.filter((cue) => cue.sourceKind !== 'onscreen-text'))
+    || latestCue(active.filter((cue) => cue.sourceKind === 'onscreen-text' && cue.textOrigin !== 'manual'))
+    || active.at(-1);
+}
+
 export function findActiveCue(index: ActiveCueIndex, timeMs: number): SubtitleCue | undefined {
   return findActiveCues(index, timeMs).at(-1);
 }

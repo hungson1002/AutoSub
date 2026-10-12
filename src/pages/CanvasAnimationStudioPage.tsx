@@ -21,11 +21,13 @@ import {
   type CanvasStudioProject,
   type CanvasStudioScene,
 } from '../canvasAnimationStudio/types';
-import { preloadCanvasSceneImages, renderCanvasScene } from '../canvasAnimationStudio/renderer';
+import { preloadCanvasSceneImages } from '../canvasAnimationStudio/renderer';
+import {renderCanvasSceneWithTransition} from '../canvasAnimationStudio/sceneTransition';
 import { recordPureCanvasProject } from '../canvasAnimationStudio/canvasExporter';
 import { CANVAS_BEAT_ACTIONS, clampBeatToScene, createCanvasBeat, validateCanvasBeat } from '../../shared/canvasBeats';
 import { evaluateCanvasCamera, evaluateCanvasObject, projectDurationMs, resolveProjectTime } from '../canvasAnimationStudio/runtime';
 import { applyRecipeToBrief, FILM_RECIPES, filmRecipeById } from '../../shared/filmRecipes';
+import {readVectorStyleReference} from '../lib/vectorStyleReferences';
 import { loadVoicePreview } from '../lib/voicePreview';
 import './CanvasAnimationStudioPage.css';
 import { CanvasAudioPanel } from '../canvasAnimationStudio/CanvasAudioPanel';
@@ -66,6 +68,8 @@ const POSES: { value: CanvasCharacterPose; label: string }[] = [
   {value:'assist',label:'Dìu người'},
   { value: 'idle', label: 'Đứng' },
   { value: 'talk', label: 'Nói / gesturing' },
+  { value: 'gesture', label: 'Giải thích nhẹ' },
+  { value: 'nod', label: 'Gật đầu' },
   { value: 'point', label: 'Chỉ tay' },
   { value: 'run', label: 'Chạy' },
   { value: 'row', label: 'Chèo' },
@@ -76,9 +80,11 @@ const POSES: { value: CanvasCharacterPose; label: string }[] = [
 ];
 
 const BEAT_ACTION_LABELS: Record<CanvasAnimationAction, string> = {
-  grab:'Nắm / túm',struggle:'Vùng vẫy',sink:'Chìm xuống',surface:'Trồi lên',
+  grab:'Nắm / túm',pull:'Kéo ngã',release:'Thả / thu lại',struggle:'Vùng vẫy',sink:'Chìm xuống',surface:'Trồi lên',
   reach:'Lấy / chạm vật',wipe:'Lau',write:'Viết',tie:'Buộc dây',aid:'Chăm sóc chân',assist:'Dìu người',
   talk: 'Nói',
+  gesture: 'Giải thích nhẹ',
+  nod: 'Gật đầu',
   point: 'Chỉ tay',
   react: 'Giật mình',
   celebrate: 'Ăn mừng',
@@ -173,6 +179,7 @@ function cloneScene(scene: CanvasStudioScene): CanvasStudioScene {
 
 function CanvasStage({
   scene,
+  previousScene,
   timeMs,
   width,
   height,
@@ -181,6 +188,7 @@ function CanvasStage({
   onMove,
 }: {
   scene: CanvasStudioScene;
+  previousScene?:CanvasStudioScene;
   timeMs: number;
   width: number;
   height: number;
@@ -194,20 +202,20 @@ function CanvasStage({
 
   useEffect(() => {
     let active = true;
-    void preloadCanvasSceneImages(scene).then(() => {
+    void Promise.all([scene,previousScene].filter((item):item is CanvasStudioScene=>!!item).map(item=>preloadCanvasSceneImages(item))).then(() => {
       if (active) setAssetRevision((value) => value + 1);
     });
     return () => {
       active = false;
     };
-  }, [scene]);
+  }, [scene,previousScene]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    renderCanvasScene(ctx, scene, timeMs, width, height);
+    renderCanvasSceneWithTransition(ctx,scene,previousScene,timeMs,width,height);
     const selected = scene.objects.find((object) => object.id === selectedObjectId);
     if (selected) {
       const transform = evaluateCanvasObject(selected, scene, timeMs);
@@ -227,7 +235,7 @@ function CanvasStage({
       ctx.strokeRect(-selected.width / 2 - 8, -selected.height / 2 - 8, selected.width + 16, selected.height + 16);
       ctx.restore();
     }
-  }, [scene, timeMs, width, height, selectedObjectId, assetRevision]);
+  }, [scene, timeMs, width, height, selectedObjectId, assetRevision,previousScene]);
 
   const pointerToScene = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -316,12 +324,16 @@ export function CanvasAnimationStudioPage({
   const [jsonOpen, setJsonOpen] = useState(false);
   const [jsonDraft, setJsonDraft] = useState('');
   const [brief, setBrief] = useState('');
+  const [generationAspect, setGenerationAspect] = useState<'16:9'|'9:16'>(() => project.height > project.width ? '9:16' : '16:9');
   const [generating, setGenerating] = useState(false);
   const [generationStage, setGenerationStage] = useState('');
   const [renderProgress, setRenderProgress] = useState(0);
   const [ttsVoices, setTtsVoices] = useState<Array<{ id: string; name?: string; language?: string }>>([]);
   const [ttsVoice, setTtsVoice] = useState('');
   const [recipeId, setRecipeId] = useState('vui-ve');
+  const [styleReferences,setStyleReferences]=useState<string[]>([]);
+  const [styleReferenceName,setStyleReferenceName]=useState('');
+  const [readingReference,setReadingReference]=useState(false);
   const [testingVoice, setTestingVoice] = useState(false);
   const [buildingAudio,setBuildingAudio]=useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -636,7 +648,7 @@ export function CanvasAnimationStudioPage({
   };
 
   const generateCompleteVideo = async () => {
-    if (generating) return;
+    if (generating||readingReference) return;
     if (brief.trim().length < 8) { onNotice('Hãy nhập ý tưởng video rõ hơn.', 'error'); return; }
     if (!directorProvider || !directorAssignment?.model) { onNotice('Hãy cấu hình AI dùng cho Translation/Chat trong Cài đặt.', 'error'); return; }
     if (!ttsProvider || !ttsAssignment?.model) { onNotice('Hãy cấu hình TTS trong Cài đặt.', 'error'); return; }
@@ -645,16 +657,22 @@ export function CanvasAnimationStudioPage({
     const recipe = filmRecipeById(recipeId);
     setGenerating(true);
     setPlaying(false);
-    setGenerationStage('AI đang đạo diễn shot · JS Illustration Engine đang dựng hình…');
+    setGenerationStage('AI đang dựng cảnh, tạo hình và kiểm tra ảnh render…');
     setRenderProgress(0);
     try {
+      const outputSize = generationAspect === '9:16' ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
+      const generationBrief=applyRecipeToBrief(brief.trim(),recipe,recipe.visualMode==='procedural'?'code-vector':undefined);
       const generated = await api.generateCanvasAnimationVideo({
-        brief: applyRecipeToBrief(brief.trim(), recipe),
+        brief:generationBrief,
+        ...(styleReferences.length?{referenceImages:styleReferences,refineVisuals:project.sourcePrompt===generationBrief&&project.width===outputSize.width&&project.height===outputSize.height&&project.scenes.every(scene=>scene.vectorScene)&&JSON.stringify(styleReferences)!==JSON.stringify(project.vectorStyleReferences)}:{}),
+        ...(project.sourcePrompt===generationBrief&&project.width===outputSize.width&&project.height===outputSize.height&&project.scenes.every(scene=>scene.vectorScene)?{project}:{}),
+        width: outputSize.width,
+        height: outputSize.height,
         provider: directorProvider,
         model: directorAssignment.model,
         narration: { provider: ttsProvider, model: ttsAssignment.model, voice: selectedVoice, speed: recipe.narrationSpeed },
         audioProduction: {enabled:true,autoSound:true},
-        visualMode: recipe.visualMode,
+        visualMode: recipe.visualMode==='procedural'?'code-vector':recipe.visualMode,
         ...(recipe.visualMode === 'ai-fallback' ? {
           assetGeneration: { enabled: true as const, quality: 'professional' as const, generator: 'flow-agent' as const, model: 'narwhal' },
         } : {}),
@@ -668,12 +686,16 @@ export function CanvasAnimationStudioPage({
       const assets = generated.assetPipeline;
       setGenerationStage(assets
         ? `Asset fallback: ${assets.approved} đạt · ${assets.rejected} loại. Đang render ${generated.scenes.length} scene…`
-        : `JS Illustration Engine đã dựng ${generated.scenes.length} scene + voice. Đang xuất video…`);
+        : generated.vectorReview?.pass===false
+          ? `Đang xuất bản nháp · còn ${generated.vectorReview.issues?.length||0} điểm cần xem lại…`
+        : generated.vectorReview?.pass
+          ? `Đã kiểm tra ảnh render của ${generated.scenes.length} cảnh. Đang xuất video…`
+          : `Đã dựng ${generated.scenes.length} cảnh và giọng đọc. Đang xuất video…`);
       await renderAndDownload(generated);
-      setGenerationStage('Hoàn tất · MP4 đã sẵn sàng');
-      onNotice(assets
+      setGenerationStage(generated.vectorReview?.pass===false?'Bản nháp MP4 đã sẵn sàng · xem các điểm cần kiểm tra bên dưới':'Hoàn tất · MP4 đã sẵn sàng');
+      onNotice(generated.vectorReview?.pass===false?`Đã xuất bản nháp MP4; còn ${generated.vectorReview.issues?.length||0} điểm cần xem lại.`:assets
         ? `Đã tạo video với fallback asset và xuất MP4.`
-        : `JS Illustration Engine đã tự dựng xong ${generated.scenes.length} scene và xuất MP4.`);
+        : `Đã dựng ${generated.scenes.length} cảnh và xuất MP4.`);
     } catch (error) {
       setGenerationStage('');
       onNotice(friendlyErrorMessage(error, 'Không thể tạo video Animation Studio.'), 'error');
@@ -800,6 +822,17 @@ export function CanvasAnimationStudioPage({
           </div>
         </div>
 
+        <label className="field" style={{marginBottom:12}}>
+          <span>Hình hoặc video mẫu (tùy chọn)</span>
+          <input type="file" accept="image/png,image/jpeg,image/webp,video/*" disabled={generating||readingReference} style={{position:'static',width:'100%',height:'auto',opacity:1}} onChange={async event=>{
+            const file=event.currentTarget.files?.[0];if(!file)return;
+            setReadingReference(true);
+            try{setStyleReferences(await readVectorStyleReference(file));setStyleReferenceName(file.name);}
+            catch(error){onNotice(friendlyErrorMessage(error,'Không đọc được hình mẫu.'),'error');}
+            finally{setReadingReference(false);}
+          }}/>
+          {readingReference?<small>Đang lấy khung hình mẫu…</small>:styleReferenceName?<small>{styleReferenceName} · {styleReferences.length} khung hình</small>:null}
+        </label>
         <fieldset className="canvas-film-styles" disabled={generating}>
           <legend className="canvas-generator-sr-only">Phong cách video</legend>
           <div className="canvas-film-style-options">
@@ -814,6 +847,14 @@ export function CanvasAnimationStudioPage({
         </fieldset>
 
         <div className="canvas-ai-generator-actions">
+          <div className="canvas-aspect-control" aria-label="Tỷ lệ khung hình video">
+            <span>Tỷ lệ</span>
+            <div>
+              {(['16:9','9:16'] as const).map((ratio) => (
+                <button key={ratio} type="button" aria-pressed={generationAspect === ratio} disabled={generating} onClick={() => setGenerationAspect(ratio)}>{ratio}</button>
+              ))}
+            </div>
+          </div>
           <label className="field canvas-ai-field" htmlFor="canvas-tts-voice">
             <span>Giọng đọc</span>
             <select
@@ -852,6 +893,12 @@ export function CanvasAnimationStudioPage({
           <div><span>{generationStage || 'Đang chuẩn bị…'}</span>{renderProgress > 0 && <b>{renderProgress}%</b>}</div>
           <i><em style={{ width: `${renderProgress > 0 ? renderProgress : generating ? 18 : 0}%` }} /></i>
         </div>}
+        {project.vectorReview?.pass===false&&Boolean(project.vectorReview.issues?.length)&&<details className="canvas-generation-status">
+          <summary>Cần xem lại {project.vectorReview.issues!.length} điểm trong bản nháp</summary>
+          <ul>{project.vectorReview.issues!.map((issue,index)=><li key={`${issue.sceneId}-${index}`}>
+            <strong>{project.scenes.find(scene=>scene.id===issue.sceneId)?.name||'Cảnh phim'}:</strong> {issue.problem} {issue.fix}
+          </li>)}</ul>
+        </details>}
       </section>
 
       <div className="canvas-studio-workspace">
@@ -892,13 +939,14 @@ export function CanvasAnimationStudioPage({
               <span>{activeScene.name}</span>
             </div>
             <div className="canvas-stage-specs">
-              <span>{project.width} × {project.height} · 16:9</span>
+              <span>{project.width} × {project.height} · {project.height > project.width ? '9:16' : '16:9'}</span>
               <span>{project.fps} FPS</span>
             </div>
           </div>
           <div className="canvas-studio-stage-shell">
             <CanvasStage
               scene={previewScene || activeScene}
+              previousScene={playing?project.scenes[resolved.sceneIndex-1]:undefined}
               timeMs={resolved.localTimeMs}
               width={project.width}
               height={project.height}

@@ -9,7 +9,7 @@ export type LipSyncWindow = { startMs: number; endMs: number };
 export const CANVAS_BEAT_ACTIONS: CanvasAnimationAction[] = [
   'talk', 'point', 'react', 'celebrate', 'brace',
   'run', 'row', 'reveal', 'impact', 'float', 'pulse',
-  'reach','wipe','write','tie','aid','assist','grab','struggle','sink','surface',
+  'reach','wipe','write','tie','aid','assist','grab','pull','release','struggle','sink','surface',
 ];
 
 /** Cadence used to carve natural pauses into a talk beat. Pure + deterministic. */

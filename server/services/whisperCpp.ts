@@ -132,10 +132,10 @@ async function findExecutable(directory: string): Promise<string | undefined> {
   return undefined;
 }
 
-function runProcess(command: string, args: string[], signal?: AbortSignal, cwd?: string, onStderr?: (chunk: string) => void) {
+function runProcess(command: string, args: string[], signal?: AbortSignal, cwd?: string, onOutput?: (chunk: string) => void) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(command, args, { cwd, windowsHide: true });
-    if (child.pid && process.env.AUTOSUB_BACKGROUND_PRIORITY === '1') {
+    if (child.pid && process.env.AUTOSUB_BACKGROUND_PRIORITY !== '0') {
       try { setPriority(child.pid, osConstants.priority.PRIORITY_BELOW_NORMAL); } catch { /* OS may deny priority changes; execution can continue safely. */ }
     }
     let stdout = '';
@@ -151,11 +151,15 @@ function runProcess(command: string, args: string[], signal?: AbortSignal, cwd?:
     const abort = () => { child.kill(); fail(new ProviderError('Đã hủy Whisper Local.', 499)); };
     if (signal?.aborted) { abort(); return; }
     signal?.addEventListener('abort', abort, { once: true });
-    child.stdout?.on('data', (chunk) => { stdout = (stdout + chunk.toString()).slice(-256 * 1024); });
+    child.stdout?.on('data', (chunk) => {
+      const text = chunk.toString();
+      stdout = (stdout + text).slice(-256 * 1024);
+      onOutput?.(text);
+    });
     child.stderr?.on('data', (chunk) => {
       const text = chunk.toString();
       stderr = (stderr + text).slice(-256 * 1024);
-      onStderr?.(text);
+      onOutput?.(text);
     });
     child.once('error', (error) => fail(error));
     child.once('close', (code) => {
@@ -257,7 +261,7 @@ export async function listWhisperModels(): Promise<AIModel[]> {
   }));
 }
 
-function normalizeLanguage(language?: string) {
+export function normalizeLanguage(language?: string) {
   const value = language?.trim() || '';
   if (!value || /^(?:auto(?:matic)?(?:[\s_-]*detect)?|tự\s*nhận\s*diện)$/i.test(value)) return 'auto';
   const aliases: Record<string, string> = { 'Tiếng Việt': 'vi', '中文': 'zh', English: 'en', '한국어': 'ko' };
@@ -281,7 +285,11 @@ export function parseWhisperJson(value: unknown): { text: string; segments: Subt
 }
 
 export function parseWhisperProgress(chunk: string) {
-  const matches = [...chunk.matchAll(/progress\s*=\s*(\d{1,3})%/gi)];
+  const normalized = chunk.replace(/\r/g, '\n');
+  const matches = [
+    ...normalized.matchAll(/progress\s*=\s*(\d{1,3})\s*%/gi),
+    ...normalized.matchAll(/\b(\d{1,3})\s*%\s*(?:\]|$|\n)/gi),
+  ];
   if (!matches.length) return undefined;
   return Math.max(0, Math.min(100, Number(matches.at(-1)?.[1])));
 }
@@ -306,7 +314,7 @@ function waitForTurn(previous: Promise<void>, signal?: AbortSignal) {
   });
 }
 
-async function withWhisperQueue<T>(task: () => Promise<T>, signal?: AbortSignal) {
+export async function withWhisperQueue<T>(task: () => Promise<T>, signal?: AbortSignal) {
   const previous = whisperQueue;
   let release!: () => void;
   const current = new Promise<void>((resolve) => { release = resolve; });
@@ -323,7 +331,7 @@ async function withWhisperQueue<T>(task: () => Promise<T>, signal?: AbortSignal)
 }
 
 function whisperThreads() {
-  const fallback = Math.min(8, availableParallelism());
+  const fallback = Math.min(4, availableParallelism());
   const configured = Number(process.env.AUTOSUB_WHISPER_THREADS || fallback);
   return Math.max(1, Math.min(16, Number.isFinite(configured) ? Math.round(configured) : fallback));
 }

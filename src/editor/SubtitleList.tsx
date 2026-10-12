@@ -33,7 +33,7 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
       <span className={`cue-kind-badge ${cueKind}`}>{cueKindLabel}</span>
       <button type="button" className={`cue-enable ${cue.enabled ? 'active' : ''}`} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { enabled: !cue.enabled }); }}>{cue.enabled ? 'ON' : 'OFF'}</button>
       <button className="cue-delete" onClick={(event) => { event.stopPropagation(); onDelete(cue.id); }} aria-label="Xóa cue"><Trash2 size={14} /></button>
-      <span title={hasRetimedCue ? 'Thời gian trên video đã làm chậm' : undefined}>{formatClock(displayStartMs)} → {formatClock(displayEndMs)}</span>
+      <span title={hasRetimedCue ? 'Thời gian phụ đề khớp với giọng lồng tiếng' : undefined}>{formatClock(displayStartMs)} → {formatClock(displayEndMs)}</span>
       <small>{Math.max(0, displayEndMs - displayStartMs)} ms</small>
       {cue.dubbing && <span className="cue-voice-badge">VOICE {cue.dubbing.speedApplied.toFixed(2)}×</span>}
       {cue.speakerId && <span className="cue-speaker-badge" title="Người nói được STT tự nhận diện">{cue.speakerId} → {cue.voiceGroup}</span>}
@@ -47,8 +47,8 @@ const SubtitleCard = memo(function SubtitleCard({ cue, highlighted, onSelect, on
       <textarea value={cue.translatedText} placeholder="Chưa có bản dịch" onChange={(event) => onChange(cue.id, { translatedText: event.target.value })} onClick={(event) => event.stopPropagation()} />
     </div>
     <div className="cue-bottom">
-      <label>{hasRetimedCue ? 'START GỐC' : 'START'} <input value={cue.startMs} type="number" onChange={(event) => onChange(cue.id, { startMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
-      <label>{hasRetimedCue ? 'END GỐC' : 'END'} <input value={cue.endMs} type="number" onChange={(event) => onChange(cue.id, { endMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
+      <label>{hasRetimedCue ? 'START SRT GỐC' : 'START'} <input value={cue.startMs} type="number" onChange={(event) => onChange(cue.id, { startMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
+      <label>{hasRetimedCue ? 'END SRT GỐC' : 'END'} <input value={cue.endMs} type="number" onChange={(event) => onChange(cue.id, { endMs: Number(event.target.value) })} onClick={(event) => event.stopPropagation()} /></label>
       <div className={`cps ${stats.cps >= 20 ? 'danger' : stats.cps >= 17 ? 'warn' : ''}`}>CPS <b>{stats.cps.toFixed(1)}</b></div>
       <div className="cue-kind-switch" aria-label="Loại cue">
         <button type="button" className={!isTextObject ? 'active' : ''} onClick={(event) => { event.stopPropagation(); onChange(cue.id, { sourceKind: 'subtitle' }); }}>Phụ đề</button>
@@ -70,17 +70,35 @@ const OVERSCAN_ITEMS = 5;
 export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, selectedId, onSelect, onChange, onDelete, onRegenerateVoice, regeneratingCueId, voiceReady = false, slowVideoToMatchSpeech = false }: { cues: SubtitleCue[]; activeCueId?: string; selectedId?: string; onSelect: (id: string) => void; onChange: (id: string, patch: Partial<SubtitleCue>) => void; onDelete: (id: string) => void; onRegenerateVoice?: (cue: SubtitleCue) => void; regeneratingCueId?: string; voiceReady?: boolean; slowVideoToMatchSpeech?: boolean }) {
   const listRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<number | undefined>(undefined);
+  const editingScrollTopRef = useRef<number | undefined>(undefined);
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 600 });
   const [filter, setFilter] = useState<'subtitle' | 'text'>('subtitle');
   const displayedCues = useMemo(() => cues.filter((cue) => filter === 'text'
     ? cue.sourceKind === 'onscreen-text'
     : cue.sourceKind !== 'onscreen-text'), [cues, filter]);
-  const cuePositions = useMemo(() => new Map(displayedCues.map((cue, index) => [cue.id, index])), [displayedCues]);
+  const displayedCueKey = useMemo(() => displayedCues.map((cue) => cue.id).join('\u0000'), [displayedCues]);
+  const cuePositions = useMemo(() => new Map(displayedCues.map((cue, index) => [cue.id, index])), [displayedCueKey]);
 
   useEffect(() => {
     const selected = cues.find((cue) => cue.id === selectedId);
     if (selected) setFilter(selected.sourceKind === 'onscreen-text' ? 'text' : 'subtitle');
   }, [cues, selectedId]);
+
+  const preserveScrollDuringEdit = useCallback(() => {
+    const list = listRef.current;
+    const activeElement = document.activeElement;
+    if (
+      list
+      && activeElement instanceof HTMLElement
+      && list.contains(activeElement)
+      && (activeElement.matches('textarea, input, select') || activeElement.isContentEditable)
+    ) editingScrollTopRef.current = list.scrollTop;
+  }, []);
+
+  const handleCueChange = useCallback((id: string, patch: Partial<SubtitleCue>) => {
+    preserveScrollDuringEdit();
+    onChange(id, patch);
+  }, [onChange, preserveScrollDuringEdit]);
 
   const updateViewport = useCallback(() => {
     if (scrollFrameRef.current !== undefined) return;
@@ -92,6 +110,15 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
       setViewport((current) => current.scrollTop === next.scrollTop && current.height === next.height ? current : next);
     });
   }, []);
+
+  useLayoutEffect(() => {
+    const scrollTop = editingScrollTopRef.current;
+    const list = listRef.current;
+    if (scrollTop === undefined || !list) return;
+    editingScrollTopRef.current = undefined;
+    if (Math.abs(list.scrollTop - scrollTop) > 0.5) list.scrollTop = scrollTop;
+    setViewport((current) => current.scrollTop === scrollTop ? current : { ...current, scrollTop });
+  });
 
   useEffect(() => {
     const list = listRef.current;
@@ -106,8 +133,7 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
     };
   }, [updateViewport]);
 
-  useLayoutEffect(() => {
-    const targetId = activeCueId ?? selectedId;
+  const scrollCueIntoView = useCallback((targetId?: string) => {
     if (!targetId) return;
     const container = listRef.current;
     const position = cuePositions.get(targetId);
@@ -125,7 +151,22 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
       container.scrollTop = targetTop;
       setViewport({ scrollTop: targetTop, height: container.clientHeight || 600 });
     }
-  }, [activeCueId, cuePositions, selectedId]);
+  }, [cuePositions]);
+
+  useLayoutEffect(() => {
+    scrollCueIntoView(selectedId);
+  }, [selectedId, displayedCueKey, scrollCueIntoView]);
+
+  useLayoutEffect(() => {
+    const container = listRef.current;
+    const activeElement = document.activeElement;
+    const editingInsideList = container
+      && activeElement instanceof HTMLElement
+      && container.contains(activeElement)
+      && (activeElement.matches('textarea, input, select') || activeElement.isContentEditable);
+    if (editingInsideList) return;
+    scrollCueIntoView(activeCueId);
+  }, [activeCueId, displayedCueKey, scrollCueIntoView]);
 
   const start = Math.max(0, Math.floor(viewport.scrollTop / CUE_SLOT_HEIGHT) - OVERSCAN_ITEMS);
   const end = Math.min(displayedCues.length, Math.ceil((viewport.scrollTop + viewport.height) / CUE_SLOT_HEIGHT) + OVERSCAN_ITEMS);
@@ -142,7 +183,7 @@ export const SubtitleList = memo(function SubtitleList({ cues, activeCueId, sele
         cue={cue}
         highlighted={selectedId === cue.id || activeCueId === cue.id}
         onSelect={onSelect}
-        onChange={onChange}
+        onChange={handleCueChange}
         onDelete={onDelete}
         onRegenerateVoice={onRegenerateVoice}
         regenerating={regeneratingCueId === cue.id}

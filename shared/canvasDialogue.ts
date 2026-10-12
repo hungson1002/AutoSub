@@ -2,18 +2,19 @@ import type { CanvasDialogueLine, CanvasStudioObject, CanvasStudioScene } from '
 import { CANVAS_SPEECH_STYLES } from './canvasSpeech';
 
 export function canvasSpeakerKey(line:CanvasDialogueLine) { return line.characterKey || line.speaker; }
-export function isCanvasDialogueSpeaker(object:CanvasStudioObject,line:CanvasDialogueLine) {
+type SpeakerIdentity=Pick<CanvasStudioObject,'characterKey'|'label'>;
+export function isCanvasDialogueSpeaker(object:SpeakerIdentity,line:CanvasDialogueLine) {
   return line.characterKey ? object.characterKey===line.characterKey
     : object.label.trim().toLocaleLowerCase()===line.speaker.trim().toLocaleLowerCase();
 }
-export function isCanvasActorSpeaking(scene:CanvasStudioScene,object:CanvasStudioObject,timeMs:number) {
+export function isCanvasActorSpeaking(scene:CanvasStudioScene,object:SpeakerIdentity,timeMs:number) {
   if(!scene.dialogue?.length)return undefined;
   return scene.dialogue.some(line=>isCanvasDialogueSpeaker(object,line)
     && timeMs>=(line.atMs??0) && timeMs<(line.atMs??0)+(line.durationMs??0)
     && (line.speechWindows===undefined||line.speechWindows.some(window=>timeMs-(line.atMs??0)>=window.startMs&&timeMs-(line.atMs??0)<window.endMs)));
 }
 /** Use the actor's own voice, never the mixed narration/foley track. */
-export function canvasActorSpeechLevel(scene:CanvasStudioScene,object:CanvasStudioObject,timeMs:number):number|undefined {
+export function canvasActorSpeechLevel(scene:CanvasStudioScene,object:SpeakerIdentity,timeMs:number):number|undefined {
   const line=scene.dialogue?.find(line=>isCanvasDialogueSpeaker(object,line)
     && timeMs>=(line.atMs??0) && timeMs<(line.atMs??0)+(line.durationMs??0));
   if(!line)return scene.dialogue?.length?0:undefined;

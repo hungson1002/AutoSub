@@ -8,6 +8,7 @@ import { run, workdir } from './ffmpeg';
 import { resolveUpload } from './uploads';
 import { DUB_MASTERING_VERSION, masterDubFile } from './audioMastering';
 import { verbalizeOcrSymbols } from './subtitles';
+import { sliceDubbingPcm } from './dubbingPcm';
 
 export type TimingMode = 'natural' | 'strict';
 export type CueStatus = 'pending' | 'translating' | 'rewriting' | 'tts' | 'fitting' | 'done' | 'failed';
@@ -31,6 +32,7 @@ export interface DubbingCueInput {
 }
 
 export interface DubbingJobConfig {
+  speechMode?: 'continuous-first' | 'cue-first';
   timingMode: TimingMode;
   batchSize: number;
   ttsConcurrency: number;
@@ -62,6 +64,7 @@ export interface DubbingJob {
   config: DubbingJobConfig;
   providerInfo: ProviderInfoReference[];
   warnings: string[];
+  finalization?: { stage: 'continuous' | 'mixing' | 'mastering'; completed: number; total: number };
   result?: { audioFile: string; metadataFile: string; durationMs: number; masteringVersion?: number };
 }
 
@@ -101,6 +104,31 @@ export interface AdaptiveTempoItem extends DubbingTimelineItem {
   targetDurationMs: number;
 }
 
+export interface ContinuousSpeechItem {
+  cueId: string;
+  startMs: number;
+  endMs: number;
+  providerRef: string;
+  model: string;
+  voice: string;
+  speed: number;
+  volume: number;
+  text: string;
+}
+
+export interface ContinuousSpeechGroup {
+  id: string;
+  cueIds: string[];
+  startMs: number;
+  endMs: number;
+  text: string;
+  providerRef: string;
+  model: string;
+  voice: string;
+  speed: number;
+  volume: number;
+}
+
 interface StoredCue {
   id: string;
   index: number;
@@ -114,11 +142,37 @@ interface StoredCue {
   error?: string;
   errorStage?: CueStatus;
   skipRewrite?: boolean;
+  continuousGroupFile?: string;
+}
+
+function continuousInputSignature(cues: StoredCue[]) {
+  return createHash('sha256').update(JSON.stringify(cues.map((cue) => [cue.id, cue.providerRef,
+    cue.input.model, cue.input.voice, cue.input.speed, cue.input.volume,
+    cue.input.text, cue.input.startMs, cue.input.endMs]))).digest('hex');
+}
+
+interface DubbingRenderCueTiming {
+  startMs: number;
+  endMs: number;
+}
+
+interface DubbingRenderUnit {
+  id: string;
+  cues: StoredCue[];
+  startMs: number;
+  endMs: number;
+  audioFile: string;
+  audioDurationMs: number;
+  volume: number;
+  tempo: number;
+  continuous: boolean;
+  cueTimings?: Record<string, DubbingRenderCueTiming>;
 }
 
 interface CreateJobInput {
   videoId?: string;
   cues?: DubbingCueInput[];
+  speechMode?: 'continuous-first' | 'cue-first';
   timingMode?: TimingMode;
   batchSize?: number;
   ttsConcurrency?: number;
@@ -188,6 +242,15 @@ const DEFAULTS = {
   joinedCueGapMs: 0,
   minSpeed: 0.90,
   maxRewriteAttempts: 2,
+  // Closely spaced subtitle rows are often one uninterrupted spoken thought.
+  // Re-synthesizing the whole block lets VieNeu keep prosody across subtitle
+  // boundaries instead of restarting its acoustic state on every row.
+  continuousSpeechGapMs: 420,
+  continuousSpeechMaxDurationMs: 12_000,
+  continuousSpeechMaxChars: 720,
+  continuousSpeechMaxCues: 8,
+  continuousSpeechMaxTempo: 1.18,
+  continuousSpeechMaxOverflowMs: 280,
   batchSize: 30,
   ttsConcurrency: 6,
   llmConcurrency: 3,
@@ -231,12 +294,14 @@ const cueDir = (id: string) => path.join(jobDir(id), 'cues');
 const providerDir = (id: string) => path.join(jobDir(id), 'providers');
 const cacheDir = (id: string) => path.join(jobDir(id), 'cache', 'tts');
 const timelineDir = (id: string) => path.join(jobDir(id), 'timeline');
+const continuousCacheDir = (id: string) => path.join(jobDir(id), 'cache', 'continuous-speech');
 const resultDir = (id: string) => path.join(jobDir(id), 'result');
 const jobFile = (id: string) => path.join(jobDir(id), 'job.json');
 const cueFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.json`);
 const audioFile = (jobId: string, cueId: string) => path.join(cueDir(jobId), `${safeName(cueId)}.wav`);
 const timelineRenderConcurrency = () => clamp(Math.round(Number(process.env.AUTOSUB_TIMELINE_CONCURRENCY) || 4), 1, 4);
-const TIMELINE_SEGMENT_CACHE_VERSION = 4;
+const TIMELINE_SEGMENT_CACHE_VERSION = 5;
+const CONTINUOUS_SPEECH_VERSION = 1;
 
 export const buildTimelineMixFilter = (inputCount: number, durationMs: number) => {
   const count = Math.max(1, Math.floor(inputCount));
@@ -377,6 +442,177 @@ export function planAdaptiveCueTempos(items: AdaptiveTempoItem[], maxSpeed: numb
     previousEndMs = timelineStartMs + item.audioDurationMs / tempo;
     return { cueId: item.cueId, tempo };
   });
+}
+
+function normalizedContinuousText(value: string) {
+  return value.normalize('NFC').replace(/\s+/g, ' ').trim();
+}
+
+export type ContinuousSpeechSilence = { startMs: number; endMs: number; durationMs: number };
+
+export function parseContinuousSpeechSilences(stderr: string): ContinuousSpeechSilence[] {
+  const silences: ContinuousSpeechSilence[] = [];
+  let startMs: number | undefined;
+  for (const line of stderr.split(/\r?\n/)) {
+    const start = line.match(/silence_start:\s*([0-9.]+)/);
+    if (start) {
+      startMs = Math.max(0, Math.round(Number(start[1]) * 1000));
+      continue;
+    }
+    const end = line.match(/silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/);
+    if (!end) continue;
+    const endMs = Math.max(0, Math.round(Number(end[1]) * 1000));
+    const durationMs = Math.max(0, Math.round(Number(end[2]) * 1000));
+    const resolvedStartMs = startMs ?? Math.max(0, endMs - durationMs);
+    startMs = undefined;
+    if (endMs > resolvedStartMs) silences.push({ startMs: resolvedStartMs, endMs, durationMs });
+  }
+  return silences;
+}
+
+function continuousSpeechWeight(text: string) {
+  const spoken = normalizedContinuousText(text)
+    .replace(/\[(?:cười|thở dài|hắng giọng)\]/giu, '')
+    .trim();
+  const words = spoken.match(/[\p{L}\p{N}]+/gu) || [];
+  const letters = words.reduce((sum, word) => sum + word.length, 0);
+  const strongPauses = (spoken.match(/[.!?…]+/gu) || []).length;
+  const weakPauses = (spoken.match(/[,;:]+/gu) || []).length;
+  return Math.max(0.6, words.length + letters * 0.045 + strongPauses * 0.55 + weakPauses * 0.18);
+}
+
+export function planContinuousCueTimings(
+  cues: Array<{ id: string; startMs: number; endMs: number; text: string }>,
+  audioDurationMs: number,
+  silences: ContinuousSpeechSilence[] = [],
+) {
+  if (!cues.length) return {} as Record<string, DubbingRenderCueTiming>;
+  if (cues.length === 1) return { [cues[0]!.id]: { startMs: 0, endMs: Math.max(1, Math.round(audioDurationMs)) } };
+  const durationMs = Math.max(cues.length, Math.round(audioDurationMs));
+  const sourceStartMs = cues[0]!.startMs;
+  const sourceDurationMs = Math.max(1, cues[cues.length - 1]!.endMs - sourceStartMs);
+  const weights = cues.map((cue) => continuousSpeechWeight(cue.text));
+  const totalWeight = Math.max(0.001, weights.reduce((sum, weight) => sum + weight, 0));
+  const cleanSilences = silences
+    .filter((silence) => silence.durationMs >= 35 && silence.startMs > 50 && silence.endMs < durationMs - 50)
+    .sort((left, right) => left.startMs - right.startMs);
+  const boundaries: Array<{ previousEndMs: number; nextStartMs: number }> = [];
+  let consumedSilenceEndMs = 0;
+  let cumulativeWeight = 0;
+
+  for (let index = 0; index < cues.length - 1; index += 1) {
+    cumulativeWeight += weights[index]!;
+    const textExpectedMs = durationMs * (cumulativeWeight / totalWeight);
+    const sourceBoundaryRatio = Math.max(0, Math.min(1, (cues[index]!.endMs - sourceStartMs) / sourceDurationMs));
+    const sourceExpectedMs = durationMs * sourceBoundaryRatio;
+    // Vietnamese TTS cadence should dominate, while the source timing still
+    // provides a weak anchor for scene/dialogue rhythm.
+    const expectedMs = textExpectedMs * 0.78 + sourceExpectedMs * 0.22;
+    const searchRadiusMs = Math.max(260, Math.min(850, durationMs * 0.12));
+    const candidate = cleanSilences
+      .filter((silence) => silence.startMs >= consumedSilenceEndMs)
+      .map((silence) => ({ silence, distance: Math.abs((silence.startMs + silence.endMs) / 2 - expectedMs) }))
+      .filter((item) => item.distance <= searchRadiusMs)
+      .sort((left, right) => left.distance - right.distance || right.silence.durationMs - left.silence.durationMs)[0]?.silence;
+    if (candidate) {
+      boundaries.push({ previousEndMs: candidate.startMs, nextStartMs: candidate.endMs });
+      consumedSilenceEndMs = candidate.endMs;
+    } else {
+      const boundaryMs = Math.max(consumedSilenceEndMs, Math.min(durationMs - 1, Math.round(expectedMs)));
+      boundaries.push({ previousEndMs: boundaryMs, nextStartMs: boundaryMs });
+      consumedSilenceEndMs = boundaryMs;
+    }
+  }
+
+  const output: Record<string, DubbingRenderCueTiming> = {};
+  for (let index = 0; index < cues.length; index += 1) {
+    const startMs = index === 0 ? 0 : boundaries[index - 1]!.nextStartMs;
+    const endMs = index === cues.length - 1 ? durationMs : boundaries[index]!.previousEndMs;
+    output[cues[index]!.id] = {
+      startMs: Math.max(0, Math.min(durationMs - 1, Math.round(startMs))),
+      endMs: Math.max(Math.round(startMs) + 1, Math.min(durationMs, Math.round(endMs))),
+    };
+  }
+  return output;
+}
+
+async function measureContinuousCueTimings(
+  cues: StoredCue[],
+  audioPath: string,
+  audioDurationMs: number,
+  signal: AbortSignal,
+) {
+  let silences: ContinuousSpeechSilence[] = [];
+  try {
+    const detection = await run('ffmpeg', [
+      '-hide_banner', '-nostats', '-i', audioPath,
+      '-af', 'silencedetect=noise=-42dB:d=0.040',
+      '-f', 'null', '-',
+    ], signal);
+    silences = parseContinuousSpeechSilences(detection.stderr);
+  } catch (error) {
+    if (signal.aborted) throw error;
+  }
+  return planContinuousCueTimings(cues.map((cue) => ({
+    id: cue.id,
+    startMs: cue.input.startMs,
+    endMs: cue.input.endMs,
+    text: cue.metadata?.finalDubbingText || cue.input.text,
+  })), audioDurationMs, silences);
+}
+
+function canJoinContinuousSpeech(previous: ContinuousSpeechItem, next: ContinuousSpeechItem, currentTextLength: number, currentStartMs: number, currentCueCount: number) {
+  const gapMs = next.startMs - previous.endMs;
+  if (gapMs < -250 || gapMs > DEFAULTS.continuousSpeechGapMs) return false;
+  if (previous.providerRef !== next.providerRef || previous.model !== next.model || previous.voice !== next.voice) return false;
+  if (Math.abs(previous.speed - next.speed) > 0.001 || Math.abs(previous.volume - next.volume) > 0.001) return false;
+  if (/\[pause(?:\s+[^\]]+)?\]/iu.test(previous.text) || /\[pause(?:\s+[^\]]+)?\]/iu.test(next.text)) return false;
+  if (currentCueCount >= DEFAULTS.continuousSpeechMaxCues) return false;
+  if (next.endMs - currentStartMs > DEFAULTS.continuousSpeechMaxDurationMs) return false;
+  return currentTextLength + normalizedContinuousText(next.text).length + 1 <= DEFAULTS.continuousSpeechMaxChars;
+}
+
+export function planContinuousSpeechGroups(items: ContinuousSpeechItem[]): ContinuousSpeechGroup[] {
+  const ordered = [...items]
+    .filter((item) => normalizedContinuousText(item.text))
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  const groups: ContinuousSpeechGroup[] = [];
+  let current: ContinuousSpeechItem[] = [];
+
+  const flush = () => {
+    if (!current.length) return;
+    const first = current[0]!;
+    const last = current[current.length - 1]!;
+    groups.push({
+      id: `continuous-${first.cueId}-${last.cueId}`,
+      cueIds: current.map((item) => item.cueId),
+      startMs: first.startMs,
+      endMs: last.endMs,
+      text: current.map((item) => normalizedContinuousText(item.text)).join(' '),
+      providerRef: first.providerRef,
+      model: first.model,
+      voice: first.voice,
+      speed: first.speed,
+      volume: first.volume,
+    });
+    current = [];
+  };
+
+  for (const item of ordered) {
+    if (!current.length) {
+      current = [item];
+      continue;
+    }
+    const previous = current[current.length - 1]!;
+    const textLength = current.reduce((sum, cue) => sum + normalizedContinuousText(cue.text).length, Math.max(0, current.length - 1));
+    if (canJoinContinuousSpeech(previous, item, textLength, current[0]!.startMs, current.length)) current.push(item);
+    else {
+      flush();
+      current = [item];
+    }
+  }
+  flush();
+  return groups;
 }
 
 async function writeJsonAtomic(file: string, value: unknown) {
@@ -545,6 +781,10 @@ export function canFitSpeechWithoutCut(ttsDurationMs: number, targetDurationMs: 
   return ttsDurationMs <= Math.max(targetDurationMs, 1) * maxSpeed + 20;
 }
 
+export function shouldUseContinuousSpeech(config: Pick<DubbingJobConfig, 'slowVideoToMatchSpeech' | 'timingMode'>, cueCount: number) {
+  return cueCount >= 2 && !config.slowVideoToMatchSpeech && config.timingMode !== 'strict';
+}
+
 export function fittingTempo(requiredSpeed: number, maxSpeed: number = DEFAULTS.hardSpeedMax) {
   return clamp(Math.max(requiredSpeed, DEFAULTS.narrationTempo), 1, maxSpeed);
 }
@@ -621,6 +861,28 @@ class Semaphore {
   }
 }
 
+// Pipeline at most two groups: the next TTS can run while FFmpeg processes
+// the previous group. Await all started work before returning on failure.
+export async function runContinuousSpeechPipeline<T>(items: T[], task: (item: T) => Promise<void>, signal: AbortSignal) {
+  const semaphore = new Semaphore(2);
+  const results = await Promise.allSettled(items.map((item) => semaphore.use(async () => {
+    signal.throwIfAborted();
+    await task(item);
+  })));
+  const failure = results.find((result) => result.status === 'rejected');
+  if (failure?.status === 'rejected') throw failure.reason;
+}
+
+export function dubbingProgressPercent(job: Pick<DubbingJob, 'status' | 'doneCues' | 'totalCues' | 'finalization'>) {
+  if (job.status === 'completed') return 100;
+  if (!job.totalCues) return 0;
+  if (job.doneCues < job.totalCues) return Math.min(85, Math.round(job.doneCues / job.totalCues * 85));
+  if (job.finalization?.stage === 'mastering') return 98;
+  if (job.finalization?.stage === 'mixing') return 96;
+  const phase = job.finalization;
+  return phase?.total ? 85 + Math.min(10, Math.floor(phase.completed / phase.total * 10)) : 85;
+}
+
 const metadataFor = (cue: StoredCue, timing: ReturnType<typeof timingFor>, text: string, ttsDurationMs: number, finalAudioDurationMs: number, rewriteAttempts: number, speedApplied: number, warning?: string): DubbingMetadata => ({
   cueId: cue.id,
   originalText: cue.input.originalText,
@@ -643,6 +905,10 @@ function providerReference(provider: AIProvider) {
 
 function isCapCutProvider(provider: AIProvider) {
   return provider.providerType === 'capcut-tts' || provider.baseUrl.trim().toLowerCase() === 'local://capcut-tts';
+}
+
+function isVieneuProvider(provider: AIProvider) {
+  return provider.providerType === 'vieneu-local' || provider.baseUrl.trim().toLowerCase() === 'local://vieneu';
 }
 
 function jobUsesCapCut(job: DubbingJob) {
@@ -701,6 +967,7 @@ export async function createDubbingJob(input: CreateJobInput) {
   const rewriteModel = input.rewrite?.model?.trim();
   const rewriteProviderRef = rewriteProvider && rewriteModel ? providerReference(rewriteProvider) : undefined;
   const config: DubbingJobConfig = {
+    speechMode: input.speechMode === 'cue-first' ? 'cue-first' : 'continuous-first',
     timingMode: input.timingMode === 'strict' ? 'strict' : 'natural',
     batchSize: clamp(Math.round(input.batchSize || DEFAULTS.batchSize), 1, 100),
     ttsConcurrency: effectiveTtsConcurrency(normalizedCues, input.ttsConcurrency),
@@ -759,7 +1026,7 @@ export async function getDubbingJobStatus(id: string): Promise<DubbingJobStatus>
   }
   return {
     ...job,
-    progressPercent: job.totalCues ? Math.round((job.doneCues / job.totalCues) * 100) : 0,
+    progressPercent: dubbingProgressPercent(job),
     failedCueIds: failed.map((cue) => cue.id),
     failedCueErrors: failed.map((cue) => ({ id: cue.id, index: cue.index, stage: cue.errorStage || 'failed', attempts: cue.attempts, error: cue.error || 'Unknown cue error.' })),
   };
@@ -940,6 +1207,229 @@ class DubbingRunner {
     }
   }
 
+  private async loadContinuousCheckpoints(cues: StoredCue[]): Promise<DubbingRenderUnit[]> {
+    const units: DubbingRenderUnit[] = [];
+    for (const file of new Set(cues.flatMap((cue) => cue.continuousGroupFile ? [cue.continuousGroupFile] : []))) {
+      try {
+        const stored = await readJson<Omit<DubbingRenderUnit, 'cues'> & { cueIds: string[]; signature: string }>(path.join(jobDir(this.job.id), file));
+        const peers = stored.cueIds.map((id) => cues.find((cue) => cue.id === id));
+        if (peers.some((cue) => !cue || cue.status !== 'done' || cue.continuousGroupFile !== file)) continue;
+        const groupCues = peers as StoredCue[];
+        if (stored.signature !== continuousInputSignature(groupCues)) continue;
+        const audioPath = path.join(jobDir(this.job.id), stored.audioFile);
+        if (!(await stat(audioPath)).isFile()) continue;
+        units.push({ ...stored, cues: groupCues, audioFile: audioPath });
+      } catch { /* Invalid checkpoints keep the existing per-cue fallback. */ }
+    }
+    return units;
+  }
+
+  private async buildContinuousRenderUnits(completed: StoredCue[], firstPass = false): Promise<DubbingRenderUnit[]> {
+    const individualUnits = completed.filter((cue) => cue.status === 'done' && cue.audioFile && cue.metadata).map((cue): DubbingRenderUnit => ({
+      id: cue.id,
+      cues: [cue],
+      startMs: cue.input.startMs,
+      endMs: cue.input.endMs,
+      audioFile: path.join(jobDir(this.job.id), cue.audioFile as string),
+      audioDurationMs: cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs,
+      volume: clamp(cue.input.volume ?? 1, 0, 2),
+      tempo: cue.metadata?.speedApplied || 1,
+      continuous: false,
+    }));
+    if (!shouldUseContinuousSpeech(this.job.config, completed.length)) return individualUnits;
+
+    const checkpoints = await this.loadContinuousCheckpoints(completed);
+    const checkpointCueIds = new Set(checkpoints.flatMap((unit) => unit.cues.map((cue) => cue.id)));
+    // New jobs have already attempted groups before individual fallback. Never
+    // synthesize rejected groups again during final export or cached rebuild.
+    if (!firstPass && this.job.config.speechMode === 'continuous-first' && !this.job.config.rewriteProviderRef) {
+      return [...individualUnits.filter((unit) => !checkpointCueIds.has(unit.id)), ...checkpoints]
+        .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs || a.cues[0]!.index - b.cues[0]!.index);
+    }
+    const groups = planContinuousSpeechGroups(completed.map((cue) => ({
+      cueId: cue.id,
+      startMs: cue.input.startMs,
+      endMs: cue.input.endMs,
+      providerRef: cue.providerRef,
+      model: cue.input.model,
+      voice: cue.input.voice,
+      speed: clamp(Number(cue.input.speed) || 1, DEFAULTS.minSpeed, DEFAULTS.maxProviderSpeed),
+      volume: clamp(cue.input.volume ?? 1, 0, 2),
+      text: cue.metadata?.finalDubbingText || verbalizeOcrSymbols(cue.input.text.trim(), 'vi'),
+    }))).filter((group) => group.cueIds.length >= 2 && (!firstPass || (
+      group.cueIds.some((id) => completed.find((cue) => cue.id === id)?.status === 'pending')
+      && group.cueIds.every((id) => {
+        const cue = completed.find((item) => item.id === id)!;
+        return cue.status === 'pending' || (cue.status === 'done' && Boolean(cue.continuousGroupFile));
+      })
+    )));
+    if (!groups.length) return individualUnits;
+
+    await mkdir(continuousCacheDir(this.job.id), { recursive: true });
+    const cueById = new Map(completed.map((cue) => [cue.id, cue]));
+    const providerCache = new Map<string, AIProvider>();
+    const replacementUnits: DubbingRenderUnit[] = [];
+    const replacedCueIds = new Set<string>();
+    let failedClusters = 0;
+    // Keep synthesis serialized, retaining the existing CPU/model footprint.
+    const synthesisSemaphore = new Semaphore(1);
+    const cacheLocks = new Map<string, Semaphore>();
+    await this.commit((job) => {
+      if (job.finalization && job.finalization.stage !== 'continuous') return;
+      const completed = job.finalization?.stage === 'continuous' ? job.finalization.completed : 0;
+      job.finalization = { stage: 'continuous', completed, total: groups.length };
+    });
+    let finishedGroups = 0;
+    await runContinuousSpeechPipeline(groups, async (group) => {
+      try {
+      if (firstPass && this.pauseRequested) return;
+      const groupCues = group.cueIds.map((id) => cueById.get(id)).filter((cue): cue is StoredCue => Boolean(cue));
+      if (groupCues.length !== group.cueIds.length) return;
+      let provider = providerCache.get(group.providerRef);
+      if (!provider) {
+        provider = await loadProvider(this.job.id, group.providerRef);
+        providerCache.set(group.providerRef, provider);
+      }
+      // VieNeu v3 Turbo is explicitly designed for long-form text and performs
+      // its own punctuation-aware chunk joining. Other providers keep their
+      // existing per-cue path until their long-form behavior is verified.
+      if (!isVieneuProvider(provider)) return;
+
+      const cacheKey = createHash('sha256').update(JSON.stringify([
+        CONTINUOUS_SPEECH_VERSION,
+        TTS_CACHE_VERSION,
+        provider.id,
+        provider.baseUrl,
+        group.model,
+        group.voice,
+        group.speed,
+        group.text,
+      ])).digest('hex');
+      const rawPath = path.join(continuousCacheDir(this.job.id), `${cacheKey}.raw.wav`);
+      const speechPath = path.join(continuousCacheDir(this.job.id), `${cacheKey}.speech.wav`);
+      let cacheLock = cacheLocks.get(cacheKey);
+      if (!cacheLock) { cacheLock = new Semaphore(1); cacheLocks.set(cacheKey, cacheLock); }
+      await cacheLock.use(async () => {
+      try {
+          const selectedProvider = provider;
+          await synthesisSemaphore.use(async () => {
+          if ((await stat(rawPath).catch(() => undefined))?.isFile()) return;
+          const generated = await this.ttsSemaphore.use(() => retryDubbingOperation(
+            () => synthesize(selectedProvider, group.model, group.voice, group.text, {
+              speed: group.speed,
+              format: 'wav',
+              signal: this.controller.signal,
+            }),
+            this.job.config.maxRetries,
+            this.controller.signal,
+          ));
+          await writeBufferAtomic(rawPath, generated);
+          });
+        await ensurePreparedSpeech(rawPath, speechPath, this.controller.signal);
+        const cleanDurationMs = await probeDuration(speechPath);
+        const sourceDurationMs = Math.max(1, group.endMs - group.startMs);
+        const requiredTempo = cleanDurationMs / sourceDurationMs;
+        const tempo = fittingTempo(requiredTempo, DEFAULTS.continuousSpeechMaxTempo);
+        const projectedDurationMs = cleanDurationMs / tempo;
+        if (projectedDurationMs - sourceDurationMs > DEFAULTS.continuousSpeechMaxOverflowMs) return;
+
+        let outputPath = speechPath;
+        let finalDurationMs = cleanDurationMs;
+        if (Math.abs(tempo - 1) > 0.005) {
+          const fittedPath = path.join(continuousCacheDir(this.job.id), `${cacheKey}.${tempo.toFixed(3)}.fit.wav`);
+          if (!(await stat(fittedPath).catch(() => undefined))?.isFile()) {
+            const temporary = `${fittedPath}.${process.pid}.${Date.now()}.tmp.wav`;
+            try {
+              const sourceIntegrity = await probeAudioIntegrity(speechPath, this.controller.signal);
+              await run('ffmpeg', ['-y', '-i', speechPath, '-filter:a', tempoFilter(tempo), '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', temporary], this.controller.signal);
+              const fittedIntegrity = await probeAudioIntegrity(temporary, this.controller.signal);
+              if (timeStretchIntroducedArtifacts(sourceIntegrity, fittedIntegrity)) {
+                await rm(temporary, { force: true });
+                throw new Error('continuous speech stretch introduced artifacts');
+              }
+              await replacePreparedFile(temporary, fittedPath);
+            } finally {
+              await rm(temporary, { force: true });
+            }
+          }
+          outputPath = fittedPath;
+          finalDurationMs = await probeDuration(fittedPath);
+        }
+
+        const cueTimings = await measureContinuousCueTimings(
+          groupCues,
+          outputPath,
+          finalDurationMs,
+          this.controller.signal,
+        );
+        const unit: DubbingRenderUnit = {
+          id: group.id,
+          cues: groupCues,
+          startMs: group.startMs,
+          endMs: group.endMs,
+          audioFile: outputPath,
+          audioDurationMs: finalDurationMs,
+          volume: group.volume,
+          tempo,
+          continuous: true,
+          cueTimings,
+        };
+        if (firstPass) {
+          const wav = await readFile(outputPath);
+          // Validate all preview slices before committing any cue in the group.
+          const clips = groupCues.map((cue) => {
+            const timing = cueTimings[cue.id]!;
+            return sliceDubbingPcm(wav, timing.startMs, timing.endMs);
+          });
+          const checkpointPath = path.join(continuousCacheDir(this.job.id), `${safeName(group.id)}.group.json`);
+          const checkpointFile = path.relative(jobDir(this.job.id), checkpointPath);
+          await writeJsonAtomic(checkpointPath, {
+            ...unit, cues: undefined, cueIds: group.cueIds,
+            audioFile: path.relative(jobDir(this.job.id), outputPath),
+            signature: continuousInputSignature(groupCues),
+          });
+          for (const [index, cue] of groupCues.entries()) {
+            const clip = clips[index]!;
+            const clipDurationMs = (clip.length - 44) * 1000 / clip.readUInt32LE(28);
+            const target = audioFile(this.job.id, cue.id);
+            await writeBufferAtomic(target, clip);
+            const metadata = metadataFor(cue, timingFor(completed, cue, this.job.config.timingMode),
+              verbalizeOcrSymbols(cue.input.text.trim(), 'vi'), clipDurationMs * tempo, clipDurationMs, 0, tempo);
+            metadata.adaptiveFitVersion = ADAPTIVE_FIT_VERSION;
+            await this.setCueStatus(cue, 'done', {
+              audioFile: path.relative(jobDir(this.job.id), target), metadata,
+              continuousGroupFile: checkpointFile, error: undefined,
+            });
+          }
+        }
+        replacementUnits.push(unit);
+        group.cueIds.forEach((id) => replacedCueIds.add(id));
+      } catch (error) {
+        if (this.controller.signal.aborted) throw error;
+        failedClusters += 1;
+      }
+      });
+      } finally {
+        finishedGroups += 1;
+        await this.commit((job) => {
+          if (job.finalization?.stage === 'continuous') job.finalization.completed = Math.max(job.finalization.completed, finishedGroups);
+        });
+      }
+    }, this.controller.signal);
+
+    if (failedClusters) {
+      await this.commit((job) => {
+        const warning = `${failedClusters} cụm thoại liên tục không dựng được bằng long-form VieNeu; AutoSub đã tự dùng audio từng cue làm fallback.`;
+        if (!job.warnings.includes(warning)) job.warnings.push(warning);
+      });
+    }
+
+    return [
+      ...individualUnits.filter((unit) => !replacedCueIds.has(unit.id)),
+      ...replacementUnits,
+    ].sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs || left.cues[0]!.index - right.cues[0]!.index);
+  }
+
   private async buildTimeline(cues: StoredCue[]) {
     const completed = cues
       .filter((cue) => cue.status === 'done' && cue.audioFile && cue.metadata)
@@ -1038,30 +1528,52 @@ class DubbingRunner {
       const failure = results.find((result) => result.status === 'rejected');
       if (failure?.status === 'rejected') throw failure.reason;
     }
-    const timelineItems = completed.map((cue) => ({
-      cueId: cue.id,
-      startMs: cue.input.startMs,
-      endMs: cue.input.endMs,
-      audioDurationMs: cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs,
+    const renderUnits = await this.buildContinuousRenderUnits(completed);
+    await this.commit((job) => { if (job.finalization?.stage !== 'mastering') job.finalization = { stage: 'mixing', completed: 0, total: 1 }; });
+    const timelineItems = renderUnits.map((unit) => ({
+      cueId: unit.id,
+      startMs: unit.startMs,
+      endMs: unit.endMs,
+      audioDurationMs: unit.audioDurationMs,
     }));
     const planById = new Map((this.job.config.slowVideoToMatchSpeech
       ? planSlowVideoTimeline(timelineItems)
       : planDubbingTimeline(timelineItems)).map((item) => [item.cueId, item]));
+    const unitByCueId = new Map<string, DubbingRenderUnit>();
+    for (const unit of renderUnits) for (const cue of unit.cues) unitByCueId.set(cue.id, unit);
+
     const metadataWrites: Array<Promise<void>> = [];
     const metadataWriteSemaphore = new Semaphore(16);
     for (const cue of completed) {
-      const plan = planById.get(cue.id);
-      if (!plan || !cue.metadata) continue;
+      const unit = unitByCueId.get(cue.id);
+      const plan = unit ? planById.get(unit.id) : undefined;
+      if (!unit || !plan || !cue.metadata) continue;
+      const sourceUnitDurationMs = Math.max(1, unit.endMs - unit.startMs);
+      const scale = unit.audioDurationMs / sourceUnitDurationMs;
+      const measuredTiming = unit.cueTimings?.[cue.id];
+      const relativeStartMs = unit.continuous
+        ? measuredTiming?.startMs ?? Math.max(0, Math.round((cue.input.startMs - unit.startMs) * scale))
+        : 0;
+      const relativeEndMs = unit.continuous
+        ? measuredTiming?.endMs ?? Math.max(relativeStartMs + 1, Math.round((cue.input.endMs - unit.startMs) * scale))
+        : unit.audioDurationMs;
+      const timelineStartMs = unit.continuous ? plan.timelineStartMs + relativeStartMs : plan.timelineStartMs;
+      const timelineEndMs = unit.continuous
+        ? Math.min(plan.timelineEndMs, plan.timelineStartMs + relativeEndMs)
+        : plan.timelineEndMs;
+      const timelineShiftMs = plan.timelineStartMs - unit.startMs;
       if (
-        cue.metadata.timelineStartMs === plan.timelineStartMs
-        && cue.metadata.timelineEndMs === plan.timelineEndMs
-        && cue.metadata.timelineShiftMs === plan.timelineShiftMs
+        cue.metadata.timelineStartMs === timelineStartMs
+        && cue.metadata.timelineEndMs === timelineEndMs
+        && cue.metadata.timelineShiftMs === timelineShiftMs
+        && cue.metadata.speedApplied === unit.tempo
       ) continue;
       cue.metadata = {
         ...cue.metadata,
-        timelineStartMs: plan.timelineStartMs,
-        timelineEndMs: plan.timelineEndMs,
-        timelineShiftMs: plan.timelineShiftMs,
+        speedApplied: unit.tempo,
+        timelineStartMs,
+        timelineEndMs,
+        timelineShiftMs,
       };
       metadataWrites.push(metadataWriteSemaphore.use(() => saveCue(this.job.id, cue)));
     }
@@ -1070,27 +1582,27 @@ class DubbingRunner {
     const batchSize = this.job.config.batchSize;
     const segmentSemaphore = new Semaphore(timelineRenderConcurrency());
     const segmentTasks: Array<Promise<{ file: string; startMs: number; durationMs: number }>> = [];
-    for (let offset = 0; offset < completed.length; offset += batchSize) {
-      const batch = completed.slice(offset, offset + batchSize);
-      const firstPlan = planById.get(batch[0].id);
-      const segmentStart = offset === 0 ? 0 : firstPlan?.timelineStartMs ?? batch[0].input.startMs;
-      const segmentEnd = Math.max(...batch.map((cue) => planById.get(cue.id)?.timelineEndMs ?? cue.input.endMs));
+    for (let offset = 0; offset < renderUnits.length; offset += batchSize) {
+      const batch = renderUnits.slice(offset, offset + batchSize);
+      const firstPlan = planById.get(batch[0]!.id);
+      const segmentStart = offset === 0 ? 0 : firstPlan?.timelineStartMs ?? batch[0]!.startMs;
+      const segmentEnd = Math.max(...batch.map((unit) => planById.get(unit.id)?.timelineEndMs ?? unit.endMs));
       const durationMs = Math.max(segmentEnd - segmentStart, 100);
       const segmentIndex = segmentTasks.length;
       segmentTasks.push(segmentSemaphore.use(async () => {
         const args: string[] = ['-y'];
         const filters: string[] = [];
         const fingerprints = [];
-        for (const [index, cue] of batch.entries()) {
-          const source = path.join(jobDir(this.job.id), cue.audioFile as string);
+        for (const [index, unit] of batch.entries()) {
+          const source = unit.audioFile;
           const sourceStat = await stat(source);
-          const delay = Math.max(0, Math.round((planById.get(cue.id)?.timelineStartMs ?? cue.input.startMs) - segmentStart));
-          const cueDurationMs = cue.metadata?.finalAudioDurationMs || cue.input.endMs - cue.input.startMs;
-          const fades = cueBoundaryFades(cueDurationMs);
-          const volume = clamp(cue.input.volume ?? 1, 0, 2).toFixed(3);
+          const delay = Math.max(0, Math.round((planById.get(unit.id)?.timelineStartMs ?? unit.startMs) - segmentStart));
+          const unitDurationMs = unit.audioDurationMs;
+          const fades = cueBoundaryFades(unitDurationMs);
+          const volume = clamp(unit.volume, 0, 2).toFixed(3);
           args.push('-i', source);
-          filters.push(`[${index}:a]volume=${volume},${cueBoundaryFadeFilter(cueDurationMs)},adelay=${delay}|${delay}[a${index}]`);
-          fingerprints.push([cue.id, sourceStat.size, sourceStat.mtimeMs, delay, cueDurationMs, volume, fades]);
+          filters.push(`[${index}:a]volume=${volume},${cueBoundaryFadeFilter(unitDurationMs)},adelay=${delay}|${delay}[a${index}]`);
+          fingerprints.push([unit.id, sourceStat.size, sourceStat.mtimeMs, delay, unitDurationMs, volume, fades, unit.continuous]);
         }
         filters.push(buildTimelineMixFilter(batch.length, durationMs));
         const output = path.join(timelineDir(this.job.id), `segment-${String(segmentIndex).padStart(5, '0')}.wav`);
@@ -1125,6 +1637,7 @@ class DubbingRunner {
     });
     finalFilters.push(buildTimelineMixFilter(segments.length, timelineDurationMs));
     await run('ffmpeg', [...finalArgs, '-filter_complex', finalFilters.join(';'), '-map', '[out]', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', rawFinalPath], this.controller.signal);
+    await this.commit((job) => { job.finalization = { stage: 'mastering', completed: 0, total: 1 }; });
     try {
       await masterDubFile(rawFinalPath, masteredTemporary, this.controller.signal);
       await replacePreparedFile(masteredTemporary, finalPath);
@@ -1168,6 +1681,9 @@ class DubbingRunner {
     try {
       await this.recoverProcessing();
       await this.commit((job) => { job.status = 'running'; });
+      if (this.job.config.speechMode === 'continuous-first' && shouldUseContinuousSpeech(this.job.config, this.job.totalCues) && !this.job.config.rewriteProviderRef) {
+        await this.buildContinuousRenderUnits(await loadCues(this.job.id), true);
+      }
       while (true) {
         if (this.cancelRequested) throw new Error('Dubbing job đã được hủy.');
         if (this.pauseRequested) { await this.commit((job) => { job.status = 'paused'; }); return; }
@@ -1237,6 +1753,7 @@ export async function rebuildDubbingJobResult(id: string) {
   }
   job.status = 'queued';
   job.currentBatch = 0;
+  job.finalization = undefined;
   job.warnings = [];
   job.updatedAt = now();
   await writeJsonAtomic(jobFile(id), job);
@@ -1252,7 +1769,7 @@ export async function retryFailedDubbingJob(id: string, patches: Array<{ id: str
     await saveCue(id, { ...cue, input: { ...cue.input, ...inputPatch }, status: 'pending', error: undefined, errorStage: undefined, skipRewrite, attempts: cue.attempts + 1 });
   }
   const job = await readDubbingJob(id);
-  job.status = 'queued'; job.failedCues = 0; job.result = undefined; job.warnings = [];
+  job.status = 'queued'; job.failedCues = 0; job.result = undefined; job.warnings = []; job.finalization = undefined;
   await writeJsonAtomic(jobFile(id), job);
   return startDubbingJob(id);
 }
@@ -1276,6 +1793,7 @@ export async function queueDubbingCueRegeneration(id: string, cueId: string, pat
     attempts: 0,
     audioFile: undefined,
     metadata: undefined,
+    continuousGroupFile: undefined,
     error: undefined,
     errorStage: undefined,
     skipRewrite: false,
@@ -1283,6 +1801,7 @@ export async function queueDubbingCueRegeneration(id: string, cueId: string, pat
   const refreshed = await loadCues(id);
   job.status = 'queued';
   job.doneCues = refreshed.filter((item) => item.status === 'done').length;
+  job.finalization = undefined;
   job.failedCues = refreshed.filter((item) => item.status === 'failed').length;
   job.currentBatch = 0;
   job.result = undefined;

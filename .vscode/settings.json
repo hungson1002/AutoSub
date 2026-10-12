@@ -1,1 +1,34 @@
-{}
+{
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/workdir/**": true,
+    "**/tmp/**": true,
+    "**/__pycache__/**": true,
+    "**/.venv/**": true,
+    "**/artifacts/**": true,
+    "**/review_tmp/**": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/workdir": true,
+    "**/tmp": true,
+    "**/__pycache__": true,
+    "**/.venv": true,
+    "**/artifacts": true,
+    "**/review_tmp": true
+  },
+  "files.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+    "**/workdir": true,
+    "**/tmp": true,
+    "**/__pycache__": true,
+    "**/.venv": true,
+    "**/artifacts": true,
+    "**/review_tmp": true
+  }
+}

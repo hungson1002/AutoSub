@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import {BackgroundExports} from './BackgroundExports';
 import { ArrowDownToLine, AudioLines, Captions, Clapperboard, Film, HardDrive, Layers3, Megaphone, PanelLeftClose, PanelLeftOpen, Settings2, Video, Volume2, WandSparkles, Zap } from './Icons';
 export type Page = 'pipeline' | 'translate' | 'extract' | 'editor' | 'review' | 'product-ads' | 'ai-video' | 'story-video' | 'animation-studio' | 'voice-clone' | 'douyin' | 'douyin-search' | 'storage' | 'settings';
 const nav = [
@@ -59,6 +60,7 @@ export function Layout({ page, setPage, children, cueCount, providerCount }: { p
           {item.id === 'settings' && providerCount > 0 && <em className="green-dot" />}
         </button>;
       })}</nav>
+      <BackgroundExports />
     </aside>
     {tooltip && <div className="sidebar-floating-tooltip" role="tooltip" style={{ left: tooltip.left, top: tooltip.top }}>{tooltip.label}</div>}
     <main className="main-content">{children}</main>

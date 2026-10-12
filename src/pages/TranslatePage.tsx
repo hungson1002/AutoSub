@@ -17,11 +17,7 @@ import { translationBatchSize, translationLanguages, translationModes, translati
 const defaultTranslationStyle = translationStyles.find((item) => item.value === 'Review phim')?.value ?? translationStyles[0]?.value ?? 'Phổ thông';
 
 export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenEditor, onNotice }: { providers: AIProvider[]; settings: AppSettings; cues: SubtitleCue[]; onCuesChange: (cues: SubtitleCue[]) => void; onOpenEditor: () => void; onNotice: (message: string, kind?: 'success' | 'error') => void }) {
-  const [runState, setRunState] = useState<TranslationRunState>(() => {
-    const saved = translationStatusStorage.load();
-    if (saved.status === 'running') return { ...saved, status: 'failed', message: 'Lần dịch trước bị gián đoạn. Các batch đã hoàn thành vẫn được giữ lại; hãy chọn model rồi bấm Dịch tiếp.', updatedAt: Date.now() };
-    return saved;
-  });
+  const [runState, setRunState] = useState<TranslationRunState>(() => translationStatusStorage.load());
   const [fileName, setFileName] = useState(() => runState.fileName || '');
   const [sourceLanguage, setSourceLanguage] = useState('Auto Detect');
   const [targetLanguage, setTargetLanguage] = useState('Tiếng Việt');
@@ -34,6 +30,8 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
   const [progress, setProgress] = useState(() => runState.progress || 0);
   const [progressStage, setProgressStage] = useState(() => runState.stage || 'Chuẩn bị dịch subtitle');
   const controllerRef = useRef<AbortController | undefined>(undefined);
+  const activeJobRef = useRef<string | undefined>(runState.jobId);
+  const userCancelRequestedRef = useRef(false);
   const progressTimerRef = useRef<number | undefined>(undefined);
   const configuredAssignments = capabilityAssignments(settings, 'translation');
   const [activeAssignment, setActiveAssignment] = useState<ProviderAssignment>(settings.assignments.translation);
@@ -105,6 +103,34 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
     }, 120);
   };
 
+  const waitForTranslationJob = async (jobId: string, signal: AbortSignal) => {
+    while (true) {
+      if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+      let job: Awaited<ReturnType<typeof api.getTranslationJob>> | undefined;
+      try {
+        job = await api.getTranslationJob(jobId, signal);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        // Backend có thể đang restart. Giữ job chạy trên disk và thử kết nối lại.
+      }
+      if (job) {
+        setProgressStage(job.stage || 'Đang dịch batch');
+        if (job.status === 'completed') return job.result || { items: [], pendingCueIds: [] };
+        if (job.status === 'failed') throw new Error(job.error || 'Translation job thất bại.');
+        if (job.status === 'cancelled') throw new DOMException('Cancelled', 'AbortError');
+      }
+      await new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(resolve, 700);
+        const onAbort = () => {
+          window.clearTimeout(timer);
+          signal.removeEventListener('abort', onAbort);
+          reject(new DOMException('Cancelled', 'AbortError'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+  };
+
   const runTranslation = async (onlyMissing = false) => {
     if (!provider) { onNotice('Chưa có Translation Provider trong Cài đặt.', 'error'); return; }
     if (!provider.enabled) { onNotice(`Provider ${provider.name} đang bị tắt trong Cài đặt.`, 'error'); return; }
@@ -114,6 +140,7 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
     const queue = onlyMissing ? cues.filter((cue) => !cue.translatedText.trim()) : cues;
     if (!queue.length) { onNotice('Tất cả cue đã có bản dịch.', 'success'); return; }
     const controller = new AbortController();
+    userCancelRequestedRef.current = false;
     controllerRef.current = controller;
     setWorking(true);
     setProgress(5);
@@ -141,7 +168,24 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
         let result: { items: Array<{ id: string; translation: string }>; pendingCueIds?: string[]; warning?: string };
         try {
           const translationMemory = buildTranslationMemory(next, batch[0]?.id || '', 24);
-          result = await api.translate(provider, assignment.model, batch, sourceLanguage, targetLanguage, style, customPrompt, glossary.filter((entry) => entry.enabled), controller.signal, next, translationMemory, translationGuide);
+          const job = await api.createTranslationJob(
+            provider,
+            assignment.model,
+            batch,
+            sourceLanguage,
+            targetLanguage,
+            style,
+            customPrompt,
+            glossary.filter((entry) => entry.enabled),
+            next,
+            translationMemory,
+            translationGuide,
+            controller.signal,
+          );
+          activeJobRef.current = job.id;
+          updateRunState({ status: 'running', jobId: job.id, fileName, total: next.length, translated: next.filter((cue) => cue.translatedText.trim()).length, remaining: next.filter((cue) => !cue.translatedText.trim()).length, progress, stage: job.stage || `Đang dịch batch ${batchNumber}/${totalBatches}`, updatedAt: Date.now() });
+          result = await waitForTranslationJob(job.id, controller.signal);
+          activeJobRef.current = undefined;
         } catch (error) {
           if (error instanceof DOMException && error.name === 'AbortError') throw error;
           const remaining = queue.length - start;
@@ -179,10 +223,11 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
+        if (!userCancelRequestedRef.current) return;
         const remaining = cues.filter((cue) => !cue.translatedText.trim()).length;
-        setProgressStage('Đã tạm dừng dịch subtitle');
-        updateRunState({ status: 'cancelled', fileName, total: cues.length, translated: cues.length - remaining, remaining, message: 'Đã tạm dừng. Các batch hoàn thành vẫn được giữ lại và có thể dịch tiếp.', progress, stage: 'Đã tạm dừng dịch subtitle', updatedAt: Date.now() });
-        onNotice('Đã tạm dừng dịch subtitle. Kết quả đã làm vẫn được giữ lại.', 'success');
+        setProgressStage('Đã hủy dịch subtitle');
+        updateRunState({ status: 'cancelled', fileName, total: cues.length, translated: cues.length - remaining, remaining, message: 'Đã hủy theo yêu cầu người dùng. Các batch hoàn thành vẫn được giữ lại.', progress, stage: 'Đã hủy dịch subtitle', updatedAt: Date.now() });
+        onNotice('Đã hủy dịch subtitle. Kết quả đã làm vẫn được giữ lại.', 'success');
       }
       else {
         const message = friendlyErrorMessage(error, 'Dịch thất bại.');
@@ -221,9 +266,19 @@ export function TranslatePage({ providers, settings, cues, onCuesChange, onOpenE
         {translationFailure && <div className="translation-recovery" role="status"><strong>Còn {translationFailure.remaining} cue chưa dịch</strong><span>{translationFailure.message}</span><button className="button ghost small" onClick={() => void runTranslation(true)} disabled={working || !ready}>Dịch tiếp {untranslatedCount} cue →</button></div>}
         <div className="translation-note"><Languages size={15} /><span>Đang dùng batch {translationBatchSize(mode)} cue. Timestamp luôn lấy từ file gốc.</span></div>
       </div>
-      <div className="cue-preview"><div className="section-title"><span>PREVIEW / {cues.length} CUE</span><button className="text-button" onClick={onOpenEditor}>Mở Editor →</button></div><div className="mini-cues">{cues.slice(0, 7).map((cue) => <div className="mini-cue" key={cue.id}><span>{String(cue.index).padStart(2, '0')}</span><div><small>{formatClock(cue.startMs)} — {formatClock(cue.endMs)}</small><p>{cue.originalText}</p><strong>{cue.translatedText || <em>Chưa dịch</em>}</strong></div></div>)}{cues.length > 7 && <div className="more-cues">+ {cues.length - 7} cue trong Editor</div>}</div></div>
+      <div className="cue-preview">
+        <div className="section-title"><span>PREVIEW / {cues.length} CUE</span><button className="text-button" onClick={onOpenEditor}>Mở Editor →</button></div>
+        <div className="mini-cues" role="region" aria-label="Danh sách phụ đề" tabIndex={0}>
+          {cues.map((cue) => <div className="mini-cue" key={cue.id}><span>{String(cue.index).padStart(2, '0')}</span><div><small>{formatClock(cue.startMs)} — {formatClock(cue.endMs)}</small><p>{cue.originalText}</p><strong>{cue.translatedText || <em>Chưa dịch</em>}</strong></div></div>)}
+        </div>
+      </div>
     </section> : <div className="empty-workspace"><div className="empty-glyph"><Languages size={26} /></div><h2>Bắt đầu từ một file phụ đề</h2><p>Import SRT/VTT để mở cấu hình dịch và preview.</p></div>}
-    <ProgressModal open={working} title="Đang dịch subtitle" message={progressStage} value={progress} onCancel={() => controllerRef.current?.abort()} />
+    <ProgressModal open={working} title="Đang dịch subtitle" message={progressStage} value={progress} onCancel={() => {
+      userCancelRequestedRef.current = true;
+      const jobId = activeJobRef.current;
+      if (jobId) void api.cancelTranslationJob(jobId).catch(() => undefined);
+      controllerRef.current?.abort();
+    }} />
     <Modal open={glossaryOpen} title="Từ điển dịch" eyebrow="GLOSSARY" onClose={() => setGlossaryOpen(false)}><div className="modal-intro">Glossary được gửi kèm prompt dịch. Chỉ các dòng đang bật mới có hiệu lực.</div><div className="glossary-table"><div className="glossary-head"><span>TỪ GỐC</span><span>BẢN DỊCH</span><span /></div>{glossary.map((entry) => <div className="glossary-row" key={entry.id}><input value={entry.source} onChange={(event) => setGlossary(glossary.map((item) => item.id === entry.id ? { ...item, source: event.target.value } : item))} placeholder="Xiao Yan" /><span>→</span><input value={entry.target} onChange={(event) => setGlossary(glossary.map((item) => item.id === entry.id ? { ...item, target: event.target.value } : item))} placeholder="Tiêu Viêm" /><label className="tiny-switch"><input type="checkbox" checked={entry.enabled} onChange={(event) => setGlossary(glossary.map((item) => item.id === entry.id ? { ...item, enabled: event.target.checked } : item))} /><i /></label><button className="icon-button" onClick={() => setGlossary(glossary.filter((item) => item.id !== entry.id))}><X size={14} /></button></div>)}</div><button className="button ghost full" onClick={() => setGlossary([...glossary, { id: crypto.randomUUID(), source: '', target: '', enabled: true }])}><Plus size={15} /> Thêm thuật ngữ</button><div className="modal-actions"><button className="button primary" onClick={() => setGlossaryOpen(false)}>Lưu từ điển</button></div></Modal>
   </div>;
 }

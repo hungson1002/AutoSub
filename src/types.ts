@@ -9,8 +9,11 @@ export type ProviderType =
   | "groq"
   | "elevenlabs"
   | "whisper-local"
+  | "funasr-local"
+  | "qwen3-asr-local"
   | "edge-tts"
   | "vieneu-local"
+  | "zerotts-local"
   | "kokoro-local"
   | "hiiu-tts"
   | "capcut-tts"
@@ -149,6 +152,7 @@ export interface DubbingJobStatus {
   warnings: string[];
   progressPercent: number;
   failedCueIds: string[];
+  finalization?: { stage: 'continuous' | 'mixing' | 'mastering'; completed: number; total: number };
   failedCueErrors: Array<{
     id: string;
     index: number;

@@ -38,6 +38,7 @@ export type TranslationRunStatus =
   | "cancelled";
 export interface TranslationRunState {
   status: TranslationRunStatus;
+  jobId?: string;
   fileName?: string;
   total?: number;
   translated?: number;

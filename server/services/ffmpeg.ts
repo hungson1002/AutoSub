@@ -1,7 +1,10 @@
-import { mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 export const workdir = path.resolve(process.env.AUTOSUB_WORKDIR?.trim() || path.join(process.cwd(), 'workdir'));
 export const temporaryRoot = path.resolve(process.env.AUTOSUB_TEMP_DIR?.trim() || path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'AutoSub', 'temp'));
@@ -12,6 +15,92 @@ export async function ensureWorkdir() {
   ]);
 }
 const mediaExecutableCache = new Map<string, string>();
+const MANAGED_FFMPEG_ROOT = path.join(workdir, 'runtime', 'ffmpeg');
+const MANAGED_FFMPEG_ARCHIVE = path.join(MANAGED_FFMPEG_ROOT, 'ffmpeg-release-essentials.zip');
+const MANAGED_FFMPEG_URL = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
+let managedFfmpegPromise: Promise<{ ffmpeg: string; ffprobe: string }> | undefined;
+
+async function findManagedMediaExecutable(directory: string, fileName: 'ffmpeg.exe' | 'ffprobe.exe'): Promise<string | undefined> {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const candidate = path.join(directory, entry.name);
+    if (entry.isFile() && entry.name.toLowerCase() === fileName) return candidate;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = await findManagedMediaExecutable(path.join(directory, entry.name), fileName);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function runInstallerProcess(command: string, args: string[], timeoutMs = 5 * 60_000) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true });
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error(`${command} cài FFmpeg quá thời gian cho phép.`));
+    }, timeoutMs);
+    child.stderr?.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-64 * 1024); });
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(stderr || `${command} thoát với mã ${code ?? 'unknown'} khi cài FFmpeg.`));
+    });
+  });
+}
+
+export async function ensureManagedFfmpeg() {
+  if (process.platform !== 'win32' || process.arch !== 'x64') {
+    throw new Error(`AutoSub hiện chỉ tự cài FFmpeg portable trên Windows x64; máy này là ${process.platform}/${process.arch}.`);
+  }
+  if (managedFfmpegPromise) return managedFfmpegPromise;
+  managedFfmpegPromise = (async () => {
+    await mkdir(MANAGED_FFMPEG_ROOT, { recursive: true });
+    let ffmpeg = await findManagedMediaExecutable(MANAGED_FFMPEG_ROOT, 'ffmpeg.exe');
+    let ffprobe = await findManagedMediaExecutable(MANAGED_FFMPEG_ROOT, 'ffprobe.exe');
+    if (ffmpeg && ffprobe) return { ffmpeg, ffprobe };
+
+    const temporaryArchive = `${MANAGED_FFMPEG_ARCHIVE}.part`;
+    await rm(temporaryArchive, { force: true });
+    const response = await fetch(MANAGED_FFMPEG_URL, { redirect: 'follow', signal: AbortSignal.timeout(30 * 60_000) });
+    if (!response.ok || !response.body) throw new Error(`Không tải được FFmpeg portable (HTTP ${response.status}).`);
+    try {
+      await pipeline(Readable.fromWeb(response.body as import('node:stream/web').ReadableStream), createWriteStream(temporaryArchive));
+      const archiveInfo = await stat(temporaryArchive);
+      if (archiveInfo.size < 30 * 1024 * 1024) throw new Error('Gói FFmpeg tải về quá nhỏ hoặc không đầy đủ.');
+      await rm(MANAGED_FFMPEG_ARCHIVE, { force: true });
+      await rename(temporaryArchive, MANAGED_FFMPEG_ARCHIVE);
+      await runInstallerProcess('tar', ['-xf', MANAGED_FFMPEG_ARCHIVE, '-C', MANAGED_FFMPEG_ROOT], 10 * 60_000);
+    } finally {
+      await rm(temporaryArchive, { force: true }).catch(() => undefined);
+    }
+
+    ffmpeg = await findManagedMediaExecutable(MANAGED_FFMPEG_ROOT, 'ffmpeg.exe');
+    ffprobe = await findManagedMediaExecutable(MANAGED_FFMPEG_ROOT, 'ffprobe.exe');
+    if (!ffmpeg || !ffprobe) throw new Error('Đã tải FFmpeg nhưng không tìm thấy ffmpeg.exe/ffprobe.exe sau khi giải nén.');
+    mediaExecutableCache.set('ffmpeg', ffmpeg);
+    mediaExecutableCache.set('ffprobe', ffprobe);
+    return { ffmpeg, ffprobe };
+  })().catch((error) => {
+    managedFfmpegPromise = undefined;
+    throw error;
+  });
+  return managedFfmpegPromise;
+}
+
 export type H264Encoder = 'libx264' | 'h264_amf' | 'h264_nvenc' | 'h264_qsv';
 let h264EncoderPromise: Promise<H264Encoder> | undefined;
 
@@ -21,6 +110,15 @@ export async function resolveMediaCommand(command: string) {
   if (cached) return cached;
   const explicit = command === 'ffmpeg' ? process.env.FFMPEG_PATH : process.env.FFPROBE_PATH;
   const candidates = explicit ? [explicit] : [];
+
+  // Prefer an already-managed portable install so cloned workspaces keep using
+  // the same binaries without depending on global PATH state.
+  const managed = await findManagedMediaExecutable(
+    MANAGED_FFMPEG_ROOT,
+    command === 'ffmpeg' ? 'ffmpeg.exe' : 'ffprobe.exe',
+  );
+  if (managed) candidates.push(managed);
+
   // Winget installs FFmpeg under LocalAppData, but an already-open terminal
   // can retain an old PATH until Windows is restarted. Discover that install
   // directly so `npm run dev` does not randomly lose FFmpeg/FFprobe.
@@ -31,9 +129,25 @@ export async function resolveMediaCommand(command: string) {
     candidates.push(path.join(wingetRoot, entry.name, 'bin', `${command}.exe`));
   }
   for (const candidate of candidates) {
-    try { await stat(candidate); mediaExecutableCache.set(command, candidate); return candidate; } catch { /* try next location */ }
+    try {
+      const info = await stat(candidate);
+      if (!info.isFile()) continue;
+      mediaExecutableCache.set(command, candidate);
+      return candidate;
+    } catch { /* try next location */ }
   }
-  return command;
+
+  // If PATH already has FFmpeg, avoid downloading anything.
+  try {
+    await runInstallerProcess(command, ['-version'], 15_000);
+    mediaExecutableCache.set(command, command);
+    return command;
+  } catch { /* install portable below */ }
+
+  const installed = await ensureManagedFfmpeg();
+  const executable = command === 'ffmpeg' ? installed.ffmpeg : installed.ffprobe;
+  mediaExecutableCache.set(command, executable);
+  return executable;
 }
 
 export async function run(command: string, args: string[], signal?: AbortSignal, onStderr?: (chunk: string) => void) {

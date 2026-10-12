@@ -3,8 +3,11 @@ import { Audio } from '@remotion/media';
 import { TransitionSeries } from '@remotion/transitions';
 import { AbsoluteFill, continueRender, delayRender, Easing, interpolate, useCurrentFrame, useVideoConfig } from 'remotion';
 import type { CanvasStudioProject, CanvasStudioScene } from '../../shared/canvasAnimationStudio';
-import { preloadCanvasSceneImages, renderCanvasScene } from '../canvasAnimationStudio/renderer';
+import {canvasExportFramePlan} from '../../shared/canvasAnimationStudio';
+import { preloadCanvasSceneImages } from '../canvasAnimationStudio/renderer';
+import {renderCanvasSceneWithTransition} from '../canvasAnimationStudio/sceneTransition';
 import {hasCanvasCaptions,drawCanvasCaption} from '../canvasAnimationStudio/captions';
+import {RemotionVectorSceneFrame} from './VectorSceneFrame';
 
 export interface CanvasAnimationCompositionProps extends Record<string, unknown> {
   project: CanvasStudioProject;
@@ -92,33 +95,33 @@ function HorrorCaption({ scene, project }: { scene: CanvasStudioScene; project: 
   >{caption}</div>;
 }
 
-function CanvasSceneFrame({ scene, project, assetOrigin }: { scene: CanvasStudioScene; project: CanvasStudioProject; assetOrigin: string }) {
+function CanvasSceneFrame({ scene, previousScene, project, assetOrigin,playbackRate=1 }: { scene: CanvasStudioScene; previousScene?:CanvasStudioScene; project: CanvasStudioProject; assetOrigin: string;playbackRate?:number }) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const ref = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   const [assetHandle] = useState(() => delayRender(`canvas-assets-${scene.id}`));
-  const timeMs = frame / fps * 1000;
+  const timeMs = frame / fps * 1000*playbackRate;
 
   useEffect(() => {
     let active = true;
-    void preloadCanvasSceneImages(scene, assetOrigin)
+    void Promise.all([scene,previousScene].filter((item):item is CanvasStudioScene=>!!item).map(item=>preloadCanvasSceneImages(item,assetOrigin)))
       .catch(() => undefined)
       .finally(() => {
         if (active) setReady(true);
         continueRender(assetHandle);
       });
     return () => { active = false; };
-  }, [assetHandle, assetOrigin, scene]);
+  }, [assetHandle, assetOrigin, scene,previousScene]);
 
   useLayoutEffect(() => {
     if (!ready) return;
     const canvas = ref.current;
     const context = canvas?.getContext('2d');
     if (!canvas || !context) return;
-    renderCanvasScene(context, scene, timeMs, project.width, project.height, assetOrigin);
+    renderCanvasSceneWithTransition(context,scene,previousScene,timeMs,project.width,project.height,assetOrigin);
     if(hasCanvasCaptions(project))drawCanvasCaption(context,scene,timeMs,project.width,project.height);
-  }, [assetOrigin, frame, project.height, project.width, ready, scene, timeMs]);
+  }, [assetOrigin, frame, project.height, project.width, ready, scene, timeMs,previousScene]);
 
   return <canvas ref={ref} width={project.width} height={project.height} style={{ width: '100%', height: '100%', display: 'block' }} />;
 }
@@ -194,20 +197,22 @@ export function canvasSceneFrames(scene: CanvasStudioScene, fps: number) {
 }
 
 export function canvasProjectFrames(project: CanvasStudioProject) {
-  return project.scenes.reduce((total, scene) => total + canvasSceneFrames(scene, project.fps), 0);
+  return canvasExportFramePlan(project).reduce((a,b)=>a+b,0);
 }
 
 export function CanvasAnimationComposition({ project, assetOrigin }: CanvasAnimationCompositionProps) {
   const horror = isHorrorCanvasProject(project);
+  const frames=canvasExportFramePlan(project);
   // Mẫu Vui Vẻ cắt khô hard-cut: không overlay chuyển cảnh, không lòi nền trắng.
   return <AbsoluteFill style={{ backgroundColor: '#f5f1e7' }}>
     <TransitionSeries>
-      {project.scenes.map((scene) => {
-        const durationInFrames = canvasSceneFrames(scene, project.fps);
+      {project.scenes.map((scene,index) => {
+        const durationInFrames = frames[index]!;
+        const playbackRate=canvasSceneFrames(scene,project.fps)/durationInFrames;
         return <Fragment key={scene.id}>
           <TransitionSeries.Sequence durationInFrames={durationInFrames} name={scene.name}>
-            <CanvasSceneFrame scene={scene} project={project} assetOrigin={assetOrigin} />
-            {scene.audioUrl ? <Audio src={absoluteUrl(scene.audioUrl, assetOrigin)} volume={1} /> : null}
+            {scene.vectorScene?<RemotionVectorSceneFrame scene={scene} width={project.width} height={project.height} playbackRate={playbackRate}/>:<CanvasSceneFrame scene={scene} previousScene={project.scenes[index-1]} project={project} assetOrigin={assetOrigin} playbackRate={playbackRate} />}
+            {scene.audioUrl ? <Audio src={absoluteUrl(scene.audioUrl, assetOrigin)} volume={1} playbackRate={playbackRate}/> : null}
           </TransitionSeries.Sequence>
         </Fragment>;
       })}

@@ -45,8 +45,27 @@ export function solveTwoBoneIk(root: CharacterPoint, target: CharacterPoint, upp
 function armTargets(object: CanvasStudioObject, model: CharacterModel, timeMs: number, voiceActive: boolean, gestureTimeMs: number) {
   const pose = object.pose || 'idle';
   const wave = Math.sin(gestureTimeMs / 190);
-  const left = { x: -model.shoulderWidth / 2 - 1, y: 26 };
-  const right = { x: model.shoulderWidth / 2 + 1, y: 26 };
+  const horrorRest = model.horror && ['idle','talk','gesture','nod'].includes(pose);
+  const relaxLeft = horrorRest && characterRnd(model.seed, 300) > .5;
+  const armReach=model.armLength+model.forearmLength;
+  const lowY=armReach*.82;
+  const bentY=armReach*.72;
+  const left = horrorRest ? {
+    // Rest targets scale with the actual arm kit. This keeps a visible elbow
+    // bend even when a compact horror character has shorter upper/lower arms.
+    x: -model.shoulderWidth / 2 - (relaxLeft ? .9 : 1.8) - characterRnd(model.seed, 301) * .28,
+    y: (relaxLeft ? lowY : bentY) + characterRnd(model.seed, 302) * .35,
+  } : {
+    x: -model.shoulderWidth / 2 - 1,
+    y: Math.min(26,armReach*.84),
+  };
+  const right = horrorRest ? {
+    x: model.shoulderWidth / 2 + (relaxLeft ? 1.8 : .9) + characterRnd(model.seed, 303) * .28,
+    y: (relaxLeft ? bentY : lowY) + characterRnd(model.seed, 304) * .35,
+  } : {
+    x: model.shoulderWidth / 2 + 1,
+    y: Math.min(26,armReach*.84),
+  };
 
   if (pose === 'lie-down' || pose === 'cover-face') return {
     left: { x: -18, y: pose === 'cover-face' ? blanketTopAt(object, timeMs) + 1 : -6 },
@@ -54,23 +73,31 @@ function armTargets(object: CanvasStudioObject, model: CharacterModel, timeMs: n
   };
 
   if (pose === 'point') return { left, right: { x: 49, y: -8 } };
+  if (pose === 'gesture') return {left,right:{x:29,y:7}};
   if(pose==='struggle'){
     const effort=Math.sin(Math.min(gestureTimeMs,2400)/500*Math.PI)*2;
     return {left:{x:-30,y:-18+effort},right:{x:30,y:-12-effort}};
   }
   if(pose==='float-body')return {left:{x:-17,y:32},right:{x:16,y:36}};
-  if (['reach','wipe','write','tie','aid','assist'].includes(pose)) return {left,right:{x:29,y:12}};
+  if (['reach','wipe','write','tie','aid','assist'].includes(pose)) return {
+    left,
+    right: pose==='reach'&&model.horror ? {x:40,y:7} : {x:29,y:12},
+  };
   if (pose === 'talk') {
-    const smooth=(value:number)=>{const x=Math.max(0,Math.min(1,value));return x*x*(3-2*x);};
-    const gesture=voiceActive ? smooth(gestureTimeMs/450)*(1-smooth((gestureTimeMs-900)/1000)) : 0;
-    const amount=model.horror?.65:1;
-    // One phrase gesture, a short hold, then a rest; avoid perpetual hand waving.
-    return {
-      left,
-      right:{x:right.x-gesture*8*amount,y:right.y-gesture*12*amount},
-    };
+    // Speech owns the mouth. Only an authored action may move the arms.
+    return {left,right};
   }
-  if (pose === 'brace') return {
+  if (pose === 'brace') return model.horror ? (object.expression==='surprised' ? {
+    // Startle is not the same as a defensive hold: one hand flashes toward the
+    // face while the other stays lower, producing a quick asymmetric recoil.
+    left: { x: -model.shoulderWidth*.32, y: 18.5 },
+    right: { x: model.shoulderWidth*.10, y: 3.5 },
+  } : {
+    // Protective horror silhouette: both hands rise into the upper torso,
+    // asymmetric enough to read at phone size but never a cartoon T-pose.
+    left: { x: -model.shoulderWidth*.24, y: 14.5 },
+    right: { x: model.shoulderWidth*.20, y: 9.5 },
+  }) : {
     left: { x: -13, y: 8 },
     right: { x: 13, y: 8 },
   };
@@ -79,8 +106,8 @@ function armTargets(object: CanvasStudioObject, model: CharacterModel, timeMs: n
     right: { x: 28, y: -31 },
   };
   if (pose === 'row') return {
-    left: { x: 7 + wave * 5, y: 12 + wave * 3 },
-    right: { x: 32 + wave * 6, y: 14 + wave * 3 },
+    left: { x: 6 + wave * 5, y: 8 + wave * 3 },
+    right: { x: 27 + wave * 6, y: 22 + wave * 5 },
   };
   if (pose === 'run') return {
     left: { x: left.x + wave * 3, y: left.y - 4 - wave * 4 },
@@ -89,23 +116,69 @@ function armTargets(object: CanvasStudioObject, model: CharacterModel, timeMs: n
   return { left, right };
 }
 
-export function resolveCharacterRig(object: CanvasStudioObject, model: CharacterModel, timeMs: number, voiceActive = true, gestureTimeMs = timeMs, poseWeight = 1, travelDistance?: number, pointTarget?: CharacterPoint, holdingPhone = false): CharacterRig {
-  const breath = Math.sin(timeMs / 900 + characterRnd(model.seed,96)*Math.PI*2) * .55;
+export function resolveCharacterRig(object: CanvasStudioObject, model: CharacterModel, timeMs: number, voiceActive = true, gestureTimeMs = timeMs, poseWeight = 1, travelDistance?: number, pointTarget?: CharacterPoint, holdingPhone = false, restPose?: CanvasStudioObject['pose']): CharacterRig {
+  // Limited-animation moving hold: horror actors are never frozen cutouts,
+  // but the amplitude stays far below explainer/cartoon idle loops.
+  const phase=characterRnd(model.seed,96)*Math.PI*2;
+  // The horror reference is pose-hold animation, not a continuous idle loop.
+  // Body motion only comes from authored/semantic beats; atmosphere carries
+  // the shot between poses.
+  const breath = model.horror ? 0 : Math.sin(timeMs/900+phase)*.55;
   const weight = Math.max(0, Math.min(1, poseWeight));
-  const locomoting=object.pose==='run'||object.pose==='assist';
+  const effectivePose=(model.horror&&weight<=.001)?(restPose||'idle'):(object.pose||'idle');
+  const locomoting=object.pose==='run'||(object.pose==='assist'&&travelDistance!==undefined&&Math.abs(travelDistance)>.01);
   const walk = locomoting ? Math.sin(gestureTimeMs / 190) * weight : 0;
   // Crouching lowers the whole torso while feet stay on their standing plane.
-  const crouch = object.pose === 'aid' ? 12 * weight : 0;
-  const pelvis = { x: 0, y: 24 + breath * .25 + crouch };
-  // One torso frame owns its attachment points. Poses move the limbs, not
-  // individual shoulders/head away from the shirt and collar.
-  const chest = { x: pelvis.x, y: pelvis.y - 26 };
-  const neck = { x: chest.x, y: chest.y - 12 };
-  const head = { x: neck.x, y: neck.y - (model.horror ? 16 : 20) };
+  const crouch = object.pose === 'aid' ? 12 * weight
+    :object.pose==='reach'&&pointTarget?Math.min(22,Math.max(0,pointTarget.y-22))*weight:0;
+  // Bend the upper torso for a low grip without lowering the pelvis past
+  // planted feet (which would hide both calves under the shirt).
+  const bend=object.pose==='reach'&&pointTarget?Math.min(14,Math.max(0,pointTarget.y-42))*weight:0;
+  const quietHorror = model.horror && ['idle','talk','gesture','nod','brace'].includes(effectivePose);
+  const movingHold=0;
+  const stanceX = quietHorror
+    ? (characterRnd(model.seed, 305) - .5) * 2.0
+    : 0;
+  const pelvis = { x: stanceX, y: (model.horror?21.5:24) + breath * .25 + crouch };
+  // Horror body acting is controlled by pose/action beats. Facial fear must
+  // never silently invent a different body silhouette.
+  const torsoSpan=model.horror
+    ? Math.max(23.5,Math.min(25.8,model.torsoHeight*.645))
+    : Math.max(25,Math.min(27,model.torsoHeight*.74));
+  const neckSpan=model.horror
+    ? Math.max(3.2,Math.min(4.2,model.faceHeight*.105))
+    : 12;
+  const headSpan=model.horror
+    ? Math.max(11.4,Math.min(13.2,model.faceHeight*.36))
+    : 20;
+  const actionLean=model.horror
+    ? effectivePose==='brace'?-2.2*weight:effectivePose==='gesture'?.7*weight:0
+    :0;
+  const chest = {
+    x: pelvis.x + (quietHorror ? (characterRnd(model.seed, 306) - .5) * 2.4 + movingHold*.34 : 0)+actionLean,
+    y: pelvis.y - torsoSpan + bend - breath*.16,
+  };
+  const neck = {
+    x: chest.x + (quietHorror ? (characterRnd(model.seed, 307) - .5) * .8 + movingHold*.12 : 0),
+    y: chest.y - neckSpan,
+  };
+  const head = {
+    x: neck.x,
+    y: neck.y - headSpan - (model.horror ? breath*.08 : 0),
+  };
+  if(object.pose==='nod'){
+    // One readable pose-to-pose nod: anticipation is handled by the acting
+    // envelope, then the skull dips and settles with the whole neck attached.
+    head.y+=2.4*weight;
+  }
   const shoulderL = { x: chest.x - model.shoulderWidth / 2, y: chest.y - 2 };
   const shoulderR = { x: chest.x + model.shoulderWidth / 2, y: chest.y - 2 };
   const gaitTime = locomoting && travelDistance!==undefined ? travelDistance/20*Math.PI*2*190 : gestureTimeMs;
   const targets = armTargets(object, model, timeMs, voiceActive, gaitTime);
+  if(model.horror){
+    targets.left.x+=chest.x;
+    targets.right.x+=chest.x;
+  }
   if (['point','reach','wipe','write','tie','aid','assist'].includes(object.pose||'') && pointTarget && Number.isFinite(pointTarget.x) && Number.isFinite(pointTarget.y)) {
     const dx=pointTarget.x-shoulderR.x,dy=pointTarget.y-shoulderR.y;
     const distance=Math.hypot(dx,dy);
@@ -117,31 +190,62 @@ export function resolveCharacterRig(object: CanvasStudioObject, model: Character
     if(object.pose==='tie'){targets.right.y+=cycle*1.6;targets.left={x:targets.right.x-7,y:targets.right.y+2};}
     if(object.pose==='aid'){targets.right.y+=cycle*.7;targets.left={x:targets.right.x-6,y:targets.right.y+2};}
   }
+  const contactTarget={...targets.right};
+  const raisedContact=pointTarget&&contactTarget.y<shoulderR.y+8;
   if (object.pose !== 'lie-down' && object.pose !== 'cover-face') {
-    const rest = armTargets({ ...object, pose: 'idle' }, model, timeMs, false, 0);
+    const rest = armTargets({ ...object, pose: restPose || 'idle' }, model, timeMs, false, 0);
+    if(model.horror){rest.left.x+=chest.x;rest.right.x+=chest.x;}
     for (const side of ['left', 'right'] as const) {
       targets[side] = { x: rest[side].x + (targets[side].x - rest[side].x) * weight, y: rest[side].y + (targets[side].y - rest[side].y) * weight };
     }
   }
   // Elbows bend outside the ribcage; inward elbows disappear under the shirt
   // and leave forearms looking like detached sticks.
-  const leftArm = solveTwoBoneIk(shoulderL, targets.left, model.armLength, model.forearmLength, 1);
+  if(object.pose==='reach'&&crouch>0)targets.left.y+=crouch;
+  const leftArm = solveTwoBoneIk(shoulderL, targets.left, model.armLength, model.forearmLength, -1);
   // A phone grip stays beside the ear, with the elbow outside the shoulder.
   // It is an attachment constraint, independent of talking/pointing envelopes.
-  if (holdingPhone) targets.right = {x:model.faceWidth*.5+7,y:head.y+7};
-  const rightArm = solveTwoBoneIk(shoulderR, targets.right, model.armLength, model.forearmLength, holdingPhone ? 1 : -1);
+  if (holdingPhone) targets.right = {x:head.x+model.faceWidth*.5+7,y:head.y+7};
+  // A raised contact needs the elbow BELOW the hand. The resting branch
+  // points outwards, but using it for every target folds a supporting arm
+  // over the shoulder and makes its forearm hang down from the contact.
+  if(raisedContact&&!holdingPhone){
+    // Switch elbow branches only at full extension. Switching at a height
+    // threshold teleports the elbow across the arm during lead-in/recovery.
+    const length=model.armLength+model.forearmLength-.001;
+    const extended={x:shoulderR.x+length*.8,y:shoulderR.y+length*.6};
+    const rest=armTargets({...object,pose:'idle'},model,timeMs,false,0).right;
+    const from=weight<.35?rest:extended,to=weight<.35?extended:contactTarget;
+    const fraction=weight<.35?weight/.35:(weight-.35)/.65;
+    targets.right={x:from.x+(to.x-from.x)*fraction,y:from.y+(to.y-from.y)*fraction};
+  }
+  const rightArm = solveTwoBoneIk(shoulderR, targets.right, model.armLength, model.forearmLength, holdingPhone || (raisedContact&&weight>=.35) ? 1 : -1);
 
   const hipL = { x: -7, y: pelvis.y };
   const hipR = { x: 7, y: pelvis.y };
-  const standingFootY = pelvis.y - crouch + Math.sqrt(Math.pow((model.thighLength + model.shinLength) * .995, 2) - 9);
-  const leftFootTarget = locomoting
-    ? { x: -10 + walk * 8, y: standingFootY - Math.max(0, walk) * 2.8 }
-    : { x: -10, y: object.pose === 'brace' ? standingFootY - 3 * weight : standingFootY };
-  const rightFootTarget = locomoting
-    ? { x: 10 - walk * 8, y: standingFootY - Math.max(0, -walk) * 2.8 }
-    : { x: 10, y: object.pose === 'brace' ? standingFootY - 3 * weight : standingFootY };
-  if(object.pose==='sit'||object.onBoat) {
+  const activeLocomotion = locomoting && weight > .001;
+  const legSum=model.thighLength+model.shinLength;
+  const idleReach=legSum*.995;
+  const gaitReach=legSum*(model.horror?.965:.985);
+  const standingFootY = pelvis.y - crouch + (activeLocomotion
+    ? Math.sqrt(Math.max(4,gaitReach*gaitReach-(model.horror?11:7)**2))
+    : Math.sqrt(Math.max(4,idleReach*idleReach-9)));
+  const horrorFootL = model.horror ? -7.8 - characterRnd(model.seed, 309) * 4.4 : -10;
+  const horrorFootR = model.horror ? 8.2 + characterRnd(model.seed, 310) * 4.1 : 10;
+  const horrorFootLiftL = model.horror ? characterRnd(model.seed, 311) * 1.2 : 0;
+  const horrorFootLiftR = model.horror ? characterRnd(model.seed, 312) * .7 : 0;
+  const gaitLift=model.horror?1.55:2.8;
+  const leftFootTarget = activeLocomotion
+    ? { x: -10 + walk * 8, y: standingFootY - Math.max(0, walk) * gaitLift }
+    : { x: horrorFootL - (object.pose === 'brace' && model.horror ? 1.8 : 0), y: standingFootY - horrorFootLiftL };
+  const rightFootTarget = activeLocomotion
+    ? { x: 10 - walk * 8, y: standingFootY - Math.max(0, -walk) * gaitLift }
+    : { x: horrorFootR + (object.pose === 'brace' && model.horror ? 2.2 : 0), y: standingFootY - horrorFootLiftR };
+  const heldSeated=Boolean(object.sittingStyle)&&!['run','row','assist','aid','reach','tie','wipe','write','struggle','sink','surface','float-body','lie-down','cover-face'].includes(object.pose||'idle');
+  if(object.pose==='sit'||object.onBoat||heldSeated) {
     // Front-view sitting: thighs open symmetrically; calves drop vertically.
+    // A visual pose change (brace/point/gesture) may move the upper body while
+    // the established chair/ground posture stays planted.
     // Both feet remain below their knees rather than folding under the pelvis.
     const spread=model.thighLength*.85;
     const drop=Math.sqrt(model.thighLength**2-spread**2);
@@ -159,13 +263,14 @@ export function resolveCharacterRig(object: CanvasStudioObject, model: Character
       resting.y=pelvis.y+model.thighLength*.7+model.shinLength;
     }
   }
-  if (locomoting && travelDistance !== undefined) {
+  if (activeLocomotion && travelDistance !== undefined) {
     // A planted foot moves backward exactly as far as the body moves forward.
     // Swing follows traveled distance, so slow/eased walks don't skate.
     const direction = travelDistance < 0 ? -1 : 1;
     const cycle = 20;
     const phase = Math.abs(travelDistance) / cycle;
-    const ground = standingFootY + (24 + (model.thighLength + model.shinLength) * .945 - standingFootY) * weight;
+    const basePelvisY=model.horror?21.5:24;
+    const ground = standingFootY + (basePelvisY + (model.thighLength + model.shinLength) * (model.horror?.91:.945) - standingFootY) * weight;
     for (const [target, offset, base] of [[leftFootTarget, 0, -10], [rightFootTarget, .5, 10]] as const) {
       const p = (phase + offset) % 1;
       const swing = Math.max(0, (p - .6) / .4);
@@ -185,7 +290,10 @@ export function resolveCharacterRig(object: CanvasStudioObject, model: Character
     hipL, kneeL: leftLeg.joint, footL: leftLeg.end,
     hipR, kneeR: rightLeg.joint, footR: rightLeg.end,
     breath,
-    headTilt: object.expression === 'sad' ? -2 : object.expression === 'surprised' ? -1 : 0,
+    headTilt: (object.expression === 'sad' ? -2 : object.expression === 'surprised' ? -1 : 0)
+      + (model.horror && effectivePose !== 'run' ? (characterRnd(model.seed, 313) - .5) * 1.5 : 0)
+      + (effectivePose==='nod'?4.2*weight:0)
+      + (effectivePose==='brace'?-2.1*weight:0),
   };
 }
 

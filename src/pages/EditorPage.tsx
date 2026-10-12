@@ -61,6 +61,7 @@ import {
   cuesForDubbingTimeline,
   cuesToSrt,
   downloadText,
+  hasDubbingTimeline,
   isDubbableSubtitleCue,
   parseSubtitle,
   validateCues,
@@ -739,12 +740,16 @@ export function EditorPage({
         // Authored text stays at the current playhead; subtitle selection
         // still navigates to its cue. Editing either kind never requests a seek.
         if (cue.sourceKind !== "onscreen-text") {
-          currentTimeRef.current = cue.startMs;
-          setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: cue.startMs });
+          const seekMs = dubAudioUrl
+            && Number.isFinite(cue.dubbing?.timelineStartMs)
+            ? cue.dubbing!.timelineStartMs as number
+            : cue.startMs;
+          currentTimeRef.current = seekMs;
+          setSeekRequest({ id: ++seekRequestIdRef.current, timeMs: seekMs });
         }
       }
     },
-    [cues],
+    [cues, dubAudioUrl],
   );
   const focusCue = useCallback((id: string) => {
     setSelectedId(id);
@@ -1477,9 +1482,9 @@ export function EditorPage({
       onNotice(validation.errors[0] || "Subtitle không hợp lệ.", "error");
       return;
     }
-    const useRetimedTimeline = dubbingJob?.config.slowVideoToMatchSpeech === true;
-    const subtitleCues = cuesForDubbingTimeline(cues, useRetimedTimeline);
-    const retimedSuffix = useRetimedTimeline ? "-retimed" : "";
+    const useDubbingTimeline = hasDubbingTimeline(cues);
+    const subtitleCues = cuesForDubbingTimeline(cues, useDubbingTimeline);
+    const retimedSuffix = useDubbingTimeline ? "-dubbed" : "";
     if (format === "ass")
       downloadText(
         `autosub${retimedSuffix}.ass`,
@@ -2071,7 +2076,7 @@ export function EditorPage({
             onRegenerateVoice={regenerateCueVoice}
             regeneratingCueId={regeneratingCueId}
             voiceReady={dubbingJob?.status === "completed"}
-            slowVideoToMatchSpeech={dubbingJob?.config.slowVideoToMatchSpeech === true}
+            slowVideoToMatchSpeech={Boolean(dubAudioUrl)}
           />
         </aside>
         <aside className="editor-inspector" aria-label="Thuộc tính">
@@ -2209,8 +2214,8 @@ export function EditorPage({
               </div>
               <RangeInput
                 min={0}
-                max={1}
-                step={0.01}
+                max={5}
+                step={0.05}
                 value={effectiveDubAudioMix.dubVolume}
                 aria-label="Âm lượng giọng lồng tiếng"
                 onChange={(event) => updateDubAudioMix({ dubVolume: Number(event.target.value) })}

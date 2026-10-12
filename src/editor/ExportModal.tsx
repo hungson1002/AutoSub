@@ -14,6 +14,7 @@ import {
   cuesForDubbingTimeline,
   cuesToSrt,
   downloadText,
+  hasDubbingTimeline,
   validateCues,
 } from "../lib/subtitles";
 import { api, friendlyErrorMessage } from "../lib/api";
@@ -80,7 +81,9 @@ export function ExportModal({
   const [renderedVideo, setRenderedVideo] = useState<Blob>();
   const [videoResolution, setVideoResolution] = useState<"original" | "1080" | "720">("original");
   const hasDub = Boolean(dubTrack || dubbingJobId);
+  const useDubbingTimeline = hasDub || slowVideoToMatchSpeech || hasDubbingTimeline(cues);
   const controllerRef = useRef<AbortController | undefined>(undefined);
+  const activeExportIdRef = useRef<string | undefined>(undefined);
 
   const validateBeforeAction = () => {
     const validation = validateCues(cues);
@@ -93,7 +96,7 @@ export function ExportModal({
     if (!validateBeforeAction()) return;
     if (format === "video") return;
     try {
-      const timelineCues = cuesForDubbingTimeline(cues, slowVideoToMatchSpeech);
+      const timelineCues = cuesForDubbingTimeline(cues, useDubbingTimeline);
       if (format === "ass") downloadText("autosub-retimed.ass", cuesToAss(timelineCues, style), "text/x-ass");
       else downloadText(`autosub-${format}${slowVideoToMatchSpeech ? '-retimed' : ''}.srt`, cuesToSrt(timelineCues, format === "translated"), "application/x-subrip");
     } catch (error) {
@@ -118,7 +121,7 @@ export function ExportModal({
       onNotice?.("Điểm kết thúc phải nằm sau điểm bắt đầu.", "error");
       return;
     }
-    const exportCues = cuesForDubbingTimeline(cues, slowVideoToMatchSpeech)
+    const exportCues = cuesForDubbingTimeline(cues, useDubbingTimeline)
       .filter(
         (cue) =>
           cue.endMs > trimStartMs &&
@@ -145,6 +148,7 @@ export function ExportModal({
 
     const controller = new AbortController();
     const exportId = `export-${Date.now()}-${crypto.randomUUID()}`;
+    activeExportIdRef.current = exportId;
     controllerRef.current = controller;
     setWorking(true);
     setRenderProgress(1);
@@ -167,7 +171,7 @@ export function ExportModal({
           exportId,
           uploadId: asset?.uploadId,
           resolution: videoResolution,
-          crf: 20,
+          crf: 18,
           keepAudio: hasDub ? Boolean(dubbingAudioMix?.keepOriginal && !dubbingAudioMix.separateVocals) : true,
           originalVolume: dubbingAudioMix?.originalVolume ?? 0.25,
           dubVolume: dubbingAudioMix?.dubVolume ?? 1,
@@ -199,6 +203,7 @@ export function ExportModal({
     } finally {
       window.clearInterval(poll);
       controllerRef.current = undefined;
+      activeExportIdRef.current = undefined;
       setWorking(false);
     }
   };
@@ -409,6 +414,9 @@ export function ExportModal({
         message={renderStage}
         value={renderProgress}
         onCancel={() => {
+          if (format === "video" && activeExportIdRef.current) {
+            void api.cancelExport(activeExportIdRef.current).catch(() => undefined);
+          }
           controllerRef.current?.abort();
           setWorking(false);
         }}

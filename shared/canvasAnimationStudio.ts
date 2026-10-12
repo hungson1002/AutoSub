@@ -1,3 +1,5 @@
+import type {CanvasVectorScene,VectorDrawing} from './canvasVectorScene';
+
 export type CanvasBackgroundPreset = 'river' | 'paper' | 'night' | 'field' | 'room' | 'city' | 'underwater' | 'map';
 
 export type CanvasObjectKind = 'character' | 'ship' | 'stake' | 'text' | 'image' | 'shape' | 'prop';
@@ -7,7 +9,8 @@ export type CanvasPropVariant =
   | 'arrow' | 'map' | 'clock' | 'phone' | 'computer' | 'factory' | 'lightbulb'
   | 'question' | 'water' | 'bridge' | 'ghost'
   | 'door' | 'window' | 'bowl' | 'pipe' | 'bamboo' | 'table' | 'chair' | 'lantern'
-  | 'bed' | 'basket' | 'rope' | 'stairs' | 'floorboard' | 'note' | 'oar' | 'teapot' | 'sandals';
+  | 'bed' | 'basket' | 'rope' | 'stairs' | 'floorboard' | 'note' | 'oar' | 'teapot' | 'sandals' | 'pig' | 'pig-hoof'
+  | 'dog' | 'demon-dog';
 
 export type CanvasMotion =
   | 'none' | 'slide-left' | 'slide-right' | 'slide-up' | 'pop' | 'float'
@@ -15,7 +18,7 @@ export type CanvasMotion =
   | 'walk-left' | 'walk-right' | 'hit' | 'tilt-left' | 'tilt-right' | 'fall';
 
 export type CanvasExpression = 'neutral' | 'happy' | 'angry' | 'surprised' | 'sad' | 'afraid';
-export type CanvasCharacterPose = 'idle' | 'talk' | 'point' | 'run' | 'row' | 'brace' | 'celebrate' | 'lie-down' | 'cover-face' | 'sit' | 'reach' | 'wipe' | 'write' | 'tie' | 'aid' | 'assist' | 'struggle' | 'float-body';
+export type CanvasCharacterPose = 'idle' | 'talk' | 'gesture' | 'nod' | 'point' | 'run' | 'row' | 'brace' | 'celebrate' | 'lie-down' | 'cover-face' | 'sit' | 'reach' | 'wipe' | 'write' | 'tie' | 'aid' | 'assist' | 'struggle' | 'float-body';
 
 export type CanvasSpriteClip = {
   /** Pixel size of one cell in the sheet. */
@@ -44,9 +47,11 @@ export type CanvasCameraMotion = 'none' | 'push-in' | 'pull-out' | 'pan-left' | 
 export type CanvasEffectType = 'speed-lines' | 'impact' | 'splash' | 'smoke' | 'dust' | 'arrows' | 'glow' | 'vignette' | 'flashlight';
 
 export type CanvasAnimationAction =
+  | 'pull' | 'release'
   | 'grab' | 'struggle' | 'sink' | 'surface'
   | 'reach' | 'wipe' | 'write' | 'tie' | 'aid' | 'assist'
   | 'talk'
+  | 'gesture' | 'nod'
   | 'point'
   | 'react'
   | 'celebrate'
@@ -69,6 +74,40 @@ export type CanvasAnimationBeat = {
   speechCue?: string;
   dialogueId?: string;
   focusTargetId?: string;
+};
+
+/**
+ * Editorial change inside one continuous shot. Visual beats are intentionally
+ * higher-level than animationBeats: they add/remove a layer, change a held pose,
+ * dim a practical light, draw a clue, or make a tiny focus shift without
+ * rebuilding the stage or cutting to a new scene.
+ */
+export type CanvasVisualBeatAction =
+  | 'reveal-layer'
+  | 'hide-layer'
+  | 'pose-change'
+  | 'expression-change'
+  | 'look-at'
+  | 'light-change'
+  | 'draw-on'
+  | 'focus-shift';
+
+export type CanvasVisualBeat = {
+  id: string;
+  atMs: number;
+  durationMs: number;
+  action: CanvasVisualBeatAction;
+  targetIds: string[];
+  speechCue?: string;
+  focusTargetId?: string;
+  pose?: CanvasCharacterPose;
+  expression?: CanvasExpression;
+  opacity?: number;
+  lightLevel?: number;
+  /** Tiny relative camera change. Horror grammar clamps this heavily. */
+  cameraZoomDelta?: number;
+  cameraDx?: number;
+  cameraDy?: number;
 };
 
 /**
@@ -117,6 +156,8 @@ export type CanvasObjectKeyframe = {
   doorOpen?: number;
   boxOpen?: number;
   lightLevel?: number;
+  /** 0..1 authored ink/detail reveal for note/map style clue inserts. */
+  revealProgress?: number;
   dx?: number;
   dy?: number;
   scale?: number;
@@ -125,25 +166,38 @@ export type CanvasObjectKeyframe = {
   pose?: CanvasCharacterPose;
   expression?: CanvasExpression;
   facing?: CanvasFacing;
+  /** Held gaze target; later keyframes may redirect it without a scene cut. */
+  lookAtId?: string;
+  /** Internal provenance so post-TTS cue alignment can retime only derived visual frames. */
+  visualBeatId?: string;
+  visualBeatPhase?: 'start' | 'end';
   easing?: CanvasKeyframeEase;
 };
 
-/** Camera track uses relative offsets so semantic focal framing remains intact. */
+/** Camera track uses relative dx/dy and absolute zoom; it replaces preset motion. */
 export type CanvasCameraKeyframe = {
   atMs: number;
   dx?: number;
   dy?: number;
   zoom?: number;
   rotation?: number;
+  visualBeatId?: string;
+  visualBeatPhase?: 'start' | 'end';
   easing?: CanvasKeyframeEase;
 };
 
 export type CanvasStudioObject = {
   id: string;
-  appearance?: 'human' | 'water-spirit';
+  appearance?: 'human' | 'water-spirit' | 'long-limbed-spirit';
+  /** A perched character rests on the branch of this tree object. */
+  perchedOn?: string;
+  /** Last inferred folk reclining angle; a different authored rotation takes precedence. */
+  folkReclineAngle?: number;
   voiceGender?: 'male' | 'female';
   /** Water masks the submerged geometry; opacity never substitutes for depth. */
   waterlineY?: number;
+  /** Absolute scene-space floor contact used by grounded procedural actors. */
+  groundY?: number;
   recliningStyle?: 'covered' | 'exposed';
   /** Architectural attachment resolved by layout, rather than a free prop. */
   environmentAnchor?: 'doorway' | 'free';
@@ -153,9 +207,18 @@ export type CanvasStudioObject = {
   boxOpen?: number;
   /** Light changes without hiding the physical lamp. */
   lightLevel?: number;
+  /** 0..1 reveal amount used by clue assets that are drawn progressively. */
+  revealProgress?: number;
   lightSignal?: { pattern: 'distress' | 'acknowledge'; offsetMs?: number };
+  /** Static prop rests on another semantic prop's authored top surface. */
+  restingOn?: string;
+  /** Horizontal offset as a fraction of the support prop width (-1..1). */
+  restingOffsetX?: number;
   /** Procedural prop handle follows this actor's right hand. */
   heldBy?: string;
+  heldHand?: 'left' | 'right';
+  /** Cue-derived contact transaction; layout defines its resting position. */
+  handling?: {actorId:string;kind:'pick-up'|'place';atMs:number;durationMs:number};
   /** A held teapot pours toward this bowl's center. */
   pouringInto?: string;
   tiedTo?: string;
@@ -209,9 +272,10 @@ export type CanvasStudioObject = {
   facing?: CanvasFacing;
   role?: CanvasObjectRole;
   variant?: CanvasPropVariant;
+  hoofCount?: 4 | 5;
   characterKey?: string;
   /** Cast-wide art direction; scenery must not change facial proportions. */
-  visualStyle?: 'story' | 'horror';
+  visualStyle?: 'story' | 'horror' | 'folk-horror';
   archetype?: CanvasCharacterArchetype;
   hair?: CanvasHairStyle;
   secondaryColor?: string;
@@ -245,9 +309,11 @@ export type CanvasSceneEffect = {
   startMs?: number;
   durationMs?: number;
   zIndex?: number;
+  /** Light follows this object's evaluated position, including a held prop. */
+  sourceObjectId?: string;
 };
 
-export type CanvasSoundPreset = 'knock' | 'scratch' | 'cloth' | 'fire' | 'wind' | 'footstep' | 'door-creak';
+export type CanvasSoundPreset = 'knock' | 'scratch' | 'cloth' | 'fire' | 'wind' | 'footstep' | 'door-creak' | 'water' | 'splash' | 'dog-howl' | 'pig-grunt' | 'bell' | 'horror-score';
 export type CanvasSoundCue = {
   id: string;
   preset: CanvasSoundPreset;
@@ -276,11 +342,94 @@ export type CanvasDialogueLine = {
   audioKey?: string;
 };
 
+export type CanvasSpecSky = 'night' | 'dusk' | 'dawn' | 'overcast' | 'day';
+export type CanvasSpecGround = 'dirt-path' | 'grass' | 'rice-field' | 'stone-yard' | 'mud' | 'water-edge';
+export type CanvasSpecStructureKind = 'stilt-house' | 'ground-house' | 'shrine' | 'village-gate' | 'well' | 'grave-mound' | 'fence' | 'buffalo-shed' | 'footbridge' | 'altar-table';
+export type CanvasSpecStructure = {
+  kind: CanvasSpecStructureKind;
+  /** Horizontal anchor, 0 (left) to 1 (right). */
+  x: number;
+  /** 0.5 (far/small) to 1.6 (near/large). */
+  scale?: number;
+  /** Warm lamp or window light. */
+  lit?: boolean;
+};
+/**
+ * Layered description of a brand-new location. The renderer composes it from
+ * shared JS canvas building blocks so each story can have places that were
+ * never hand-drawn as a dedicated background.
+ */
+export type CanvasBackgroundSpec = {
+  sky: CanvasSpecSky;
+  moon?: boolean;
+  /** Number of mountain/hill ridges, 0-3. */
+  ridges?: number;
+  ground: CanvasSpecGround;
+  structures?: CanvasSpecStructure[];
+  /** Background trees, 0-8. */
+  trees?: number;
+  /** Ground fog density, 0-1. */
+  fog?: number;
+  /** Optional warm practical light on the ground, x 0-1. */
+  lampX?: number;
+  palette?: 'cold' | 'warm' | 'ash';
+};
+
+export type CanvasVectorDirection = {
+  /** Purposeful background work; [] deliberately keeps the ensemble still.
+   * Native crowded markets supply sensible defaults when omitted. */
+  backgroundActions?: Array<{actor:string;activity:'pass'|'visit'|'attend'|'converse'|'hold';partner?:string}>;
+  /** A new chapter/time jump may deliberately discard the preceding state. */
+  continuity?: 'continue'|'reset';
+  /** End hand ownership changes only at a visible, narrated event. */
+  propEvents?: Array<{prop:string;action:'take'|'release';cue:string}>;
+  purpose: string;
+  location: string;
+  /** Actors present in this view, including cue-timed entrances. [] is an empty set. */
+  visibleCast?: string[];
+  /** Explicit occupied hands for this shot; geometry comes from asset grips. */
+  heldProps?: Array<{actor:string;arm:'l'|'r';prop:string;hang?:boolean}>;
+  shot: {size:'wide'|'action'|'detail'|'reaction';focus:string;include:string[];framing?:'context'|'close'};
+  beats: Array<{
+    cue:string; kind:'motion'|'travel'|'row'|'strike'|'reveal'|'hide'|'hold';
+    targets:string[]; motionTargets:string[]; before:string; after:string;
+    /** Executable destination; the illustrator supplies geometry, not timing. */
+    travel?: {actor:string;to:string;gap?:number;followDepth?:boolean};
+    /** A locked whole-body pose change, executed by the compact rig. */
+    turn?: {actor:string;from:'front'|'back'|'left'|'right';to:'front'|'back'|'left'|'right'};
+    /** Cue-linked compact performance, independent of illustrator keyframes. */
+    fear?: {actor:string;level:'uneasy'|'terrified'};
+  }>;
+};
+
 export type CanvasStudioScene = {
   id: string;
   name: string;
   durationMs: number;
-  atmosphere?: { rainIntensity?: number; waterIntensity?: number; timeOffsetMs?: number; timeOfDay?: 'day' | 'dusk' | 'night' };
+  /** Stable physical set/location identity reused across editorial cuts. */
+  stageId?: string;
+  /** Derived continuous dialogue stage; preview must retain its compiled geometry. */
+  dialogueLayout?: boolean;
+  /**
+   * Compiled camera continuity basis. Recurring characters listed here keep
+   * ownership of camera auto-fit across same-stage additive scene boundaries;
+   * newly introduced support actors must not recenter the whole frame.
+   */
+  continuityCameraCharacterKeys?: string[];
+  atmosphere?: {
+    rainIntensity?: number;
+    waterIntensity?: number;
+    timeOffsetMs?: number;
+    timeOfDay?: 'day' | 'dusk' | 'night';
+    /** Continuous low-amplitude ambience, independent from story actions. */
+    fogDrift?: number;
+    dustMotes?: number;
+    filmGrain?: number;
+    shadowBreath?: number;
+    fireFlicker?: number;
+    lampBreath?: number;
+    wind?: number;
+  };
   /** Preserve continuous narration captions through authored coverage cuts. */
   captionTrack?: {text:string;durationMs:number;offsetMs:number};
   /** Composition template chosen semantically, then compiled into pixel layout. */
@@ -288,6 +437,8 @@ export type CanvasStudioScene = {
   background: CanvasBackgroundPreset;
   /** Authored environment composition. Production plans must use a registered ref. */
   backgroundRef?: string;
+  /** Layered new-location spec; rendered when backgroundRef is 'bg:composed'. */
+  backgroundSpec?: CanvasBackgroundSpec;
   /** Full-frame illustrated plate generated for this shot/background family. */
   backgroundImageUrl?: string;
   backgroundAssetId?: string;
@@ -306,22 +457,41 @@ export type CanvasStudioScene = {
   effects?: CanvasSceneEffect[];
   /** Semantic choreography events compiled into pose/state/secondary motion at render time. */
   animationBeats?: CanvasAnimationBeat[];
+  /** Editorial changes that happen inside one continuous stage/camera shot. */
+  visualBeats?: CanvasVisualBeat[];
   /**
    * Explicit voice-activity windows driving mouth motion. When omitted the
    * renderer derives pauses from talk beats; scenes without talk beats keep
    * the legacy always-animating mouth so old projects render unchanged.
    */
   lipSync?: Array<{ startMs: number; endMs: number }>;
+  /** Fully authored vector stage, independent of the preset layout compiler. */
+  vectorScene?: CanvasVectorScene;
+  vectorStageId?: string;
+  vectorBeats?: Array<{cue:string;targets:string[]}>;
+  /** Locked screenplay and observable action requirements, independent of artwork. */
+  vectorDirection?: CanvasVectorDirection;
+  /** Derived shot sizing applied once; later explicit camera repairs win. */
+  vectorFramingVersion?: 1;
+  /** Derived references for the frame renderer; source assets live on the project. */
+  vectorAssetLibrary?: Record<string,VectorDrawing>;
   objects: CanvasStudioObject[];
 };
 
 export type CanvasStudioProject = {
+  vectorStory?: {premise:string;stakes:string;turn:string;ending:string};
+  vectorAssets?: Record<string,VectorDrawing>;
+  vectorStages?: Record<string,CanvasVectorScene>;
+  vectorStyleReferences?:string[];
+  vectorReview?: {pass:boolean; rounds:number; previewDirectory:string;issues?:Array<{sceneId:string;problem:string;fix:string}>};
   version: 1;
   id: string;
   name: string;
   width: number;
   height: number;
   fps: number;
+  /** Optional final runtime: uniformly retime pictures and sound at export. */
+  exportDurationMs?: number;
   createdAt?: string;
   updatedAt?: string;
   sourcePrompt?: string;
@@ -342,6 +512,15 @@ export type CanvasStudioProject = {
 };
 
 export const CANVAS_STUDIO_VERSION = 1 as const;
+
+export function canvasExportFramePlan(project:CanvasStudioProject){
+  const frames=project.scenes.map(scene=>Math.max(1,Math.round(Math.max(1,scene.durationMs)/1000*project.fps)));
+  if(project.exportDurationMs===undefined)return frames;
+  const source=frames.reduce((a,b)=>a+b,0),target=Math.round(project.exportDurationMs/1000*project.fps);
+  if(!Number.isFinite(target)||target<frames.length||target/source<.8||target/source>1.2)throw new Error('Export runtime must stay within 20% of the voiced film');
+  let elapsed=0,allocated=0;
+  return frames.map(n=>{elapsed+=n;const end=Math.round(elapsed*target/source),count=end-allocated;allocated=end;return count;});
+}
 
 export function createCanvasObject(
   kind: CanvasObjectKind,

@@ -14,9 +14,11 @@ export type EvaluatedObjectKeyframe = {
   doorOpen?: number;
   boxOpen?: number;
   lightLevel?: number;
+  revealProgress?: number;
   pose?: CanvasObjectKeyframe['pose'];
   expression?: CanvasObjectKeyframe['expression'];
   facing?: CanvasObjectKeyframe['facing'];
+  lookAtId?: string;
 };
 
 export type EvaluatedCameraKeyframe = {
@@ -70,16 +72,15 @@ function segment<T extends { atMs: number; easing?: CanvasKeyframeEase }>(frames
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
-function numberAt<T extends Record<string, unknown>>(
-  from: T,
-  to: T,
-  key: keyof T,
-  t: number,
-  fallback: number,
+function trackNumber<T extends { atMs: number; easing?: CanvasKeyframeEase }>(
+  frames: T[], key: keyof T, timeMs: number, fallback: number,
 ) {
-  const a = Number.isFinite(Number(from[key])) ? Number(from[key]) : fallback;
-  const b = Number.isFinite(Number(to[key])) ? Number(to[key]) : a;
-  return lerp(a, b, t);
+  const track = frames.filter(frame => frame[key] !== undefined && Number.isFinite(Number(frame[key])));
+  if (!track.length) return fallback;
+  const first = track[0]!;
+  if (first.atMs > 0) track.unshift({ ...first, atMs: 0, [key]: fallback });
+  const current = segment(track, timeMs)!;
+  return lerp(Number(current.from[key]), Number(current.to[key]), current.t);
 }
 
 function heldState<T extends { atMs: number }>(frames: T[], timeMs: number, key: keyof T) {
@@ -97,27 +98,28 @@ export function evaluateObjectKeyframes(
 ): EvaluatedObjectKeyframe {
   const list = ordered(frames);
   if (!list.length) return { dx: 0, dy: 0, scale: 1, rotation: 0, opacity: 1 };
-  const current = segment(list, timeMs)!;
-  const { from, to, t } = current;
-  // A position/expression key must not interrupt an independent wrapping track.
-  const bandage = segment(list.filter(frame=>frame.bandageProgress!==undefined),timeMs);
+  // Numeric channels are independent: an expression key cannot reset travel
+  // or visibility after that channel's last authored value.
   return {
-    dx: numberAt(from, to, 'dx', t, 0),
-    dy: numberAt(from, to, 'dy', t, 0),
-    scale: Math.max(.01, numberAt(from, to, 'scale', t, 1)),
-    rotation: numberAt(from, to, 'rotation', t, 0),
-    opacity: Math.max(0, Math.min(1, numberAt(from, to, 'opacity', t, 1))),
+    dx: trackNumber(list, 'dx', timeMs, 0),
+    dy: trackNumber(list, 'dy', timeMs, 0),
+    scale: Math.max(.01, trackNumber(list, 'scale', timeMs, 1)),
+    rotation: trackNumber(list, 'rotation', timeMs, 0),
+    opacity: Math.max(0, Math.min(1, trackNumber(list, 'opacity', timeMs, 1))),
     doorOpen: list.some(frame => frame.doorOpen !== undefined)
-      ? Math.max(0, Math.min(1, numberAt(from, to, 'doorOpen', t, Number(heldState(list, from.atMs, 'doorOpen') ?? 0)))) : undefined,
+      ? clamp01(trackNumber(list, 'doorOpen', timeMs, 0)) : undefined,
     lightLevel: list.some(frame => frame.lightLevel !== undefined)
-      ? Math.max(0, Math.min(1, numberAt(from, to, 'lightLevel', t, Number(heldState(list, from.atMs, 'lightLevel') ?? 1)))) : undefined,
-    bandageProgress: bandage
-      ? Math.max(0, Math.min(1, numberAt(bandage.from, bandage.to, 'bandageProgress', bandage.t, 0))) : undefined,
+      ? clamp01(trackNumber(list, 'lightLevel', timeMs, 1)) : undefined,
+    revealProgress: list.some(frame => frame.revealProgress !== undefined)
+      ? clamp01(trackNumber(list, 'revealProgress', timeMs, 0)) : undefined,
+    bandageProgress: list.some(frame => frame.bandageProgress !== undefined)
+      ? clamp01(trackNumber(list, 'bandageProgress', timeMs, 0)) : undefined,
     boxOpen: list.some(frame => frame.boxOpen !== undefined)
-      ? Math.max(0, Math.min(1, numberAt(from, to, 'boxOpen', t, Number(heldState(list, from.atMs, 'boxOpen') ?? 0)))) : undefined,
+      ? clamp01(trackNumber(list, 'boxOpen', timeMs, 0)) : undefined,
     pose: heldState(list, timeMs, 'pose') as EvaluatedObjectKeyframe['pose'],
     expression: heldState(list, timeMs, 'expression') as EvaluatedObjectKeyframe['expression'],
     facing: heldState(list, timeMs, 'facing') as EvaluatedObjectKeyframe['facing'],
+    lookAtId: heldState(list, timeMs, 'lookAtId') as string | undefined,
   };
 }
 
@@ -127,12 +129,10 @@ export function evaluateCameraKeyframes(
 ): EvaluatedCameraKeyframe {
   const list = ordered(frames);
   if (!list.length) return { dx: 0, dy: 0, zoom: 1, rotation: 0 };
-  const current = segment(list, timeMs)!;
-  const { from, to, t } = current;
   return {
-    dx: numberAt(from, to, 'dx', t, 0),
-    dy: numberAt(from, to, 'dy', t, 0),
-    zoom: Math.max(.05, numberAt(from, to, 'zoom', t, 1)),
-    rotation: numberAt(from, to, 'rotation', t, 0),
+    dx: trackNumber(list, 'dx', timeMs, 0),
+    dy: trackNumber(list, 'dy', timeMs, 0),
+    zoom: Math.max(.05, trackNumber(list, 'zoom', timeMs, 1)),
+    rotation: trackNumber(list, 'rotation', timeMs, 0),
   };
 }

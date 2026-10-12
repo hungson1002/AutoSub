@@ -1,6 +1,7 @@
 import type { CanvasStudioProject } from './types';
 import { projectDurationMs, resolveProjectTime } from './runtime';
 import { validateCanvasBeat } from '../../shared/canvasBeats';
+import { compileCanvasProjectLayout } from '../../shared/canvasLayoutCompiler';
 
 // renderer.ts pulls DOM + flubber ESM, so it is lazy-loaded inside
 // recordPureCanvasProject(). Pure helpers stay import-safe under node tests.
@@ -106,6 +107,7 @@ export async function recordPureCanvasProject(
   const errors = validateCanvasExportProject(project);
   if (errors.length) throw new Error(`Project chưa đủ điều kiện xuất thuần: ${errors[0]}`);
   if (typeof document === 'undefined') throw new Error('Xuất thuần Canvas cần chạy trong trình duyệt.');
+  project = compileCanvasProjectLayout(project);
   const { assetOrigin, withAudio = true, onProgress, signal } = options;
   signal?.throwIfAborted();
 

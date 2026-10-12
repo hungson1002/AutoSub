@@ -58,6 +58,42 @@ test('missing extraction progress is reported as failed instead of running forev
   }
 });
 
+test('explicit STT cancellation aborts provider work even while the HTTP client stays connected', { timeout: 15000 }, async () => {
+  const directory = await createUploadSession();
+  const uploadId = path.basename(directory);
+  const app = Fastify({ logger: false });
+  const originalFetch = globalThis.fetch;
+  let started!: () => void;
+  const providerStarted = new Promise<void>((resolve) => { started = resolve; });
+  let aborted = false;
+  try {
+    await writeFile(path.join(directory, 'source.wav'), Buffer.alloc(44));
+    await writeFile(path.join(directory, 'upload.json'), JSON.stringify({ uploadId, filename: 'source.wav', contentType: 'audio/wav', size: 44, storedPath: path.posix.join('uploads', uploadId, 'source.wav') }));
+    globalThis.fetch = (async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      const abort = () => { aborted = true; reject(new DOMException('Aborted', 'AbortError')); };
+      init?.signal?.addEventListener('abort', abort, { once: true });
+      started();
+      if (init?.signal?.aborted) abort();
+    })) as typeof fetch;
+    await extractionRoutes(app);
+    await app.ready();
+    const running = app.inject({ method: 'POST', url: '/api/extract/stt', payload: { uploadId, progressId: 'cancel-regression', provider: { id: 'cancel-provider', name: 'test', baseUrl: 'https://api.groq.com/openai/v1', enabled: true, models: [], providerType: 'groq', authType: 'none', capabilities: { stt: true } }, model: 'whisper-large-v3-turbo' } }).then((response) => response);
+    await providerStarted;
+    const cancel = await app.inject({ method: 'POST', url: '/api/extract/progress/cancel-regression/cancel' });
+    assert.equal(cancel.json().cancelled, true);
+    await running;
+    assert.equal(aborted, true);
+    const progress = await app.inject({ method: 'GET', url: '/api/extract/progress/cancel-regression' });
+    assert.equal(progress.json().status, 'cancelled');
+    const again = await app.inject({ method: 'POST', url: '/api/extract/progress/cancel-regression/cancel' });
+    assert.equal(again.json().cancelled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await app.close();
+    await cleanupUploadSession(directory);
+  }
+});
+
 test('STT extraction chunks oversized Groq audio and drops transcript from a silent fixture', async () => {
   const directory = await createUploadSession();
   const uploadId = path.basename(directory);

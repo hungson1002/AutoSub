@@ -117,17 +117,62 @@ export async function testModel(provider: AIProvider, model: string, capability:
   }
 }
 
+async function streamedChatContent(response: Response, provider: AIProvider): Promise<string> {
+  if (!response.ok) await providerResponseError(response, provider, 'Provider chat không phản hồi.');
+  if (!response.body) throw new ProviderError('Provider trả về stream rỗng.', 502);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = '', content = '', finished = false;
+  const consumeLine = (line: string) => {
+    if (!line.startsWith('data:')) return;
+    const raw = line.slice(5).trim();
+    if (!raw) return;
+    if (raw === '[DONE]') { finished = true; return; }
+    const data = JSON.parse(raw) as { error?: { message?: string }; choices?: Array<{ delta?: { content?: unknown }; finish_reason?: string | null }> };
+    if (data.error) throw new ProviderError(data.error.message || 'Provider chat stream thất bại.', 502);
+    const choice = data.choices?.[0];
+    content += responseText(choice?.delta?.content);
+    if (choice?.finish_reason === 'length') throw new ProviderError('Provider chat bị cắt do giới hạn token.', 502);
+    if (choice?.finish_reason) finished = true;
+  };
+  try {
+    while (!finished) {
+      const chunk = await reader.read();
+      pending += decoder.decode(chunk.value, { stream: !chunk.done });
+      let newline: number;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        consumeLine(pending.slice(0, newline).replace(/\r$/, ''));
+        pending = pending.slice(newline + 1);
+      }
+      if (chunk.done) { if (pending) consumeLine(pending); break; }
+    }
+    if (!finished) throw new ProviderError('Provider ngắt stream trước khi hoàn tất nội dung.', 502);
+    return content;
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
 export async function chat(provider: AIProvider, model: string, messages: Array<{ role: 'system' | 'user'; content: string | Array<Record<string, unknown>> }>, signal?: AbortSignal, maxTokens?: number) {
   const url = withAuthQuery(endpoint(provider, 'chat', '/chat/completions'), provider);
+  // Large scene plans can exceed fetch's headers timeout when buffered by the
+  // provider. Receive headers and chunks immediately; retain the caller's deadline.
+  const stream = Boolean(maxTokens && maxTokens >= 12_000);
   let response: Response;
   try {
-    response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, temperature: 0.2, stream: false, ...(maxTokens ? { max_tokens: maxTokens } : {}) }) });
+    response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers(provider) }, signal, body: JSON.stringify({ model, messages, temperature: 0.2, stream, ...(maxTokens ? { max_tokens: maxTokens } : {}) }) });
   } catch (error) {
     if (signal?.aborted) throw error;
     const cause = error && typeof error === 'object' && 'cause' in error ? (error as { cause?: { code?: unknown; message?: unknown } }).cause : undefined;
     const code = cause?.code ? String(cause.code) : '';
     const detail = cause?.message ? String(cause.message) : '';
     throw new ProviderError(`Không thể kết nối provider viết kịch bản “${provider.name}” tại ${url}.${code ? ` Mã mạng: ${code}.` : ''}${detail ? ` ${detail}` : ''}`, 502);
+  }
+  if (response.headers.get('content-type')?.includes('text/event-stream')) {
+    const content = await streamedChatContent(response, provider);
+    if (!content.trim()) throw new ProviderError('Provider không trả về message content.');
+    return content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   }
   const data = await responseJson(response, provider, 'Provider chat không phản hồi.');
   const choices = Array.isArray(data.choices) ? data.choices : [];

@@ -1,13 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { blurRegionWindowSeconds, boundedSourceVideoBitrate, buildSlowVideoFilter, embeddedFontFamily, replaceAssFontFamily, safeDrawtextPosition } from "./export";
+import { blurRegionWindowSeconds, buildSlowVideoFilter, embeddedFontFamily, h264QualityArgs, replaceAssFontFamily, safeDrawtextPosition } from "./export";
 
-test("export bitrate follows the source instead of unconstrained CRF output", () => {
-  assert.equal(boundedSourceVideoBitrate(900_000, 1_050_000), 900_000);
-  assert.equal(boundedSourceVideoBitrate(undefined, 1_060_000), 900_000);
-  assert.equal(boundedSourceVideoBitrate(undefined, undefined), 2_500_000);
-  assert.equal(boundedSourceVideoBitrate(100_000_000, 100_200_000), 40_000_000);
+test("filtered export uses quality-based H.264 encoding instead of source bitrate caps", () => {
+  const x264 = h264QualityArgs("libx264", 18);
+  assert.deepEqual(x264.slice(0, 6), ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]);
+  assert.equal(x264.includes("-b:v"), false);
+
+  const nvenc = h264QualityArgs("h264_nvenc", 18);
+  assert.ok(nvenc.includes("p5"));
+  assert.ok(nvenc.includes("-cq"));
+  assert.equal(nvenc[nvenc.indexOf("-cq") + 1], "18");
+  assert.equal(nvenc[nvenc.indexOf("-b:v") + 1], "0");
+  assert.equal(nvenc.includes("-maxrate"), false);
+
+  const qsv = h264QualityArgs("h264_qsv", 18);
+  assert.equal(qsv[qsv.indexOf("-global_quality") + 1], "18");
+  assert.ok(qsv.includes("medium"));
+
+  const amf = h264QualityArgs("h264_amf", 18);
+  assert.ok(amf.includes("qvbr"));
+  assert.equal(amf[amf.indexOf("-qvbr_quality_level") + 1], "18");
+
+  assert.equal(h264QualityArgs("libx264", 2)[5], "16");
+  assert.equal(h264QualityArgs("libx264", 99)[5], "35");
 });
 
 test("export replaces an uploaded browser font alias in every ASS style and cue", () => {

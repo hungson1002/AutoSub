@@ -18,6 +18,13 @@ export type DubbingRunOptions = { slowVideoToMatchSpeech: boolean; audioMix: { m
 type VoiceItem = { id: string; name?: string; language?: string; source?: 'preset' | 'clone'; description?: string };
 const voiceBookmarksStorageKey = 'autosub.voice-bookmarks';
 
+function dubbingJobStageLabel(job: DubbingJobStatus) {
+  if (job.finalization?.stage === 'continuous') return `Đang tạo thoại liền mạch · ${job.finalization.completed}/${job.finalization.total} cụm`;
+  if (job.finalization?.stage === 'mixing') return 'Đang ghép âm thanh';
+  if (job.finalization?.stage === 'mastering' || job.doneCues === job.totalCues) return 'Đang hoàn thiện âm thanh';
+  return 'Đang tạo giọng theo cue';
+}
+
 function loadVoiceBookmarks() {
   try {
     const value = JSON.parse(localStorage.getItem(voiceBookmarksStorageKey) || '[]');
@@ -49,12 +56,12 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const previewRequestRef = useRef(0);
-  const kokoroProvider = providers.find((item) => item.enabled && resolvedProviderType(item) === 'kokoro-local');
   const configuredAssignmentOptions = availableAssignments.length ? availableAssignments : [assignments.G1];
-  const kokoroAssignment = kokoroProvider ? { providerId: kokoroProvider.id, model: kokoroProvider.models[0]?.id || 'kokoro-v1.0' } : undefined;
-  const assignmentOptions = kokoroAssignment && !configuredAssignmentOptions.some((item) => item.providerId === kokoroAssignment.providerId && item.model === kokoroAssignment.model)
-    ? [...configuredAssignmentOptions, kokoroAssignment]
-    : configuredAssignmentOptions;
+  const localAssignments = providers
+    .filter((item) => item.enabled && ['kokoro-local', 'zerotts-local'].includes(resolvedProviderType(item)))
+    .map((item) => ({ providerId: item.id, model: item.models[0]?.id || (resolvedProviderType(item) === 'zerotts-local' ? 'zerotts-v0.1.5' : 'kokoro-v1.0') }))
+    .filter((item) => !configuredAssignmentOptions.some((configured) => configured.providerId === item.providerId && configured.model === item.model));
+  const assignmentOptions = [...configuredAssignmentOptions, ...localAssignments];
   const current = configs[active];
   const currentProvider = providers.find((item) => item.id === current.assignment.providerId);
   const providerType = currentProvider ? resolvedProviderType(currentProvider) : undefined;
@@ -64,6 +71,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
   const isCapCutTts = providerType === 'capcut-tts';
   const isEdgeTts = providerType === 'edge-tts';
   const isVieneuLocal = providerType === 'vieneu-local';
+  const isZeroTtsLocal = providerType === 'zerotts-local';
   const isKokoroLocal = providerType === 'kokoro-local';
   const voiceItems = (isHiiuTts ? (currentProvider?.models || []).map((model) => ({ id: model.id, name: model.name || model.id })) : currentProvider ? loadedVoices[currentProvider.id] || currentProvider.voices || [] : []) as VoiceItem[];
   const voiceSource = (voice: VoiceItem) => voice.source || (isVieneuLocal ? (voice.id.startsWith('preset:') ? 'preset' : 'clone') : undefined);
@@ -119,7 +127,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
     void api.system().then((system) => setDemucsAvailable(system.demucs)).catch(() => setDemucsAvailable(false));
   }, [open]);
   useEffect(() => {
-    if (!open || !currentProvider || (!isVieneuLocal && !isEdgeTts)) return;
+    if (!open || !currentProvider || (!isVieneuLocal && !isZeroTtsLocal && !isEdgeTts)) return;
     const controller = new AbortController();
     void api.listVoices(currentProvider, controller.signal).then(({ voices }) => {
       setLoadedVoices((current) => ({ ...current, [currentProvider.id]: voices }));
@@ -132,7 +140,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
       if (!(error instanceof DOMException && error.name === 'AbortError')) notify(friendlyErrorMessage(error, isEdgeTts ? 'Không thể tải danh sách giọng Edge TTS.' : 'Không thể tải danh sách giọng clone.'), 'error');
     });
     return () => controller.abort();
-  }, [open, active, currentProvider?.id, isEdgeTts, isVieneuLocal]);
+  }, [open, active, currentProvider?.id, isEdgeTts, isVieneuLocal, isZeroTtsLocal]);
   useEffect(() => {
     const close = (event: PointerEvent) => { if (!voicePickerRef.current?.contains(event.target as Node)) setVoiceOpen(false); };
     document.addEventListener('pointerdown', close);
@@ -198,10 +206,10 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
       <div className="voice-tabs">{groups.map((group) => <button className={active === group ? 'active' : ''} key={group} onClick={() => setActive(group)}><strong>{group}</strong><small>{cues.filter((cue) => cue.voiceGroup === group).length} cue</small></button>)}</div>
       <div className="voice-config">
         <div className="voice-heading"><div className="voice-avatar">{active}</div><div><h3>Voice group {active}</h3><p>Ưu tiên video · giữ nguyên thời lượng gốc</p></div></div>
-        <CapabilityAssignmentPicker capability="tts" assignments={assignmentOptions} providers={providers} value={current.assignment} onChange={(assignment) => { const nextProvider = providers.find((item) => item.id === assignment.providerId); const nextType = nextProvider ? resolvedProviderType(nextProvider) : undefined; patchCurrent({ assignment, voice: nextType === 'hiiu-tts' ? assignment.model : nextType === 'kokoro-local' ? nextProvider?.voices?.[0]?.id || '' : '' }); }} label="TTS Provider + Model" />
+        <CapabilityAssignmentPicker capability="tts" assignments={assignmentOptions} providers={providers} value={current.assignment} onChange={(assignment) => { const nextProvider = providers.find((item) => item.id === assignment.providerId); const nextType = nextProvider ? resolvedProviderType(nextProvider) : undefined; patchCurrent({ assignment, voice: nextType === 'hiiu-tts' ? assignment.model : (nextType === 'kokoro-local' || nextType === 'zerotts-local') ? nextProvider?.voices?.[0]?.id || '' : '' }); }} label="TTS Provider + Model" />
         <AssignmentSummary label="TTS Provider đang dùng" assignment={current.assignment} provider={currentProvider} capability="tts" />
-        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : isEdgeTts ? 'Giọng đọc · Microsoft Edge TTS' : isVieneuLocal ? 'Giọng đọc · VieNeu Local' : isKokoroLocal ? 'Giọng đọc · Kokoro English' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
-          {(isElevenLabs || isHiiuTts || isCapCutTts || isEdgeTts || isVieneuLocal || isKokoroLocal) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
+        <div className="field"><span>{isHiiuTts ? 'Giọng đọc · HiiuTTS' : isCapCutTts ? 'Giọng đọc · CapCut TTS' : isEdgeTts ? 'Giọng đọc · Microsoft Edge TTS' : isVieneuLocal ? 'Giọng đọc · VieNeu Local' : isZeroTtsLocal ? 'Giọng đọc · ZeroTTS Quality' : isKokoroLocal ? 'Giọng đọc · Kokoro English' : `Voice ${isElevenLabs ? '· ElevenLabs' : 'ID'}`}</span>
+          {(isElevenLabs || isHiiuTts || isCapCutTts || isEdgeTts || isVieneuLocal || isZeroTtsLocal || isKokoroLocal) && voiceItems.length ? <div className="voice-picker" ref={voicePickerRef}>
             <div className="voice-picker-control">
               <button type="button" className={`voice-picker-trigger ${voiceOpen ? 'active' : ''}`} onClick={() => { if (!voiceOpen) announceDropdownOpen(voiceDropdownId.current); setVoiceOpen((value) => !value); }}>
                 <span className="voice-picker-selected"><strong>{selectedVoice?.name || current.voice || 'Chọn giọng đọc'}</strong><small>{selectedVoice?.id || 'Mở danh sách voice'}</small></span><ChevronDown size={15} className={voiceOpen ? 'rotated' : ''} />
@@ -217,8 +225,9 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
                 <button type="button" className="voice-picker-option-play" aria-label={`Nghe thử ${voice.name || voice.id}`} onPointerEnter={() => primeVoice(voice.id)} onFocus={() => primeVoice(voice.id)} onClick={() => void playVoice(voice.id)}>{previewingVoice === voice.id ? <LoaderCircle size={16} className="spin" /> : <CirclePlay size={17} />}</button>
               </div>) : <div className="voice-picker-empty">Không tìm thấy voice phù hợp.</div>}</div>
             </div>}
-          </div> : isEdgeTts ? <div className="provider-readonly-value"><span>Đang tải danh sách giọng Việt của Edge TTS.</span></div> : isVieneuLocal ? <div className="provider-readonly-value"><span>Chưa có giọng clone. Hãy tạo một hồ sơ trong mục Clone giọng ở thanh bên.</span></div> : isHiiuTts || isCapCutTts ? <div className="provider-readonly-value"><span>Chưa có danh sách giọng. Hãy bấm “Lấy models” ở Cài đặt để tải voice {isCapCutTts ? 'CapCut TTS' : 'HiiuTTS'}.</span></div> : <input value={current.voice} onChange={(event) => patchCurrent({ voice: event.target.value })} placeholder={isGroq ? 'Ví dụ: troy, hannah, austin' : 'Nhập Voice ID của provider'} />}
+          </div> : isEdgeTts ? <div className="provider-readonly-value"><span>Đang tải danh sách giọng Việt của Edge TTS.</span></div> : isVieneuLocal ? <div className="provider-readonly-value"><span>Chưa có giọng clone. Hãy tạo một hồ sơ trong mục Clone giọng ở thanh bên.</span></div> : isZeroTtsLocal ? <div className="provider-readonly-value"><span>ZeroTTS chưa tải được danh sách voice preset. Hãy bấm Lấy models ở Cài đặt rồi thử lại.</span></div> : isHiiuTts || isCapCutTts ? <div className="provider-readonly-value"><span>Chưa có danh sách giọng. Hãy bấm “Lấy models” ở Cài đặt để tải voice {isCapCutTts ? 'CapCut TTS' : 'HiiuTTS'}.</span></div> : <input value={current.voice} onChange={(event) => patchCurrent({ voice: event.target.value })} placeholder={isGroq ? 'Ví dụ: troy, hannah, austin' : 'Nhập Voice ID của provider'} />}
           {isGroq && <small className="field-help">Groq Orpheus hiện dành cho giọng English/Arabic; test voice dùng câu tiếng Anh.</small>}
+          {isZeroTtsLocal && <small className="field-help">ZeroTTS chạy local bằng ONNX CPU, có 8 giọng Việt preset và xuất 48 kHz. Model tải một lần; không hỗ trợ clone giọng tùy ý ở bản public hiện tại.</small>}
           {isKokoroLocal && <small className="field-help">Kokoro chỉ đọc tiếng Anh. Lần nghe thử đầu tiên cần cài runtime và tải model; các lần sau dùng model đã lưu cục bộ.</small>}
           {isElevenLabs && !voiceItems.length && <small className="field-help">Chưa có voice cache. Hãy lấy voices trong Cài đặt hoặc nhập Voice ID thủ công.</small>}
         </div>
@@ -251,7 +260,7 @@ export function DubbingModal({ open, providers, assignments, availableAssignment
         {needsStemMix && <div className="info-note">AutoSub sẽ tách stem trước khi trộn. Cần Demucs và video nguồn đã upload.{demucsAvailable === false ? ' Hiện máy chưa có Demucs.' : sourceVideoUploading ? ' Video đang được khôi phục.' : !sourceVideoReady ? ' Cần video nguồn đã upload.' : ''}</div>}
       </div>
     </> : <div className="dictionary"><div className="section-title"><span>THAY TEXT ĐẦU VÀO TTS</span><button className="button small ghost" onClick={addPronunciation}><Plus size={14} /> Thêm từ</button></div><p className="muted-copy">Chỉ thay cách đọc khi gửi sang TTS, không sửa bản dịch trong editor.</p>{pronunciation.map((entry, index) => <div className="dictionary-row" key={entry.id}><span>{String(index + 1).padStart(2, '0')}</span><input placeholder="Từ gốc" value={entry.source} onChange={(event) => onPronunciationChange(pronunciation.map((item) => item.id === entry.id ? { ...item, source: event.target.value } : item))} /><span>→</span><input placeholder="Đọc thành" value={entry.reading} onChange={(event) => onPronunciationChange(pronunciation.map((item) => item.id === entry.id ? { ...item, reading: event.target.value } : item))} /><button className="icon-button" onClick={() => onPronunciationChange(pronunciation.filter((item) => item.id !== entry.id))}><Trash2 size={14} /></button></div>)}</div>}
-    {job && <div className="dubbing-job-progress"><div className="dubbing-job-head"><div><span>JOB {job.id}</span><strong>{job.status === 'completed' ? 'Đã hoàn tất' : job.status === 'completed_with_errors' ? 'Hoàn tất với cue lỗi' : job.status === 'paused' ? 'Đã tạm dừng' : job.status === 'cancelled' ? 'Đã hủy' : job.status === 'failed' ? 'Thất bại' : 'Đang xử lý'}</strong></div><b>{job.progressPercent}%</b></div><div className="dubbing-job-track"><div style={{ width: `${job.progressPercent}%` }} /></div><div className="dubbing-job-stats"><span>{job.doneCues}/{job.totalCues} cue xong</span><span>{job.failedCues} cue lỗi</span><span>Batch {job.currentBatch}</span></div>{job.warnings.length > 0 && <small className="dubbing-job-warning">{job.warnings.slice(-2).join(' ')}</small>}{job.failedCueErrors?.length > 0 && <div className="dubbing-cue-errors"><strong>{job.failedCueErrors.length} cue cần xử lý</strong><small>Provider TTS đã thử xong nhưng không tạo được audio hợp lệ cho các cue này.</small>{job.failedCueErrors.slice(0, 2).map((failure) => <div className="dubbing-cue-error" key={failure.id}><span>Cue #{failure.index} · bước {failure.stage} · lần thử {failure.attempts}</span><p>{failure.error}</p></div>)}{job.failedCueErrors.length > 2 && <details><summary>Xem thêm {job.failedCueErrors.length - 2} cue lỗi</summary>{job.failedCueErrors.slice(2).map((failure) => <div className="dubbing-cue-error" key={failure.id}><span>Cue #{failure.index} · bước {failure.stage} · lần thử {failure.attempts}</span><p>{failure.error}</p></div>)}</details>}</div>}<div className="dubbing-job-actions">{job.status === 'running' && <button className="button small ghost" onClick={() => onJobAction?.('pause')}><Pause size={14} /> Tạm dừng</button>}{job.status === 'paused' && <button className="button small ghost" onClick={() => onJobAction?.('resume')}><Play size={14} /> Tiếp tục</button>}{['queued', 'running', 'paused'].includes(job.status) && <button className="button small ghost danger" onClick={() => onJobAction?.('cancel')}><X size={14} /> Hủy job</button>}{job.failedCues > 0 && ['completed_with_errors', 'failed'].includes(job.status) && <button className="button small ghost" onClick={() => onJobAction?.('retry-failed')}><RotateCcw size={14} /> Thử lại cue lỗi</button>}{job.status === 'completed' && <button className="button small ghost" onClick={() => onJobAction?.('rebuild')}><RotateCcw size={14} /> Dựng lại từ cache</button>}</div></div>}
+    {job && <div className="dubbing-job-progress"><div className="dubbing-job-head"><div><span>JOB {job.id}</span><strong>{job.status === 'completed' ? 'Đã hoàn tất' : job.status === 'completed_with_errors' ? 'Hoàn tất với cue lỗi' : job.status === 'paused' ? 'Đã tạm dừng' : job.status === 'cancelled' ? 'Đã hủy' : job.status === 'failed' ? 'Thất bại' : dubbingJobStageLabel(job)}</strong></div><b>{job.progressPercent}%</b></div><div className="dubbing-job-track"><div style={{ width: `${job.progressPercent}%` }} /></div><div className="dubbing-job-stats"><span>{job.doneCues}/{job.totalCues} cue xong</span><span>{job.failedCues} cue lỗi</span><span>Batch {job.currentBatch}</span></div>{job.warnings.length > 0 && <small className="dubbing-job-warning">{job.warnings.slice(-2).join(' ')}</small>}{job.failedCueErrors?.length > 0 && <div className="dubbing-cue-errors"><strong>{job.failedCueErrors.length} cue cần xử lý</strong><small>Provider TTS đã thử xong nhưng không tạo được audio hợp lệ cho các cue này.</small>{job.failedCueErrors.slice(0, 2).map((failure) => <div className="dubbing-cue-error" key={failure.id}><span>Cue #{failure.index} · bước {failure.stage} · lần thử {failure.attempts}</span><p>{failure.error}</p></div>)}{job.failedCueErrors.length > 2 && <details><summary>Xem thêm {job.failedCueErrors.length - 2} cue lỗi</summary>{job.failedCueErrors.slice(2).map((failure) => <div className="dubbing-cue-error" key={failure.id}><span>Cue #{failure.index} · bước {failure.stage} · lần thử {failure.attempts}</span><p>{failure.error}</p></div>)}</details>}</div>}<div className="dubbing-job-actions">{job.status === 'running' && <button className="button small ghost" onClick={() => onJobAction?.('pause')}><Pause size={14} /> Tạm dừng</button>}{job.status === 'paused' && <button className="button small ghost" onClick={() => onJobAction?.('resume')}><Play size={14} /> Tiếp tục</button>}{['queued', 'running', 'paused'].includes(job.status) && <button className="button small ghost danger" onClick={() => onJobAction?.('cancel')}><X size={14} /> Hủy job</button>}{job.failedCues > 0 && ['completed_with_errors', 'failed'].includes(job.status) && <button className="button small ghost" onClick={() => onJobAction?.('retry-failed')}><RotateCcw size={14} /> Thử lại cue lỗi</button>}{job.status === 'completed' && <button className="button small ghost" onClick={() => onJobAction?.('rebuild')}><RotateCcw size={14} /> Dựng lại từ cache</button>}</div></div>}
     <div className="modal-actions"><button className="button ghost" onClick={onClose}>Đóng</button><button className="button primary" disabled={Boolean(job && ['queued', 'running', 'paused'].includes(job.status)) || (needsStemMix && (demucsAvailable === false || !sourceVideoReady))} onClick={() => onRun(configs, { slowVideoToMatchSpeech, audioMix: { mode: sourceAudioMode, keepOriginal: sourceAudioEnabled, originalVolume: sourceAudioEnabled ? originalVolume : 0, separateVocals: needsStemMix } })}>{job && ['queued', 'running', 'paused'].includes(job.status) ? 'Job đang chạy…' : 'Tạo dub track'} <span>→</span></button></div>
   </Modal>;
 }

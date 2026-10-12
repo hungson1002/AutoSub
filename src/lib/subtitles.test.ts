@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ASS_CSS_PIXEL_SCALE, cuesForDubbingTimeline, cuesToAss, cuesToSrt, cuesWithDubbingTimelineMetadata, isDubbableSubtitleCue, repairRunawayOcrCueEnds } from './subtitles';
+import { ASS_CSS_PIXEL_SCALE, cuesForDubbingTimeline, cuesToAss, cuesToSrt, cuesWithDubbingTimelineMetadata, hasDubbingTimeline, isDubbableSubtitleCue, repairRunawayOcrCueEnds } from './subtitles';
 import { defaultStyle, type SubtitleCue } from '../types';
 
 const cue: SubtitleCue = {
@@ -60,11 +60,17 @@ test('ASS export preserves an individual cue canvas position', () => {
   assert.match(ass, /\\an5\\pos\(480,432\)/);
 });
 
-test('subtitle cues always use the shared font and position', () => {
+test('subtitle cues use the shared position but keep per-cue styling', () => {
   const ass = cuesToAss([{ ...cue, sourceKind: 'subtitle', screenPosition: { xPercent: 25, yPercent: 40 }, styleOverrides: { fontFamily: 'Courier New', fontSize: 70 } }], { ...defaultStyle, fontFamily: 'Arial', fontSize: 34, position: 'bottom' });
-  assert.match(ass, /\\fnArial\\fs37\.4/);
+  assert.match(ass, /\\fnCourier New\\fs77/);
   assert.match(ass, /\\an2\\pos\(960,886\)/);
-  assert.doesNotMatch(ass, /Courier New|pos\(480,432\)/);
+  assert.doesNotMatch(ass, /pos\(480,432\)/);
+});
+
+test('subtitle cues preserve per-cue frame styling in ASS export', () => {
+  const ass = cuesToAss([{ ...cue, sourceKind: 'subtitle', styleOverrides: { background: 'box', backgroundColor: '#123456' } }], { ...defaultStyle, background: 'outline' });
+  assert.match(ass, /^Dialogue: .*?,Box,/m);
+  assert.match(ass, /\\1c&H00563412\\1a&H47&/);
 });
 
 test('ASS export converts CSS font pixels and uses the same default canvas position as preview', () => {
@@ -144,6 +150,7 @@ test('SRT export trims an overlapping cue end to the next cue start without muta
 
 test('SRT timeline export uses slowed dubbing timestamps without mutating source cues', () => {
   const source = { ...cue, startMs: 1_000, endMs: 2_000, dubbing: { cueId: cue.id, originalText: cue.originalText, translatedText: cue.translatedText, finalDubbingText: cue.translatedText, originalDurationMs: 1_000, targetDurationMs: 1_000, ttsDurationMs: 1_500, finalAudioDurationMs: 1_500, rewriteAttempts: 0, speedApplied: 1, extensionMs: 0, timelineStartMs: 1_200, timelineEndMs: 2_700, timelineShiftMs: 200 } };
+  assert.equal(hasDubbingTimeline([source]), true);
   const retimed = cuesForDubbingTimeline([source], true);
   assert.equal(retimed[0]?.startMs, 1_200);
   assert.equal(retimed[0]?.endMs, 2_700);

@@ -13,6 +13,22 @@ function pcmVoice(wav:Buffer) {
   return {data,rate,channels,frames:Math.floor(data.length/(channels*2))};
 }
 
+/** Remove only the outer silence. Internal breaths and dramatic pauses survive. */
+export function trimCanvasNarrationEdges(wav:Buffer) {
+  const pcm=pcmVoice(wav),windows=canvasSpeechActivity(wav);
+  if(!pcm||!windows?.length)return undefined;
+  const start=Math.max(0,Math.floor((windows[0]!.startMs-40)*pcm.rate/1000));
+  const end=Math.min(pcm.frames,Math.ceil((windows.at(-1)!.endMs+160)*pcm.rate/1000));
+  const data=pcm.data.subarray(start*pcm.channels*2,end*pcm.channels*2);
+  const output=Buffer.alloc(44+data.length);
+  output.write('RIFF');output.writeUInt32LE(36+data.length,4);output.write('WAVEfmt ',8);
+  output.writeUInt32LE(16,16);output.writeUInt16LE(1,20);output.writeUInt16LE(pcm.channels,22);
+  output.writeUInt32LE(pcm.rate,24);output.writeUInt32LE(pcm.rate*pcm.channels*2,28);
+  output.writeUInt16LE(pcm.channels*2,32);output.writeUInt16LE(16,34);output.write('data',36);
+  output.writeUInt32LE(data.length,40);data.copy(output,44);
+  return {wav:output,durationMs:(end-start)/pcm.rate*1000,startMs:start/pcm.rate*1000};
+}
+
 /** Compact energy track from the unmixed voice; no model or realtime decoding. */
 export function canvasSpeechEnvelope(wav:Buffer):Array<{atMs:number;level:number}>|undefined {
   const pcm=pcmVoice(wav);if(!pcm)return undefined;

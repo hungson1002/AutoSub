@@ -1,14 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import {resolveBrowserExecutable} from './animationBrowser';
+import {renderMemoryMinimumMB} from './animationRenderMemory';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bundle } from '@remotion/bundler';
-import { renderMedia, renderStill, selectComposition } from '@remotion/renderer';
+import { makeCancelSignal, renderMedia, renderStill, selectComposition } from '@remotion/renderer';
 import type { AnimationAsset, AnimationProject, CompositeScene, SceneLayer } from '../../shared/animationStudio';
 import { assertAnimationProject, normalizeAnimationProjectForRender } from '../../shared/animationStudio';
 import type { CanvasStudioProject } from '../../shared/canvasAnimationStudio';
+import {canvasExportFramePlan} from '../../shared/canvasAnimationStudio';
 import { buildRenderTimeline, renderDurationInFrames } from '../../src/remotion/timeline';
 import { preferredH264Encoder, run, workdir } from './ffmpeg';
 import { getAnimationAssetFile } from './animationAssets';
@@ -17,11 +19,20 @@ import {synchronizeCanvasPerformance} from '../../shared/canvasPerformance';
 import {animationRenderSourceSignature} from './animationRenderSource';
 import {renderCanvasFast} from './canvasFastRender';
 import {compileCanvasProjectLayout} from '../../shared/canvasLayoutCompiler';
+import {canvasSpatialIssues} from '../../shared/canvasSpatialRelations';
 import { resolveUpload } from './uploads';
 
 const x264Presets = ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow', 'placebo'] as const;
 type X264Preset = typeof x264Presets[number];
 const resolveX264Preset = (value: string | undefined): X264Preset => x264Presets.includes(value as X264Preset) ? value as X264Preset : 'ultrafast';
+
+async function cancellableRender<T>(signal: AbortSignal | undefined, render: (cancelSignal: ReturnType<typeof makeCancelSignal>['cancelSignal']) => Promise<T>) {
+  signal?.throwIfAborted();
+  const {cancelSignal, cancel} = makeCancelSignal();
+  signal?.addEventListener('abort', cancel, {once: true});
+  try { return await render(cancelSignal); }
+  finally { signal?.removeEventListener('abort', cancel); }
+}
 
 export async function validateAnimationOutput(file: string, expected?: { width: number; height: number; fps: number; durationInFrames: number }) {
   const probe = await run('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file]);
@@ -65,7 +76,8 @@ async function readVideoDuration(file: string) {
   }
 }
 
-export async function transcodeAnimationRecording(projectId: string, recording: Buffer, requestedCacheKey?: string, requestedTimeline?: AnimationRecordingTimeline) {
+export async function transcodeAnimationRecording(projectId: string, recording: Buffer, requestedCacheKey?: string, requestedTimeline?: AnimationRecordingTimeline, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   if (!/^[a-f0-9-]{36}$/i.test(projectId)) throw new Error('Project id không hợp lệ.');
   if (!recording.length) throw new Error('Bản ghi animation đang trống.');
   const directory = path.join(workdir, 'animation-projects', projectId, 'renders');
@@ -86,8 +98,9 @@ export async function transcodeAnimationRecording(projectId: string, recording: 
         : `setpts=PTS-STARTPTS,fps=${timeline.fps}`
       : undefined;
     const args = ['-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?', ...(retime ? ['-vf', retime] : []), ...(expectedSeconds ? ['-t', expectedSeconds.toFixed(3)] : []), '-c:v', 'libx264', '-preset', resolveX264Preset(process.env.AUTOSUB_ANIMATION_X264_PRESET?.trim()), '-crf', '21', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', temporary];
-    await run('ffmpeg', args);
+    await run('ffmpeg', args, signal);
     await validateAnimationOutput(temporary);
+    signal?.throwIfAborted();
     await rename(temporary, cached);
   } finally {
     await rm(temporary, { force: true });
@@ -99,16 +112,6 @@ export async function transcodeAnimationRecording(projectId: string, recording: 
 let remotionBundle: Promise<string> | undefined;
 let remotionBundleSignature:string|undefined;
 
-function resolveBrowserExecutable() {
-  const candidates = [
-    process.env.AUTOSUB_CHROME_PATH,
-    process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    process.env['PROGRAMFILES(X86)'] && path.join(process.env['PROGRAMFILES(X86)'], 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-  ].filter((candidate): candidate is string => Boolean(candidate));
-  return candidates.find((candidate) => existsSync(candidate));
-}
 
 async function getRemotionBundle(sourceSignature?:string) {
   const entryPoint = fileURLToPath(new URL('../../src/remotion/index.tsx', import.meta.url));
@@ -331,7 +334,7 @@ async function collectStaticAudio(project: AnimationProject): Promise<StaticAudi
   return audio;
 }
 
-async function renderStaticHybridProject(project: AnimationProject, showSubtitles: boolean, output: string, onProgress?: (progress: number) => void) {
+async function renderStaticHybridProject(project: AnimationProject, showSubtitles: boolean, output: string, onProgress?: (progress: number) => void, signal?: AbortSignal) {
   const framePlan = buildStaticHybridFramePlan(project);
   if (!framePlan.length) throw new Error('Project hybrid tĩnh không có trạng thái visual để xuất.');
   const serveUrl = await getRemotionBundle();
@@ -346,7 +349,7 @@ async function renderStaticHybridProject(project: AnimationProject, showSubtitle
     const configuredStillConcurrency = Number(process.env.AUTOSUB_ANIMATION_STILL_CONCURRENCY);
     const stillConcurrency = Math.max(1, Math.min(4, Number.isFinite(configuredStillConcurrency) && configuredStillConcurrency > 0
       ? Math.round(configuredStillConcurrency)
-      : Math.min(3, typeof os.availableParallelism === 'function' ? os.availableParallelism() : 3)));
+      : 1));
     let stillCursor = 0;
     let stillCompleted = 0;
     const renderStillWorker = async () => {
@@ -354,7 +357,8 @@ async function renderStaticHybridProject(project: AnimationProject, showSubtitle
         const index = stillCursor++;
         const item = framePlan[index];
         const still = path.join(temporaryDirectory, `${String(index).padStart(4, '0')}.png`);
-        await renderStill({
+        await cancellableRender(signal, cancelSignal => renderStill({
+          cancelSignal,
           serveUrl,
           composition,
           inputProps,
@@ -364,7 +368,7 @@ async function renderStaticHybridProject(project: AnimationProject, showSubtitle
           logLevel: 'warn',
           timeoutInMilliseconds: 120_000,
           ...browserOptions,
-        });
+        }));
         visuals[index] = { path: still, startMs: item.startMs, durationMs: item.durationMs };
         stillCompleted += 1;
         onProgress?.(.05 + .35 * stillCompleted / framePlan.length);
@@ -376,7 +380,7 @@ async function renderStaticHybridProject(project: AnimationProject, showSubtitle
       audio: await collectStaticAudio(project),
       durationMs: renderDurationInFrames(project) / Math.max(1, project.fps) * 1000,
     };
-    await renderStaticImageProjectFast(project, timeline, output, (progress) => onProgress?.(.4 + .6 * progress));
+    await renderStaticImageProjectFast(project, timeline, output, (progress) => onProgress?.(.4 + .6 * progress), signal);
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
@@ -484,7 +488,7 @@ async function renderStaticImageProject(project: AnimationProject, timeline: Sta
   }
 }
 
-async function renderStaticImageProjectFast(project: AnimationProject, timeline: StaticImageTimeline, output: string, onProgress?: (progress: number) => void) {
+async function renderStaticImageProjectFast(project: AnimationProject, timeline: StaticImageTimeline, output: string, onProgress?: (progress: number) => void, signal?: AbortSignal) {
   // The fast path uses one concat manifest and one FFmpeg process. The old
   // scene-by-scene renderer paid process startup and H.264 encoding cost for
   // every cue, which made long videos unnecessarily slow.
@@ -535,7 +539,7 @@ async function renderStaticImageProjectFast(project: AnimationProject, timeline:
     if (audioLabels.length) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '192k');
     args.push('-t', outputSeconds, '-r', String(project.fps), ...videoCodecArgs, '-pix_fmt', 'yuv420p', '-threads', '0', '-progress', 'pipe:2', '-nostats', output);
     let progressBuffer = '';
-    await run('ffmpeg', args, undefined, (chunk) => {
+    await run('ffmpeg', args, signal, (chunk) => {
       progressBuffer += chunk;
       const lines = progressBuffer.split(/\r?\n/);
       progressBuffer = lines.pop() || '';
@@ -552,11 +556,12 @@ async function renderStaticImageProjectFast(project: AnimationProject, timeline:
   }
 }
 
-async function normalizeRenderedAudio(input: string, output: string) {
-  await run('ffmpeg', ['-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', '-af', 'loudnorm=I=-18:TP=-1.5:LRA=5', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output]);
+async function normalizeRenderedAudio(input: string, output: string, signal?: AbortSignal) {
+  await run('ffmpeg', ['-y', '-i', input, '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', '-af', 'loudnorm=I=-18:TP=-1.5:LRA=5', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output], signal);
 }
 
-export async function renderAnimationProject(project: AnimationProject, showSubtitles: boolean, requestedCacheKey?: string, onProgress?: (progress: number) => void) {
+export async function renderAnimationProject(project: AnimationProject, showSubtitles: boolean, requestedCacheKey?: string, onProgress?: (progress: number) => void, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   project = normalizeAnimationProjectForRender(project);
   assertAnimationProject(project);
   if (!project.scenes.length) throw new Error('Project chưa có cảnh để xuất.');
@@ -587,8 +592,9 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
   if (staticTimeline) {
     const temporary = path.join(cacheDirectory, `${hash}.${randomUUID()}.partial.mp4`);
     try {
-      await renderStaticImageProjectFast(renderProject, staticTimeline, temporary, onProgress);
+      await renderStaticImageProjectFast(renderProject, staticTimeline, temporary, onProgress, signal);
       await validateAnimationOutput(temporary, { width: renderProject.width, height: renderProject.height, fps: renderProject.fps, durationInFrames: renderDurationInFrames(renderProject) });
+      signal?.throwIfAborted();
       await rename(temporary, cached);
       return { path: cached, size: (await stat(cached)).size, cached: false };
     } catch (error) {
@@ -596,14 +602,16 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
       await writeFile(path.join(cacheDirectory, 'last-fast-render-error.txt'), fastRenderError, 'utf8').catch(() => undefined);
       console.warn('[animation-render] Fast static renderer skipped; using Remotion fallback.', fastRenderError);
       await rm(temporary, { force: true });
+      signal?.throwIfAborted();
       // Keep the browser renderer as a compatibility fallback for old or unusual assets.
     }
   }
   if (staticHybrid) {
     const temporary = path.join(cacheDirectory, `${hash}.${randomUUID()}.partial.mp4`);
     try {
-      await renderStaticHybridProject(renderProject, showSubtitles, temporary, onProgress);
+      await renderStaticHybridProject(renderProject, showSubtitles, temporary, onProgress, signal);
       await validateAnimationOutput(temporary, { width: renderProject.width, height: renderProject.height, fps: renderProject.fps, durationInFrames: renderDurationInFrames(renderProject) });
+      signal?.throwIfAborted();
       await rename(temporary, cached);
       return { path: cached, size: (await stat(cached)).size, cached: false };
     } catch (error) {
@@ -611,6 +619,7 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
       await writeFile(path.join(cacheDirectory, 'last-hybrid-still-render-error.txt'), hybridRenderError, 'utf8').catch(() => undefined);
       console.warn('[animation-render] Hybrid still renderer skipped; using full Remotion fallback.', hybridRenderError);
       await rm(temporary, { force: true });
+      signal?.throwIfAborted();
     }
   }
   const serveUrl = await getRemotionBundle();
@@ -620,12 +629,12 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
   const composition = await selectComposition({ serveUrl, id: 'AutoSubAnimation', inputProps, logLevel: 'warn', timeoutInMilliseconds: 120_000, ...browserOptions });
   const temporary = path.join(cacheDirectory, `${hash}.${randomUUID()}.partial.mp4`);
   const configuredConcurrency = Number(process.env.AUTOSUB_ANIMATION_RENDER_CONCURRENCY);
-  const availableParallelism = typeof os.availableParallelism === 'function' ? os.availableParallelism() : 4;
-  const concurrency = Math.max(2, Math.min(8, Number.isFinite(configuredConcurrency) && configuredConcurrency > 0 ? Math.round(configuredConcurrency) : availableParallelism));
+  const concurrency = Math.max(1, Math.min(8, Number.isFinite(configuredConcurrency) && configuredConcurrency > 0 ? Math.round(configuredConcurrency) : 1));
   const x264Preset = resolveX264Preset(process.env.AUTOSUB_ANIMATION_X264_PRESET?.trim());
   const hasAudio = renderProject.scenes.some((scene) => scene.renderMode === 'composite' && scene.layers.some((layer) => layer.type === 'audio' && layer.visible && layer.assetId));
   try {
-  await renderMedia({
+  await cancellableRender(signal, cancelSignal => renderMedia({
+    cancelSignal,
     serveUrl,
     composition,
     inputProps,
@@ -641,20 +650,22 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
     timeoutInMilliseconds: 120_000,
     onProgress: ({ progress }) => onProgress?.(Math.max(0, Math.min(1, progress))),
     ...browserOptions,
-  });
+  }));
   await validateAnimationOutput(temporary, { width: composition.width, height: composition.height, fps: composition.fps, durationInFrames: composition.durationInFrames });
   let finalOutput = temporary;
   if (hasAudio) {
     const normalizedAudioOutput = path.join(cacheDirectory, `${hash}.${randomUUID()}.audio-normalized.partial.mp4`);
     try {
-      await normalizeRenderedAudio(temporary, normalizedAudioOutput);
+      await normalizeRenderedAudio(temporary, normalizedAudioOutput, signal);
       await validateAnimationOutput(normalizedAudioOutput, { width: composition.width, height: composition.height, fps: composition.fps, durationInFrames: composition.durationInFrames });
       await rm(temporary, { force: true });
       finalOutput = normalizedAudioOutput;
     } catch {
       await rm(normalizedAudioOutput, { force: true });
+      signal?.throwIfAborted();
     }
   }
+  signal?.throwIfAborted();
   await rename(finalOutput, cached);
   } catch (error) {
     await rm(temporary, { force: true });
@@ -665,16 +676,22 @@ export async function renderAnimationProject(project: AnimationProject, showSubt
 
 
 function canvasDurationInFrames(project: CanvasStudioProject) {
-  return project.scenes.reduce((total, scene) => total + Math.max(1, Math.round(Math.max(1, scene.durationMs) / 1000 * project.fps)), 0);
+  return canvasExportFramePlan(project).reduce((a,b)=>a+b,0);
+}
+function boundedCanvasRenderer(project:CanvasStudioProject){
+  if(project.scenes.every(scene=>scene.vectorScene))return !Number(process.env.AUTOSUB_ANIMATION_RENDER_CONCURRENCY)||Number(process.env.AUTOSUB_ANIMATION_RENDER_CONCURRENCY)<=1;
+  return Boolean(resolveBrowserExecutable()&&process.env.AUTOSUB_CANVAS_RENDER_ENGINE!=='remotion');
 }
 
-export async function renderCanvasAnimationProject(project: CanvasStudioProject, requestedCacheKey?: string, onProgress?: (progress: number) => void) {
+async function prepareCanvasAnimationRender(project: CanvasStudioProject, requestedCacheKey?: string) {
   if (!project || project.version !== 1 || !/^[a-f0-9-]{36}$/i.test(project.id)) throw new Error('Canvas project không hợp lệ.');
   if (!Number.isFinite(project.width) || !Number.isFinite(project.height) || !Number.isFinite(project.fps) || project.width < 320 || project.height < 180 || project.fps < 1) throw new Error('Kích thước hoặc FPS Canvas project không hợp lệ.');
   if (!Array.isArray(project.scenes) || !project.scenes.length) throw new Error('Canvas project chưa có scene để xuất.');
   // Apply the same production preparation to UI exports and retained projects.
   // Analyze existing voice assets only; never regenerate TTS during export.
   project=compileCanvasProjectLayout(structuredClone(project));
+  const invalidAttachments=project.scenes.flatMap(scene=>canvasSpatialIssues(scene).map(issue=>`${scene.name}: ${issue}`));
+  if(invalidAttachments.length)throw new Error(`Canvas physical staging: ${invalidAttachments.join(' ')}`);
   for(const scene of project.scenes){
     for(const line of scene.dialogue||[]){
       if(line.speechEnvelope!==undefined||!line.audioUrl)continue;
@@ -692,31 +709,55 @@ export async function renderCanvasAnimationProject(project: CanvasStudioProject,
   const hash = createHash('sha256').update(JSON.stringify({ project: normalized, engine: 'canvas-direct-v17-cinematic',sourceSignature, requestedCacheKey })).digest('hex');
   const cacheDirectory = path.join(workdir, 'animation-render-cache');
   const cached = path.join(cacheDirectory, `${hash}.mp4`);
+  return {project,durationInFrames,sourceSignature,hash,cacheDirectory,cached};
+}
+
+/** Cache lookup never launches a browser or generates assets. Low memory must
+ * not block returning an already validated output. Use the same identity and
+ * preparation as the renderer so stale art or timing cannot become a cache hit. */
+export async function findCachedCanvasAnimationRender(project: CanvasStudioProject, requestedCacheKey?: string) {
+  const prepared=await prepareCanvasAnimationRender(project,requestedCacheKey);
+  try {
+    await validateAnimationOutput(prepared.cached,{width:prepared.project.width,height:prepared.project.height,
+      fps:prepared.project.fps,durationInFrames:prepared.durationInFrames});
+    return {path:prepared.cached,size:(await stat(prepared.cached)).size,cached:true};
+  } catch { return undefined; }
+}
+
+export async function renderCanvasAnimationProject(project: CanvasStudioProject, requestedCacheKey?: string, onProgress?: (progress: number) => void, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  const prepared=await prepareCanvasAnimationRender(project,requestedCacheKey);
+  project=prepared.project;
+  const {durationInFrames,sourceSignature,hash,cacheDirectory,cached}=prepared;
   try {
     await validateAnimationOutput(cached, { width: project.width, height: project.height, fps: project.fps, durationInFrames });
     return { path: cached, size: (await stat(cached)).size, cached: true };
   } catch { /* render below */ }
   await mkdir(cacheDirectory, { recursive: true });
   const fastExecutable=resolveBrowserExecutable();
-  if(fastExecutable&&process.env.AUTOSUB_CANVAS_RENDER_ENGINE!=='remotion'){
+  if(fastExecutable&&!project.scenes.some(scene=>scene.vectorScene)&&process.env.AUTOSUB_CANVAS_RENDER_ENGINE!=='remotion'){
     const temporary=path.join(cacheDirectory,`${hash}.${randomUUID()}.partial.mp4`);
     const normalizedAudio=temporary+'.audio.mp4';
     const started=Date.now();
     try{
-      await renderCanvasFast(project,temporary,{signature:sourceSignature,executable:fastExecutable,assetOrigin:`http://127.0.0.1:${Number(process.env.AUTOSUB_PORT||8787)}`,preset:resolveX264Preset(process.env.AUTOSUB_ANIMATION_X264_PRESET?.trim()),onProgress});
+      await renderCanvasFast(project,temporary,{signature:sourceSignature,executable:fastExecutable,assetOrigin:`http://127.0.0.1:${Number(process.env.AUTOSUB_PORT||8787)}`,preset:resolveX264Preset(process.env.AUTOSUB_ANIMATION_X264_PRESET?.trim()),onProgress,signal});
       await validateAnimationOutput(temporary,{width:project.width,height:project.height,fps:project.fps,durationInFrames});
       if(project.scenes.some(s=>s.audioUrl)){
-        await normalizeRenderedAudio(temporary,normalizedAudio);
+        await normalizeRenderedAudio(temporary,normalizedAudio,signal);
         await validateAnimationOutput(normalizedAudio,{width:project.width,height:project.height,fps:project.fps,durationInFrames});
-        await rename(normalizedAudio,cached);
-      }else await rename(temporary,cached);
+        signal?.throwIfAborted();await rename(normalizedAudio,cached);
+      }else {signal?.throwIfAborted();await rename(temporary,cached);}
       await writeFile(path.join(cacheDirectory,`${hash}.metrics.json`),JSON.stringify({renderer:'canvas-direct',elapsedMs:Date.now()-started,frames:durationInFrames,width:project.width,height:project.height,fps:project.fps}));
       return {path:cached,size:(await stat(cached)).size,cached:false};
     }catch(error){
+      signal?.throwIfAborted();
       await writeFile(path.join(cacheDirectory,'last-canvas-fast-render-error.txt'),String(error),'utf8');
       // The retained project/audio remain valid for the established renderer.
     }finally{await rm(temporary,{force:true});await rm(normalizedAudio,{force:true});}
   }
+  // A failed serial export can fall back to the heavier renderer only after
+  // that renderer has its own memory reserve.
+  await waitForRenderMemoryHeadroom(project,boundedCanvasRenderer(project),signal);
   const serveUrl = await getRemotionBundle(sourceSignature);
   const executable = resolveBrowserExecutable();
   const inputProps = { project, assetOrigin: `http://127.0.0.1:${Number(process.env.AUTOSUB_PORT || 8787)}` };
@@ -724,12 +765,11 @@ export async function renderCanvasAnimationProject(project: CanvasStudioProject,
   const composition = await selectComposition({ serveUrl, id: 'AutoSubCanvasAnimation', inputProps, logLevel: 'warn', timeoutInMilliseconds: 120_000, ...browserOptions });
   const temporary = path.join(cacheDirectory, `${hash}.${randomUUID()}.partial.mp4`);
   const configuredConcurrency = Number(process.env.AUTOSUB_ANIMATION_RENDER_CONCURRENCY);
-  const availableParallelism = typeof os.availableParallelism === 'function' ? os.availableParallelism() : 4;
-  const defaultConcurrency=os.freemem()<4*1024**3||availableParallelism<=4?1:2;
-  const concurrency = Math.max(1, Math.min(8, Number.isFinite(configuredConcurrency) && configuredConcurrency > 0 ? Math.round(configuredConcurrency) : defaultConcurrency));
+  const concurrency = Math.max(1, Math.min(8, Number.isFinite(configuredConcurrency) && configuredConcurrency > 0 ? Math.round(configuredConcurrency) : 1));
   const hasAudio = project.scenes.some((scene) => Boolean(scene.audioUrl));
   try {
-    await renderMedia({
+    await cancellableRender(signal, cancelSignal => renderMedia({
+      cancelSignal,
       serveUrl,
       composition,
       inputProps,
@@ -745,21 +785,22 @@ export async function renderCanvasAnimationProject(project: CanvasStudioProject,
       timeoutInMilliseconds: 120_000,
       onProgress: ({ progress }) => onProgress?.(Math.max(0, Math.min(1, progress))),
       ...browserOptions,
-    });
+    }));
     await validateAnimationOutput(temporary, { width: composition.width, height: composition.height, fps: composition.fps, durationInFrames: composition.durationInFrames });
     let finalOutput = temporary;
     if (hasAudio) {
       const normalizedAudio = path.join(cacheDirectory, `${hash}.${randomUUID()}.audio-normalized.partial.mp4`);
       try {
-        await normalizeRenderedAudio(temporary, normalizedAudio);
+        await normalizeRenderedAudio(temporary, normalizedAudio,signal);
         await validateAnimationOutput(normalizedAudio, { width: composition.width, height: composition.height, fps: composition.fps, durationInFrames: composition.durationInFrames });
         await rm(temporary, { force: true });
         finalOutput = normalizedAudio;
       } catch {
         await rm(normalizedAudio, { force: true });
+        signal?.throwIfAborted();
       }
     }
-    await rename(finalOutput, cached);
+    signal?.throwIfAborted();await rename(finalOutput, cached);
   } catch (error) {
     await rm(temporary, { force: true });
     throw error;
@@ -767,8 +808,9 @@ export async function renderCanvasAnimationProject(project: CanvasStudioProject,
   return { path: cached, size: (await stat(cached)).size, cached: false };
 }
 
-export interface AnimationRenderJob { id: string; projectId: string; engine?: 'browser-recording' | 'remotion' | 'canvas-remotion'; showSubtitles?: boolean; cacheKey?: string; timeline?: AnimationRecordingTimeline; status: 'queued' | 'rendering' | 'completed' | 'failed'; progress: number; createdAt: string; updatedAt: string; cached?: boolean; result?: { path: string; size: number }; error?: string }
+export interface AnimationRenderJob { id: string; projectId: string; name?: string; stage?: string; engine?: 'browser-recording' | 'remotion' | 'canvas-remotion'; showSubtitles?: boolean; cacheKey?: string; timeline?: AnimationRecordingTimeline; status: 'queued' | 'rendering' | 'completed' | 'failed' | 'cancelled'; progress: number; createdAt: string; updatedAt: string; cached?: boolean; result?: { path: string; size: number }; error?: string }
 const root = path.join(workdir, 'animation-render-jobs'); const jobs = new Map<string, AnimationRenderJob>(); const queue: string[] = []; let running = false;
+const renderControllers = new Map<string, AbortController>();
 const jobDirectory = (id: string) => path.join(root, /^[a-f0-9-]{36}$/i.test(id) ? id : 'invalid');
 const jobFile = (id: string) => path.join(jobDirectory(id), 'job.json'); const recordingFile = (id: string) => path.join(jobDirectory(id), 'recording.webm'); const projectFile = (id: string) => path.join(jobDirectory(id), 'project.json');
 let jobWrites: Promise<unknown> = Promise.resolve();
@@ -785,10 +827,30 @@ async function saveJob(job: AnimationRenderJob) {
   });
   jobWrites = write;
   await write;
-  if (terminal) jobs.set(job.id, job);
+  if (terminal && jobs.get(job.id)?.status !== 'cancelled') jobs.set(job.id, job);
   return job;
 }
-async function patchJob(id: string, change: Partial<AnimationRenderJob>) { return saveJob({ ...jobs.get(id)!, ...change, updatedAt: new Date().toISOString() }); }
+async function patchJob(id: string, change: Partial<AnimationRenderJob>) {
+  const current=jobs.get(id)!;
+  if(current.status==='cancelled')return current;
+  return saveJob({ ...current, ...change, updatedAt: new Date().toISOString() });
+}
+
+async function waitForRenderMemoryHeadroom(canvas?:CanvasStudioProject,streaming=false,signal?:AbortSignal,onWait?:(message:string)=>void) {
+  const minimumBytes=renderMemoryMinimumMB({canvas,streaming,configured:process.env.AUTOSUB_RENDER_MIN_FREE_MB})*1024**2;
+  const deadline = Date.now() + 10 * 60_000;
+  while (os.freemem() < minimumBytes) {
+    signal?.throwIfAborted();
+    onWait?.(`Đang chờ RAM: trống ${Math.round(os.freemem()/1024**2)} MB / cần ${Math.round(minimumBytes/1024**2)} MB`);
+    if (Date.now() >= deadline) {
+      const freeMb = Math.round(os.freemem() / 1024 ** 2);
+      throw new Error(`Render tạm dừng vì RAM trống chỉ còn ${freeMb} MB. Hãy đóng preview/video hoặc ứng dụng nặng rồi thử lại; AutoSub không ép render khi bộ nhớ thấp.`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  signal?.throwIfAborted();
+}
+
 async function drainQueue() {
   if (running) return;
   running = true;
@@ -796,31 +858,53 @@ async function drainQueue() {
     while (queue.length) {
       const id = queue.shift()!;
       const job = jobs.get(id);
-      if (!job) continue;
+      if (!job || job.status === 'cancelled') continue;
+      const controller = new AbortController();
+      renderControllers.set(id,controller);
       try {
-        await patchJob(id, { status: 'rendering', progress: 5 });
+        const canvasProject=job.engine==='canvas-remotion'
+          ? JSON.parse(await readFile(projectFile(id),'utf8')) as CanvasStudioProject : undefined;
+        if(canvasProject){
+          const cached=await findCachedCanvasAnimationRender(canvasProject,job.cacheKey);
+          if(cached){
+            await patchJob(id,{status:'completed',progress:100,cached:true,
+              result:{path:cached.path,size:cached.size},error:undefined});
+            continue;
+          }
+        }
+        // Never trade machine responsiveness for render speed. Keep the job
+        // queued until the OS has enough headroom to launch a browser renderer.
+        await waitForRenderMemoryHeadroom(canvasProject,Boolean(canvasProject&&boundedCanvasRenderer(canvasProject)),controller.signal,message=>{
+          const current=jobs.get(id);if(current?.status==='queued')jobs.set(id,{...current,stage:message});
+        });
+        await patchJob(id, { status: 'rendering', progress: 5, stage: 'Đang render video' });
+        controller.signal.throwIfAborted();
         // Progress is transient: persist stage boundaries, not every rendered frame.
         const reportProgress = (progress: number) => {
           const current = jobs.get(id);
           if (current?.status === 'rendering') jobs.set(id, { ...current, progress: Math.max(current.progress, 8, Math.round(progress * 90)), updatedAt: new Date().toISOString() });
         };
         const result = job.engine === 'remotion'
-          ? await renderAnimationProject(JSON.parse(await readFile(projectFile(id), 'utf8')) as AnimationProject, job.showSubtitles !== false, job.cacheKey, reportProgress)
+          ? await renderAnimationProject(JSON.parse(await readFile(projectFile(id), 'utf8')) as AnimationProject, job.showSubtitles !== false, job.cacheKey, reportProgress,controller.signal)
           : job.engine === 'canvas-remotion'
-            ? await renderCanvasAnimationProject(JSON.parse(await readFile(projectFile(id), 'utf8')) as CanvasStudioProject, job.cacheKey, reportProgress)
-            : await transcodeAnimationRecording(job.projectId, await readFile(recordingFile(id)), job.cacheKey, job.timeline);
+            ? await renderCanvasAnimationProject(canvasProject!, job.cacheKey, reportProgress,controller.signal)
+            : await transcodeAnimationRecording(job.projectId, await readFile(recordingFile(id)), job.cacheKey, job.timeline,controller.signal);
+        controller.signal.throwIfAborted();
         await patchJob(id, { status: 'completed', progress: 100, cached: result.cached, result: { path: result.path, size: result.size }, error: undefined });
       } catch (error) {
+        if(jobs.get(id)?.status==='cancelled')continue;
         const failed: AnimationRenderJob = { ...jobs.get(id)!, status: 'failed', progress: 100, error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() };
         // A disk failure must not become an unhandled rejection or abandon later jobs.
         try { await saveJob(failed); } catch (writeError) { jobs.set(id, failed); console.error('Cannot persist animation render failure', id, writeError); }
+      } finally {
+        renderControllers.delete(id);
       }
     }
   } finally { running = false; }
 }
 export async function initializeAnimationRenderJobs() { await mkdir(root, { recursive: true }); for (const entry of await readdir(root, { withFileTypes: true })) { if (!entry.isDirectory()) continue; try { let job = JSON.parse(await readFile(jobFile(entry.name), 'utf8')) as AnimationRenderJob; if (job.status === 'queued' || job.status === 'rendering') { job = await saveJob({ ...job, status: 'queued', progress: 0, error: undefined, updatedAt: new Date().toISOString() }); queue.push(job.id); } else jobs.set(job.id, job); } catch { /* ignore broken job record */ } } void drainQueue(); }
 export async function enqueueAnimationRender(projectId: string, recording: Buffer, cacheKey?: string, timeline?: AnimationRecordingTimeline) { if (!/^[a-f0-9-]{36}$/i.test(projectId) || !recording.length) throw new Error('Project hoặc bản ghi render không hợp lệ.'); const now = new Date().toISOString(); const job: AnimationRenderJob = { id: randomUUID(), projectId, cacheKey: cacheKey && /^[a-f0-9]{64}$/i.test(cacheKey) ? cacheKey : undefined, timeline, status: 'queued', progress: 0, createdAt: now, updatedAt: now }; await mkdir(jobDirectory(job.id), { recursive: true }); await writeFile(recordingFile(job.id), recording); await saveJob(job); queue.push(job.id); void drainQueue(); return job; }
-export async function enqueueAnimationProjectRender(projectId: string, project: AnimationProject, showSubtitles = true, cacheKey?: string) { project = normalizeAnimationProjectForRender(project); if (!/^[a-f0-9-]{36}$/i.test(projectId) || project.id !== projectId) throw new Error('Project render không hợp lệ.'); assertAnimationProject(project); const normalizedCacheKey = cacheKey && /^[a-f0-9]{64}$/i.test(cacheKey) ? cacheKey : undefined; const duplicate = [...jobs.values()].filter((candidate) => candidate.projectId === projectId && candidate.engine === 'remotion' && candidate.showSubtitles === showSubtitles && candidate.cacheKey === normalizedCacheKey && (candidate.status === 'queued' || candidate.status === 'rendering')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]; if (duplicate) return duplicate; const now = new Date().toISOString(); const job: AnimationRenderJob = { id: randomUUID(), projectId, engine: 'remotion', showSubtitles, cacheKey: normalizedCacheKey, status: 'queued', progress: 0, createdAt: now, updatedAt: now }; await mkdir(jobDirectory(job.id), { recursive: true }); await writeFile(projectFile(job.id), JSON.stringify(project), 'utf8'); await saveJob(job); queue.push(job.id); void drainQueue(); return job; }
+export async function enqueueAnimationProjectRender(projectId: string, project: AnimationProject, showSubtitles = true, cacheKey?: string) { project = normalizeAnimationProjectForRender(project); if (!/^[a-f0-9-]{36}$/i.test(projectId) || project.id !== projectId) throw new Error('Project render không hợp lệ.'); assertAnimationProject(project); const normalizedCacheKey = cacheKey && /^[a-f0-9]{64}$/i.test(cacheKey) ? cacheKey : undefined; const duplicate = [...jobs.values()].filter((candidate) => candidate.projectId === projectId && candidate.engine === 'remotion' && candidate.showSubtitles === showSubtitles && candidate.cacheKey === normalizedCacheKey && (candidate.status === 'queued' || candidate.status === 'rendering')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]; if (duplicate) return duplicate; const now = new Date().toISOString(); const job: AnimationRenderJob = { id: randomUUID(), projectId, name: project.name, engine: 'remotion', showSubtitles, cacheKey: normalizedCacheKey, status: 'queued', progress: 0, createdAt: now, updatedAt: now }; await mkdir(jobDirectory(job.id), { recursive: true }); await writeFile(projectFile(job.id), JSON.stringify(project), 'utf8'); await saveJob(job); queue.push(job.id); void drainQueue(); return job; }
 
 export async function enqueueCanvasAnimationProjectRender(projectId: string, project: CanvasStudioProject, cacheKey?: string) {
   if (!/^[a-f0-9-]{36}$/i.test(projectId) || project.id !== projectId || project.version !== 1 || !project.scenes.length) throw new Error('Canvas project render không hợp lệ.');
@@ -828,7 +912,7 @@ export async function enqueueCanvasAnimationProjectRender(projectId: string, pro
   const duplicate = [...jobs.values()].filter((candidate) => candidate.projectId === projectId && candidate.engine === 'canvas-remotion' && candidate.cacheKey === normalizedCacheKey && (candidate.status === 'queued' || candidate.status === 'rendering')).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   if (duplicate) return duplicate;
   const now = new Date().toISOString();
-  const job: AnimationRenderJob = { id: randomUUID(), projectId, engine: 'canvas-remotion', cacheKey: normalizedCacheKey, status: 'queued', progress: 0, createdAt: now, updatedAt: now };
+  const job: AnimationRenderJob = { id: randomUUID(), projectId, name: project.name, engine: 'canvas-remotion', cacheKey: normalizedCacheKey, status: 'queued', progress: 0, createdAt: now, updatedAt: now };
   await mkdir(jobDirectory(job.id), { recursive: true });
   await writeFile(projectFile(job.id), JSON.stringify(project), 'utf8');
   await saveJob(job);
@@ -838,4 +922,12 @@ export async function enqueueCanvasAnimationProjectRender(projectId: string, pro
 }
 
 export function getAnimationRenderJob(id: string) { const job = jobs.get(id); if (!job) throw new Error('Không tìm thấy render job.'); return job; }
+export async function cancelAnimationRenderJob(id: string) {
+  const job=getAnimationRenderJob(id);
+  if(!['queued','rendering'].includes(job.status))return job;
+  const cancelled={...job,status:'cancelled' as const,stage:'Đã hủy xuất video',updatedAt:new Date().toISOString()};
+  jobs.set(id,cancelled);
+  renderControllers.get(id)?.abort();
+  return saveJob(cancelled);
+}
 export function listAnimationRenderJobs() { return [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }

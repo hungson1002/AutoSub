@@ -137,7 +137,7 @@ export function AutoPipelinePage({ providers, settings, cues, asset, onCuesChang
         if (!asset?.uploadId) throw new Error('Bước xuất video cần video nguồn.');
         if (steps.dub && !dubbingJobId) throw new Error('Chưa có dubbing job để xuất.');
         setStage('export', 90, 'Đang render video cuối…');
-        const blob = await api.exportVideo(asset.file, nextCues, settings.subtitleStyle, { exportId: crypto.randomUUID(), uploadId: asset.uploadId, resolution: 'original', crf: 20, keepAudio: true, originalVolume: steps.dub ? .18 : 1, burnSubtitles: true, separateVocals: false, dubbingJobId }, controller.signal);
+        const blob = await api.exportVideo(asset.file, nextCues, settings.subtitleStyle, { exportId: crypto.randomUUID(), uploadId: asset.uploadId, resolution: 'original', crf: 18, keepAudio: true, originalVolume: steps.dub ? .18 : 1, burnSubtitles: true, separateVocals: false, dubbingJobId }, controller.signal);
         saveBlob(`autosub-${asset.name.replace(/\.[^.]+$/, '')}.mp4`, blob);
       }
       setActiveStep(undefined); setProgress(100); setStatus('completed'); setMessage('Pipeline đã hoàn thành.');

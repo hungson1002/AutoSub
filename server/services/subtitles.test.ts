@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { diarizedWordsToSegments, filterLowConfidenceWhisperSegments, groupOcrResults, normalizeCueTimeline, offsetSubtitleSegments, parseOcrTextBlocks, segmentsToCues, verbalizeOcrSymbols } from './subtitles';
+import { diarizedWordsToSegments, filterLowConfidenceWhisperSegments, groupOcrResults, normalizeCueTimeline, offsetSubtitleSegments, parseOcrTextBlocks, rebalanceWordTimedSegmentBoundaries, segmentsToCues, verbalizeOcrSymbols } from './subtitles';
 
 test('OCR verbalizes semantic symbols in the selected language but preserves punctuation', () => {
   assert.equal(verbalizeOcrSymbols('1+1=2, đúng không?...', 'vi'), 'một cộng một bằng hai, đúng không?...');
@@ -27,6 +27,61 @@ test('diarization splits speaker turns and assigns stable voice groups', () => {
   const cues = segmentsToCues(segments);
   assert.deepEqual(cues.map((cue) => cue.speakerId), ['speaker_0', 'speaker_1', 'speaker_0']);
   assert.deepEqual(cues.map((cue) => cue.voiceGroup), ['G1', 'G2', 'G1']);
+});
+
+test('word-timed boundary repair moves an orphaned phrase after a comma to the next cue', () => {
+  const word = (text: string, start: number, end: number) => ({ word: text, start, end });
+  const repaired = rebalanceWordTimedSegmentBoundaries([
+    {
+      start: 0,
+      end: 2.78,
+      text: 'anh ơi mình nhảy vào trong, máy bay',
+      words: [
+        word('anh', 0, .28),
+        word('ơi', .30, .52),
+        word('mình', .54, .86),
+        word('nhảy', .88, 1.18),
+        word('vào', 1.20, 1.46),
+        word('trong,', 1.48, 1.82),
+        word('máy', 1.84, 2.22),
+        word('bay', 2.24, 2.78),
+      ],
+    },
+    {
+      start: 2.80,
+      end: 4.82,
+      text: 'thì kiếm được rồi, cơ mà',
+      words: [
+        word('thì', 2.80, 3.08),
+        word('kiếm', 3.10, 3.44),
+        word('được', 3.46, 3.78),
+        word('rồi,', 3.80, 4.10),
+        word('cơ', 4.12, 4.38),
+        word('mà', 4.40, 4.82),
+      ],
+    },
+  ]);
+  assert.equal(repaired[0]?.text, 'anh ơi mình nhảy vào trong,');
+  assert.equal(repaired[1]?.text, 'máy bay thì kiếm được rồi, cơ mà');
+  assert.equal(repaired[0]?.end, 1.82);
+  assert.equal(repaired[1]?.start, 1.84);
+  assert.deepEqual(repaired[1]?.words?.slice(0, 3).map((item) => item.word), ['máy', 'bay', 'thì']);
+});
+
+test('word-timed boundary repair preserves a strong sentence boundary', () => {
+  const repaired = rebalanceWordTimedSegmentBoundaries([
+    { start: 0, end: 1, text: 'Xong rồi.', words: [{ word: 'Xong', start: 0, end: .45 }, { word: 'rồi.', start: .48, end: 1 }] },
+    { start: 1.02, end: 2.1, text: 'Máy bay đến.', words: [{ word: 'Máy', start: 1.02, end: 1.36 }, { word: 'bay', start: 1.38, end: 1.62 }, { word: 'đến.', start: 1.65, end: 2.1 }] },
+  ]);
+  assert.deepEqual(repaired.map((segment) => segment.text), ['Xong rồi.', 'Máy bay đến.']);
+});
+
+test('word-timed boundary repair keeps segments without complete native word timestamps unchanged', () => {
+  const input = [
+    { start: 0, end: 1, text: 'câu một' },
+    { start: 1, end: 2, text: 'câu hai', words: [{ word: 'câu', start: 1, end: 1.2 }] },
+  ];
+  assert.deepEqual(rebalanceWordTimedSegmentBoundaries(input), input);
 });
 
 test('Whisper confidence filter removes a low-confidence no-speech hallucination', () => {

@@ -28,5 +28,7 @@ test('parseWhisperJson rejects malformed output instead of creating fake timesta
 
 test('parseWhisperProgress reads the latest CLI progress update', () => {
   assert.equal(parseWhisperProgress('progress =  21%\rprogress = 42%'), 42);
+  assert.equal(parseWhisperProgress('[  7%]\r[ 31%]'), 31);
+  assert.equal(parseWhisperProgress('whisper_print_progress_callback: progress = 88%'), 88);
   assert.equal(parseWhisperProgress('no progress here'), undefined);
 });

@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import type { AIProvider } from '../types';
 import { ProviderError } from '../adapters';
 import { workdir } from './ffmpeg';
-import { ADAPTIVE_FIT_VERSION, buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, collapseRepeatedOcrDubbingCues, createDubbingJob, cueBoundaryFadeFilter, cueBoundaryFades, dubbingRewriteWordLimit, effectiveTtsConcurrency, fallbackTempoFilter, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, parseAudioIntegrity, planAdaptiveCueTempos, planDubbingTimeline, planSlowVideoTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, shouldAttemptDubbingRewrite, shouldFallbackDubbingRewrite, speechTrimFilter, startDubbingJob, tempoFilter, timeStretchIntroducedArtifacts } from './dubbingJobs';
+import { ADAPTIVE_FIT_VERSION, buildSeparatedAudioMixFilter, buildStemAudioMixFilter, buildTimelineMixFilter, canFitSpeechWithoutCut, collapseRepeatedOcrDubbingCues, createDubbingJob, cueBoundaryFadeFilter, cueBoundaryFades, dubbingRewriteWordLimit, effectiveTtsConcurrency, fallbackTempoFilter, findLatestDubbingJobByVideoId, fittingTempo, getDubbingJobStatus, isRewriteUnavailableError, isTransientDubbingError, isUsefulDubbingRewrite, parseAudioIntegrity, parseContinuousSpeechSilences, planAdaptiveCueTempos, planContinuousCueTimings, planContinuousSpeechGroups, planDubbingTimeline, planSlowVideoTimeline, queueDubbingCueRegeneration, recoverDubbingJob, retryDubbingOperation, shouldAttemptDubbingRewrite, shouldFallbackDubbingRewrite, shouldUseContinuousSpeech, speechTrimFilter, startDubbingJob, tempoFilter, timeStretchIntroducedArtifacts } from './dubbingJobs';
 
 const jobsPath = path.join(workdir, 'jobs');
 const fakeProvider: AIProvider = { id: 'synthetic-provider', name: 'Synthetic Provider', baseUrl: 'http://127.0.0.1:1/v1', enabled: true, models: [], providerType: 'openai-compatible', authType: 'none', capabilities: { chat: true, tts: true } };
@@ -391,6 +391,58 @@ test('trimmed cue audio stays sequential instead of crossing SRT boundaries', ()
   assert.equal(timeline[1].timelineEndMs, 2_000);
   assert.ok(timeline.every((item) => item.timelineStartMs >= item.startMs));
   assert.ok(timeline.every((item, index) => index === 0 || item.timelineStartMs >= timeline[index - 1].timelineEndMs));
+});
+
+test('continuous cue timing changes subtitle at the measured TTS pause, not the source SRT boundary', () => {
+  const silences = parseContinuousSpeechSilences([
+    '[silencedetect] silence_start: 1.420',
+    '[silencedetect] silence_end: 1.560 | silence_duration: 0.140',
+  ].join('\n'));
+  const timings = planContinuousCueTimings([
+    { id:'a', startMs:0, endMs:2_000, text:'Đây là câu ngắn.' },
+    { id:'b', startMs:2_000, endMs:4_000, text:'Câu sau dài hơn một chút để kể tiếp câu chuyện.' },
+  ], 4_000, silences);
+  assert.deepEqual(timings.a, { startMs:0, endMs:1_420 });
+  assert.deepEqual(timings.b, { startMs:1_560, endMs:4_000 });
+});
+
+test('continuous cue timing falls back to Vietnamese speech weight when there is no audible pause', () => {
+  const timings = planContinuousCueTimings([
+    { id:'short', startMs:0, endMs:2_000, text:'Được rồi.' },
+    { id:'long', startMs:2_000, endMs:4_000, text:'Bây giờ chúng ta tiếp tục đi thẳng vào căn phòng phía trước.' },
+  ], 4_000, []);
+  assert.equal(timings.short?.startMs, 0);
+  assert.ok((timings.short?.endMs || 0) < 2_000);
+  assert.equal(timings.long?.startMs, timings.short?.endMs);
+  assert.equal(timings.long?.endMs, 4_000);
+});
+
+test('continuous speech groups adjacent cues only when voice, pacing and timing match', () => {
+  const base = [
+    { cueId:'a', startMs:0, endMs:1_000, providerRef:'v', model:'m', voice:'voice', speed:1, volume:1, text:'Tôi đang nói một câu' },
+    { cueId:'b', startMs:1_050, endMs:2_000, providerRef:'v', model:'m', voice:'voice', speed:1, volume:1, text:'và đây là phần tiếp theo.' },
+    { cueId:'c', startMs:2_700, endMs:3_500, providerRef:'v', model:'m', voice:'voice', speed:1, volume:1, text:'Sau một khoảng nghỉ thật.' },
+    { cueId:'d', startMs:3_550, endMs:4_400, providerRef:'v', model:'m', voice:'other', speed:1, volume:1, text:'Đổi người nói.' },
+  ];
+  const groups = planContinuousSpeechGroups(base);
+  assert.deepEqual(groups.map((group) => group.cueIds), [['a','b'],['c'],['d']]);
+  assert.equal(groups[0]?.text, 'Tôi đang nói một câu và đây là phần tiếp theo.');
+});
+
+test('strict dubbing keeps cue boundaries instead of continuous speech grouping', () => {
+  assert.equal(shouldUseContinuousSpeech({ timingMode: 'strict', slowVideoToMatchSpeech: false }, 6), false);
+  assert.equal(shouldUseContinuousSpeech({ timingMode: 'natural', slowVideoToMatchSpeech: false }, 6), true);
+  assert.equal(shouldUseContinuousSpeech({ timingMode: 'natural', slowVideoToMatchSpeech: true }, 6), false);
+  assert.equal(shouldUseContinuousSpeech({ timingMode: 'natural', slowVideoToMatchSpeech: false }, 1), false);
+});
+
+test('continuous speech keeps explicit pauses and different TTS controls as hard boundaries', () => {
+  const groups = planContinuousSpeechGroups([
+    { cueId:'a', startMs:0, endMs:900, providerRef:'v', model:'m', voice:'voice', speed:1, volume:1, text:'Câu đầu.' },
+    { cueId:'b', startMs:900, endMs:1_800, providerRef:'v', model:'m', voice:'voice', speed:1, volume:1, text:'[pause 500ms] Câu hai.' },
+    { cueId:'c', startMs:1_800, endMs:2_700, providerRef:'v', model:'m', voice:'voice', speed:1.05, volume:1, text:'Câu ba.' },
+  ]);
+  assert.deepEqual(groups.map((group) => group.cueIds), [['a'],['b'],['c']]);
 });
 
 test('auto cadence keeps short lines natural inside a dense block', () => {

@@ -39,7 +39,7 @@ export function buildExportAudioFilter(options: ExportAudioFilterOptions) {
     originalInputLabel = "0:a",
     targetDurationMs,
   } = options;
-  const dubVolume = clamp(Number(options.dubVolume ?? 1), 0, 1).toFixed(3);
+  const dubVolume = clamp(Number(options.dubVolume ?? 1), 0, 5).toFixed(3);
   const dubFilter = `volume=${dubVolume},${normalizeDub}`;
 
   if (hasDub) {

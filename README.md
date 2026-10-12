@@ -12,6 +12,14 @@
 - Tải video công khai từ Douyin, Bilibili và b23.tv để đưa thẳng vào quy trình xử lý.
 - Hỗ trợ provider OpenAI-compatible, Whisper Local và Microsoft Edge TTS.
 
+### STT local và timestamp từng từ
+
+Trong **Cài đặt → AI Providers → Whisper Local**, test model `faster-small-int8`, rồi chọn model đó cho STT. Model này dùng CPU INT8, Silero VAD trước nhận dạng, timestamp từng từ và stable-ts để chia câu theo dấu câu/khoảng nghỉ. `faster-medium-int8` dùng model lớn hơn, cần nhiều RAM và thời gian hơn. Hai model Q5 hiện có vẫn dùng được; lựa chọn đã lưu không bị tự đổi.
+
+Faster Whisper tự cài Python 3.12 qua `uv`, các thư viện CPU và model vào `workdir/whisper/faster-runtime` ở lần chạy đầu. Cần mạng khi cài/tải lần đầu; không tải CUDA. Sau đó model được dùng lại. Không đẩy thư mục runtime/model lên Git.
+
+Luồng STT local chỉ chạy một job tại một thời điểm và Faster Whisper dùng tối đa 4 luồng CPU. Máy yếu có thể đặt `AUTOSUB_WHISPER_THREADS=2`. Có thể dùng Python đã cài đủ thư viện qua `AUTOSUB_FASTER_WHISPER_PYTHON`; thư viện được cố định phiên bản, gồm PyAV 16.1.0 để tránh lỗi giải mã ở bản mới hơn.
+
 AutoSub không có tài khoản, billing, cloud storage hay database server. Cấu hình provider và dữ liệu dự án được giữ trên máy.
 
 ## Chạy trên Windows

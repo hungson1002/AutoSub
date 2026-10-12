@@ -3,7 +3,56 @@ import test from 'node:test';
 import { evaluateCanvasCamera, evaluateCanvasObject, projectDurationMs, resolveProjectTime } from './runtime';
 import { createCanvasObject, createCanvasScene } from './types';
 import { applyCanvasChoreographyState, canvasActingTiming, evaluateCanvasChoreographyOffset } from './choreography';
-import {evaluateObjectKeyframes} from './keyframes';
+import {evaluateObjectKeyframes,evaluateCameraKeyframes} from './keyframes';
+
+test('sparse acting keys never reset a completed position, scale or opacity track',()=>{
+  const frames=[{atMs:0,dx:0,opacity:0,scale:1},{atMs:1000,dx:120,opacity:1,scale:1.1},
+    {atMs:1600,expression:'afraid' as const},{atMs:2400,pose:'talk' as const}];
+  for(const t of [1000,1599,1600,1601,2399,2400,3000]){
+    const state=evaluateObjectKeyframes(frames,t);
+    assert.equal(state.dx,120,`position at ${t}`);
+    assert.equal(state.opacity,1,`opacity at ${t}`);
+    assert.equal(state.scale,1.1,`scale at ${t}`);
+  }
+  const camera=[{atMs:0,zoom:1,dx:0},{atMs:1000,zoom:1.1,dx:20},{atMs:1600,dy:-8}];
+  for(const t of [1000,1600,2000]){
+    assert.equal(evaluateCameraKeyframes(camera,t).zoom,1.1);
+    assert.equal(evaluateCameraKeyframes(camera,t).dx,20);
+  }
+});
+
+test('an explicit delayed reveal stays hidden before its cue and never flashes back off',()=>{
+  const object=createCanvasObject('prop',{id:'reveal',motion:'none'}),scene=createCanvasScene();
+  scene.objects=[object];scene.animationBeats=[{id:'reveal',action:'reveal',atMs:400,durationMs:1600,targetIds:[object.id],speechCue:'appears'}];
+  assert.equal(evaluateCanvasObject(object,scene,0).opacity,0);
+  assert.equal(evaluateCanvasObject(object,scene,399).opacity,0);
+  let alpha=0;
+  for(let t=400;t<=3000;t+=20){
+    const current=evaluateCanvasObject(object,scene,t).opacity;
+    assert.ok(current>=alpha,`reveal reverses at ${t}`);alpha=current;
+  }
+  assert.equal(alpha,1);
+});
+
+test('draw-on progress stays hidden before its authored start and only increases',()=>{
+  const frames=[
+    {atMs:1200,revealProgress:0,visualBeatId:'draw',visualBeatPhase:'start' as const,easing:'hold' as const},
+    {atMs:3000,revealProgress:1,visualBeatId:'draw',visualBeatPhase:'end' as const,easing:'ease-in-out' as const},
+  ];
+  assert.equal(evaluateObjectKeyframes(frames,0).revealProgress,0);
+  assert.equal(evaluateObjectKeyframes(frames,1100).revealProgress,0);
+  const middle=evaluateObjectKeyframes(frames,2100).revealProgress!;
+  assert.ok(middle>0&&middle<1);
+  assert.equal(evaluateObjectKeyframes(frames,3500).revealProgress,1);
+});
+
+test('speech windows never move a stationary actor or its contact anchors',()=>{
+  const actor=createCanvasObject('character',{id:'speaker',motion:'none'});
+  const scene=createCanvasScene();scene.objects=[actor];
+  scene.animationBeats=[{id:'voice',action:'talk',targetIds:[actor.id],atMs:0,durationMs:3000}];
+  const initial=evaluateCanvasObject(actor,scene,0);
+  for(const time of [500,1000,2000,2999,3500])assert.deepEqual(evaluateCanvasObject(actor,scene,time),initial);
+});
 
 test('an assisting actor follows patient travel without drifting apart or duplicating authored travel',()=>{
   const scene=createCanvasScene(),patient=createCanvasObject('character',{id:'patient',x:600,keyframes:[{atMs:0,dx:0},{atMs:3000,dx:120}]}),helper=createCanvasObject('character',{id:'helper',x:480});
@@ -71,6 +120,49 @@ test('camera shot and push-in increase visual scale over a scene', () => {
   assert.ok(end.scale > start.scale);
   assert.equal(start.focusX, 400);
   assert.equal(start.focusY, 300);
+});
+
+test('continuity camera basis ignores newly added support actors',()=>{
+  const base=createCanvasScene();
+  base.template='two-shot';
+  const lead=createCanvasObject('character',{id:'lead',characterKey:'lead',role:'focal',x:410,y:446,width:186,height:382});
+  base.objects=[lead];
+  base.camera={shot:'medium',motion:'none',focusX:410,focusY:446,zoom:1,keyframes:[{atMs:0,zoom:1},{atMs:3000,zoom:1.03}]};
+  const before=evaluateCanvasCamera(base,0,1280,720);
+  const continued=createCanvasScene();
+  continued.template='two-shot';
+  continued.objects=[
+    createCanvasObject('character',{id:'lead-2',characterKey:'lead',role:'focal',x:410,y:446,width:186,height:382}),
+    createCanvasObject('character',{id:'helper',characterKey:'helper',role:'support',x:930,y:446,width:160,height:320}),
+  ];
+  continued.camera={...base.camera};
+  continued.continuityCameraCharacterKeys=['lead'];
+  const after=evaluateCanvasCamera(continued,0,1280,720);
+  assert.equal(after.scale,before.scale);
+  assert.equal(after.offsetX,before.offsetX);
+  assert.equal(after.offsetY,before.offsetY);
+  assert.equal(after.focusX,before.focusX);
+  assert.equal(after.focusY,before.focusY);
+});
+
+test('explicit camera track never multiplies shot zoom or preset motion',()=>{
+  const scene=createCanvasScene();scene.objects=[];
+  scene.camera={shot:'close-up',motion:'push-in',focusX:640,focusY:360,zoom:1.3,keyframes:[{atMs:0,zoom:1.3},{atMs:3000,zoom:1.4}]};
+  assert.equal(evaluateCanvasCamera(scene,0,1280,720).scale,1.3);
+  assert.equal(evaluateCanvasCamera(scene,3000,1280,720).scale,1.4);
+});
+
+test('authored off-center portrait keeps the head inside the frame throughout the track',()=>{
+  const scene=createCanvasScene();scene.template='close-reaction';scene.durationMs=5000;
+  const actor=createCanvasObject('character',{x:371.2,y:439.2,width:185.6,height:381.6,role:'focal',pose:'idle'});scene.objects=[actor];
+  scene.camera={shot:'close-up',motion:'push-in',focusX:640,focusY:360,zoom:1.3,keyframes:[{atMs:0,zoom:1.3},{atMs:3200,zoom:1.4,dy:-10}]};
+  for(let t=0;t<=5000;t+=100){
+    const camera=evaluateCanvasCamera(scene,t,1280,720),fit=Math.min(actor.width/68,actor.height/100);
+    const x=camera.focusX+(actor.x-camera.focusX)*camera.scale+camera.offsetX;
+    const y=camera.focusY+(actor.y-fit*65-camera.focusY)*camera.scale+camera.offsetY;
+    assert.ok(x>48&&x<1232,`head off-screen at ${t}`);assert.ok(y>=0,`head cropped at ${t}`);
+    assertCameraCoversFrame(camera,1280,720);
+  }
 });
 
 function assertCameraCoversFrame(camera: ReturnType<typeof evaluateCanvasCamera>, width: number, height: number) {

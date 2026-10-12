@@ -26,11 +26,11 @@ export type VieneuInternalSilence = { startMs: number; endMs: number; durationMs
 const VIENEU_HESITATION_MIN_MS = 450;
 const VIENEU_NATURAL_PAUSE_MS = 220;
 const VIENEU_EDGE_GUARD_MS = 80;
-// VieNeu v3 Turbo's documented default is 0.8. A very small increase gives
-// punctuation and question/reveal contours a little more life without making
-// the speaker identity unstable. Keep a calmer retry only for short cues that
-// develop unstable pauses or repeated phonemes.
-const VIENEU_PRIMARY_TEMPERATURE = 0.82;
+// Stay on VieNeu v3 Turbo's documented 0.8 sampling default. Raising it
+// makes isolated lines a little livelier but also increases pronunciation and
+// cadence variance from cue to cue, which is the wrong tradeoff for dubbing.
+// Keep a calmer retry only for short cues with unstable pauses/repetitions.
+const VIENEU_PRIMARY_TEMPERATURE = 0.80;
 const VIENEU_RETRY_TEMPERATURE = 0.62;
 
 export function prepareVieneuSpeechText(text: string) {

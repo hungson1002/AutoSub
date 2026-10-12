@@ -5,8 +5,11 @@ import { resolveProviderType } from '../providers/base';
 import * as elevenlabs from './elevenlabs';
 import * as capcut from './capcut';
 import * as whisperLocal from './whisperLocal';
+import * as funasrLocal from './funasrLocal';
+import * as qwen3AsrLocal from './qwen3AsrLocal';
 import * as edgeTts from './edgeTts';
 import * as vieneuLocal from './vieneuLocal';
+import * as zerottsLocal from './zerottsLocal';
 import * as kokoroLocal from './kokoroLocal';
 import * as openai from './openaiCompatible';
 import { ProviderError, TranslationValidationError } from './errors';
@@ -25,6 +28,14 @@ function isWhisperLocal(provider: AIProvider) {
   return resolveProviderType(provider) === 'whisper-local';
 }
 
+function isFunAsrLocal(provider: AIProvider) {
+  return resolveProviderType(provider) === 'funasr-local';
+}
+
+function isQwen3AsrLocal(provider: AIProvider) {
+  return resolveProviderType(provider) === 'qwen3-asr-local';
+}
+
 function isEdgeTts(provider: AIProvider) {
   return resolveProviderType(provider) === 'edge-tts';
 }
@@ -33,68 +44,86 @@ function isVieneuLocal(provider: AIProvider) {
   return resolveProviderType(provider) === 'vieneu-local';
 }
 
+function isZeroTtsLocal(provider: AIProvider) {
+  return resolveProviderType(provider) === 'zerotts-local';
+}
+
 function isKokoroLocal(provider: AIProvider) {
   return resolveProviderType(provider) === 'kokoro-local';
 }
 
 export function listModels(provider: AIProvider): Promise<AIModel[]> {
-  return isElevenLabs(provider) ? elevenlabs.listModels(provider) : isCapCut(provider) ? capcut.listModels(provider) : isWhisperLocal(provider) ? whisperLocal.listModels(provider) : isEdgeTts(provider) ? edgeTts.listModels(provider) : isVieneuLocal(provider) ? vieneuLocal.listModels(provider) : isKokoroLocal(provider) ? kokoroLocal.listModels(provider) : openai.listModels(provider);
+  return isElevenLabs(provider) ? elevenlabs.listModels(provider) : isCapCut(provider) ? capcut.listModels(provider) : isWhisperLocal(provider) ? whisperLocal.listModels(provider) : isFunAsrLocal(provider) ? funasrLocal.listModels(provider) : isQwen3AsrLocal(provider) ? qwen3AsrLocal.listModels(provider) : isEdgeTts(provider) ? edgeTts.listModels(provider) : isVieneuLocal(provider) ? vieneuLocal.listModels(provider) : isZeroTtsLocal(provider) ? zerottsLocal.listModels(provider) : isKokoroLocal(provider) ? kokoroLocal.listModels(provider) : openai.listModels(provider);
 }
 
 export function listVoices(provider: AIProvider) {
-  return isElevenLabs(provider) ? elevenlabs.listVoices(provider) : isCapCut(provider) ? capcut.listVoices(provider) : isEdgeTts(provider) ? edgeTts.listVoices(provider) : isVieneuLocal(provider) ? vieneuLocal.listVoices(provider) : isKokoroLocal(provider) ? kokoroLocal.listVoices(provider) : Promise.resolve(provider.voices || []);
+  return isElevenLabs(provider) ? elevenlabs.listVoices(provider) : isCapCut(provider) ? capcut.listVoices(provider) : isEdgeTts(provider) ? edgeTts.listVoices(provider) : isVieneuLocal(provider) ? vieneuLocal.listVoices(provider) : isZeroTtsLocal(provider) ? zerottsLocal.listVoices(provider) : isKokoroLocal(provider) ? kokoroLocal.listVoices(provider) : Promise.resolve(provider.voices || []);
 }
 
 export function testConnection(provider: AIProvider) {
-  return isElevenLabs(provider) ? elevenlabs.testConnection(provider) : isCapCut(provider) ? capcut.testConnection(provider) : isWhisperLocal(provider) ? whisperLocal.testConnection(provider) : isEdgeTts(provider) ? edgeTts.testConnection(provider) : isVieneuLocal(provider) ? vieneuLocal.testConnection(provider) : isKokoroLocal(provider) ? kokoroLocal.testConnection(provider) : openai.testConnection(provider);
+  return isElevenLabs(provider) ? elevenlabs.testConnection(provider) : isCapCut(provider) ? capcut.testConnection(provider) : isWhisperLocal(provider) ? whisperLocal.testConnection(provider) : isFunAsrLocal(provider) ? funasrLocal.testConnection(provider) : isQwen3AsrLocal(provider) ? qwen3AsrLocal.testConnection(provider) : isEdgeTts(provider) ? edgeTts.testConnection(provider) : isVieneuLocal(provider) ? vieneuLocal.testConnection(provider) : isZeroTtsLocal(provider) ? zerottsLocal.testConnection(provider) : isKokoroLocal(provider) ? kokoroLocal.testConnection(provider) : openai.testConnection(provider);
 }
 
 export function testModel(provider: AIProvider, model: string, capability: Capability) {
   if (isVieneuLocal(provider)) return vieneuLocal.testModel(provider, model, capability);
+  if (isZeroTtsLocal(provider)) return zerottsLocal.testModel(provider, model, capability);
   if (isKokoroLocal(provider)) return capability === 'tts' ? kokoroLocal.testModel(provider, model) : Promise.reject(new ProviderError('Kokoro Local chỉ hỗ trợ capability TTS.', 400));
-  return isElevenLabs(provider) ? elevenlabs.testModel(provider, model, capability) : isCapCut(provider) ? capability === 'tts' ? capcut.testModel(provider, model) : Promise.reject(new ProviderError('CapCut TTS chỉ hỗ trợ capability TTS.', 400)) : isWhisperLocal(provider) ? whisperLocal.testModel(provider, model, capability) : isEdgeTts(provider) ? capability === 'tts' ? edgeTts.testModel(provider, model) : Promise.reject(new ProviderError('Edge TTS chỉ hỗ trợ capability TTS.', 400)) : openai.testModel(provider, model, capability);
+  return isElevenLabs(provider) ? elevenlabs.testModel(provider, model, capability) : isCapCut(provider) ? capability === 'tts' ? capcut.testModel(provider, model) : Promise.reject(new ProviderError('CapCut TTS chỉ hỗ trợ capability TTS.', 400)) : isWhisperLocal(provider) ? whisperLocal.testModel(provider, model, capability) : isFunAsrLocal(provider) ? funasrLocal.testModel(provider, model, capability) : isQwen3AsrLocal(provider) ? qwen3AsrLocal.testModel(provider, model, capability) : isEdgeTts(provider) ? capability === 'tts' ? edgeTts.testModel(provider, model) : Promise.reject(new ProviderError('Edge TTS chỉ hỗ trợ capability TTS.', 400)) : openai.testModel(provider, model, capability);
 }
 
 export function chat(provider: AIProvider, model: string, messages: Array<{ role: 'system' | 'user'; content: string | Array<Record<string, unknown>> }>, signal?: AbortSignal, maxTokens?: number) {
   if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
+  if (isZeroTtsLocal(provider)) throw new ProviderError('ZeroTTS Local chỉ cung cấp capability TTS.', 400);
   if (isKokoroLocal(provider)) throw new ProviderError('Kokoro Local chỉ cung cấp capability TTS.', 400);
   if (isElevenLabs(provider)) throw new ProviderError('ElevenLabs không cung cấp capability Chat.', 400);
   if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
+  if (isFunAsrLocal(provider)) throw new ProviderError('FunASR Local chỉ cung cấp capability STT.', 400);
+  if (isQwen3AsrLocal(provider)) throw new ProviderError('Qwen3-ASR Local chỉ cung cấp capability STT.', 400);
   if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
   return openai.chat(provider, model, messages, signal, maxTokens);
 }
 
 export function translateBatch(provider: AIProvider, model: string, items: TranslationItem[], sourceLanguage: string, targetLanguage: string, style: string, customPrompt: string, glossary: Array<{ source: string; target: string }>, translationMemory: TranslationMemoryItem[] = [], translationGuide = '') {
   if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
+  if (isZeroTtsLocal(provider)) throw new ProviderError('ZeroTTS Local chỉ cung cấp capability TTS.', 400);
   if (isKokoroLocal(provider)) throw new ProviderError('Kokoro Local chỉ cung cấp capability TTS.', 400);
   if (isElevenLabs(provider)) throw new ProviderError('Dịch phụ đề cần provider có capability Chat.', 400);
   if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
+  if (isFunAsrLocal(provider)) throw new ProviderError('FunASR Local chỉ cung cấp capability STT.', 400);
+  if (isQwen3AsrLocal(provider)) throw new ProviderError('Qwen3-ASR Local chỉ cung cấp capability STT.', 400);
   if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
   return openai.translateBatch(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary, translationMemory, translationGuide);
 }
 
 export function buildTranslationGuide(provider: AIProvider, model: string, items: TranslationItem[], sourceLanguage: string, targetLanguage: string, style: string, customPrompt: string, glossary: Array<{ source: string; target: string }>) {
   if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
+  if (isZeroTtsLocal(provider)) throw new ProviderError('ZeroTTS Local chỉ cung cấp capability TTS.', 400);
   if (isKokoroLocal(provider)) throw new ProviderError('Kokoro Local chỉ cung cấp capability TTS.', 400);
   if (isElevenLabs(provider)) throw new ProviderError('Dịch phụ đề cần provider có capability Chat.', 400);
   if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
+  if (isFunAsrLocal(provider)) throw new ProviderError('FunASR Local chỉ cung cấp capability STT.', 400);
+  if (isQwen3AsrLocal(provider)) throw new ProviderError('Qwen3-ASR Local chỉ cung cấp capability STT.', 400);
   if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
   return openai.buildTranslationGuide(provider, model, items, sourceLanguage, targetLanguage, style, customPrompt, glossary);
 }
 
 export function transcribe(provider: AIProvider, model: string, audio: Buffer | string, filename: string, language: string, signal?: AbortSignal, onProgress?: (percent: number) => void): Promise<{ text: string; segments: SubtitleSegment[] }> {
   if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
+  if (isZeroTtsLocal(provider)) throw new ProviderError('ZeroTTS Local chỉ cung cấp capability TTS.', 400);
   if (isKokoroLocal(provider)) throw new ProviderError('Kokoro Local chỉ cung cấp capability TTS.', 400);
   if (isCapCut(provider)) throw new ProviderError('CapCut TTS chỉ cung cấp capability TTS.', 400);
   if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
-  return isElevenLabs(provider) ? elevenlabs.transcribe(provider, model, audio, filename, language, signal) : isWhisperLocal(provider) ? whisperLocal.transcribe(provider, model, audio, filename, language, signal, onProgress) : openai.transcribe(provider, model, audio, filename, language, signal);
+  return isElevenLabs(provider) ? elevenlabs.transcribe(provider, model, audio, filename, language, signal) : isWhisperLocal(provider) ? whisperLocal.transcribe(provider, model, audio, filename, language, signal, onProgress) : isFunAsrLocal(provider) ? funasrLocal.transcribe(provider, model, audio, filename, language, signal, onProgress) : isQwen3AsrLocal(provider) ? qwen3AsrLocal.transcribe(provider, model, audio, filename, language, signal, onProgress) : openai.transcribe(provider, model, audio, filename, language, signal);
 }
 
 export function recognizeImage(provider: AIProvider, model: string, imagePath: string, prompt: string, signal?: AbortSignal) {
   if (isVieneuLocal(provider)) throw new ProviderError('VieNeu Local chỉ cung cấp capability TTS.', 400);
+  if (isZeroTtsLocal(provider)) throw new ProviderError('ZeroTTS Local chỉ cung cấp capability TTS.', 400);
   if (isKokoroLocal(provider)) throw new ProviderError('Kokoro Local chỉ cung cấp capability TTS.', 400);
   if (isElevenLabs(provider)) throw new ProviderError('ElevenLabs không cung cấp capability Vision.', 400);
   if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
+  if (isFunAsrLocal(provider)) throw new ProviderError('FunASR Local chỉ cung cấp capability STT.', 400);
+  if (isQwen3AsrLocal(provider)) throw new ProviderError('Qwen3-ASR Local chỉ cung cấp capability STT.', 400);
   if (isEdgeTts(provider)) throw new ProviderError('Edge TTS chỉ cung cấp capability TTS.', 400);
   return openai.recognizeImage(provider, model, imagePath, prompt, signal);
 }
@@ -108,8 +137,11 @@ export function synthesize(provider: AIProvider, model: string, voice: string, t
   } else text = normalizeSpokenText(text);
   const generate = (text:string) => {
     if (isVieneuLocal(provider)) return vieneuLocal.synthesize(provider, model, voice, text, options);
+    if (isZeroTtsLocal(provider)) return zerottsLocal.synthesize(provider, model, voice, text, options);
     if (isKokoroLocal(provider)) return kokoroLocal.synthesize(provider, model, voice, text, options);
     if (isWhisperLocal(provider)) throw new ProviderError('Whisper Local chỉ cung cấp capability STT.', 400);
+    if (isFunAsrLocal(provider)) throw new ProviderError('FunASR Local chỉ cung cấp capability STT.', 400);
+    if (isQwen3AsrLocal(provider)) throw new ProviderError('Qwen3-ASR Local chỉ cung cấp capability STT.', 400);
     return isElevenLabs(provider) ? elevenlabs.synthesize(provider, model, voice, text, options) : isCapCut(provider) ? capcut.synthesize(provider, model, voice, text, options) : isEdgeTts(provider) ? edgeTts.synthesize(provider, model, voice, text, options) : openai.synthesize(provider, model, voice, text, options);
   };
   return renderSpeechPerformance(planSpeech(text), generate, options.signal, options.format);

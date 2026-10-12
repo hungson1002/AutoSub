@@ -6,6 +6,7 @@ import type {
   CanvasStudioObject,
   CanvasStudioScene,
 } from './canvasAnimationStudio';
+import { COMPOSED_BACKGROUND_REF } from './canvasBackgroundSpec';
 
 export type CanvasAuthoredAssetKind = 'character' | 'ship' | 'stake' | 'prop';
 export type CanvasAuthoredBackgroundDefinition = {
@@ -38,33 +39,38 @@ const CHARACTER_ASSETS: CanvasAuthoredAssetDefinition[] = (
 }));
 
 const PROP_ASSETS: CanvasAuthoredAssetDefinition[] = (
-  ['tree', 'house', 'fire', 'barrel', 'shield', 'sword', 'flag', 'mountain', 'book', 'bridge', 'clock', 'lightbulb', 'ghost', 'cart', 'box', 'door', 'window', 'bowl', 'pipe', 'bamboo', 'table', 'chair', 'lantern', 'bed', 'basket', 'rope', 'stairs', 'floorboard', 'note', 'phone','oar','teapot','sandals'] as CanvasPropVariant[]
+  ['tree', 'house', 'fire', 'barrel', 'shield', 'sword', 'flag', 'mountain', 'book', 'bridge', 'clock', 'lightbulb', 'ghost', 'cart', 'box', 'door', 'window', 'bowl', 'pipe', 'bamboo', 'table', 'chair', 'lantern', 'bed', 'basket', 'rope', 'stairs', 'floorboard', 'note', 'phone','oar','teapot','sandals','pig','pig-hoof','dog','demon-dog'] as CanvasPropVariant[]
 ).map((variant) => ({
   id: `prop:${variant}`,
   kind: 'prop',
   label: `Authored ${variant}`,
-  detailScore: ['tree','fire','barrel','book','bridge','clock','lightbulb'].includes(variant) ? 9 : 8,
+  detailScore: ['tree','fire','barrel','book','bridge','clock','lightbulb','dog','demon-dog'].includes(variant) ? 9 : 8,
   propVariant: variant,
 }));
 
 export const CANVAS_AUTHORED_BACKGROUNDS: CanvasAuthoredBackgroundDefinition[] = [
+  { id: 'bg:folk-night-field', background: 'night', templates: ['wide-establishing','two-shot','hero-left','hero-right','close-reaction','prop-focus','foreground-pov','over-shoulder'], label: 'Flat folk-horror moonlit field', detailScore: 8 },
+  { id: 'bg:folk-day-field', background: 'field', templates: ['wide-establishing','two-shot','hero-left','hero-right','close-reaction','prop-focus','foreground-pov','over-shoulder'], label: 'Flat folk-horror daylight field', detailScore: 8 },
   { id:'bg:night-hill-path',background:'night',templates:['wide-establishing','two-shot','hero-left','hero-right'],label:'Safe hillside path above the flood',detailScore:10 },
   { id:'bg:night-rescue-banks',background:'night',templates:['wide-establishing','two-shot','close-reaction','prop-focus','hero-left','hero-right'],label:'Separated river banks and elevated rescue platform',detailScore:10 },
   { id: 'bg:river-establishing', background: 'river', templates: ['wide-establishing', 'hero-left', 'hero-right', 'two-shot'], label: 'Layered river establishing', detailScore: 10 },
-  { id: 'bg:river-shoreline', background: 'river', templates: ['wide-establishing', 'hero-left', 'close-reaction', 'prop-focus', 'over-shoulder'], label: 'Near-bank river detail', detailScore: 10 },
+  { id: 'bg:river-shoreline', background: 'river', templates: ['wide-establishing', 'hero-left', 'hero-right', 'two-shot', 'foreground-pov', 'close-reaction', 'prop-focus', 'over-shoulder'], label: 'Near-bank river detail', detailScore: 10 },
   { id: 'bg:river-pov', background: 'river', templates: ['foreground-pov'], label: 'Foreground-framed river POV', detailScore: 9 },
   { id: 'bg:night-river', background: 'night', templates: ['wide-establishing', 'hero-left', 'hero-right', 'two-shot', 'close-reaction'], label: 'Moonlit river environment', detailScore: 9 },
-  { id: 'bg:night-river-shoreline', background: 'night', templates: ['wide-establishing', 'hero-left', 'close-reaction', 'prop-focus', 'over-shoulder'], label: 'Moonlit near-bank river with solid left shore', detailScore: 10 },
+  { id: 'bg:night-river-shoreline', background: 'night', templates: ['wide-establishing', 'hero-left', 'hero-right', 'two-shot', 'foreground-pov', 'close-reaction', 'prop-focus', 'over-shoulder'], label: 'Moonlit near-bank river with solid left shore', detailScore: 10 },
   { id: 'bg:night-stilt-house', background: 'night', templates: ['wide-establishing', 'hero-left', 'hero-right', 'two-shot', 'close-reaction', 'prop-focus'], label: 'Isolated mountain stilt-house at night', detailScore: 10 },
   { id: 'bg:field-open', background: 'field', templates: ['wide-establishing', 'hero-left', 'hero-right', 'two-shot'], label: 'Open field layered landscape', detailScore: 9 },
   { id: 'bg:field-camp', background: 'field', templates: ['prop-focus', 'over-shoulder', 'close-reaction'], label: 'Camp/detail field environment', detailScore: 10 },
   { id: 'bg:city-street', background: 'city', templates: ['wide-establishing', 'hero-left', 'hero-right', 'two-shot'], label: 'Editorial city street', detailScore: 10 },
+  { id: 'bg:city-alley-night', background: 'city', templates: ['wide-establishing','hero-left','hero-right','two-shot','close-reaction','foreground-pov','over-shoulder'], label: 'Old urban alley or boarding-house lane at night', detailScore: 10 },
   { id: 'bg:city-close', background: 'city', templates: ['close-reaction', 'prop-focus', 'over-shoulder'], label: 'Close city facade environment', detailScore: 9 },
+  { id: 'bg:city-hallway', background: 'city', templates: ['hero-left','hero-right','two-shot','close-reaction','foreground-pov','over-shoulder','prop-focus'], label: 'Deep urban apartment or boarding-house hallway at night', detailScore: 10 },
   { id: 'bg:room-study', background: 'room', templates: ['close-reaction', 'hero-left', 'hero-right', 'two-shot', 'prop-focus'], label: 'Warm editorial interior', detailScore: 10 },
+  { id: 'bg:room-simple-night', background: 'room', templates: ['hero-left','hero-right','two-shot','close-reaction','foreground-pov','over-shoulder','prop-focus'], label: 'Dark neutral bedroom or rented-room interior without built-in furniture', detailScore: 10 },
   { id: 'bg:room-stilt-house', background: 'room', templates: ['close-reaction', 'hero-left', 'hero-right', 'two-shot', 'prop-focus', 'foreground-pov', 'over-shoulder'], label: 'Dark timber stilt-house interior', detailScore: 10 },
   { id: 'bg:room-underfloor', background: 'room', templates: ['prop-focus', 'foreground-pov', 'close-reaction'], label: 'Under-floor timber crawlspace', detailScore: 10 },
   { id: 'bg:room-floor-detail', background: 'room', templates: ['prop-focus', 'foreground-pov', 'close-reaction'], label: 'Top-down timber floor insert', detailScore: 9 },
-  { id: 'bg:room-stilt-day', background: 'room', templates: ['two-shot', 'close-reaction', 'hero-left', 'hero-right'], label: 'Morning light in the same timber interior', detailScore: 10 },
+  { id: 'bg:room-stilt-day', background: 'room', templates: ['two-shot', 'close-reaction', 'hero-left', 'hero-right', 'prop-focus', 'foreground-pov', 'over-shoulder'], label: 'Morning light in the same timber interior', detailScore: 10 },
   { id: 'bg:paper-editorial', background: 'paper', templates: ['diagram-clean', 'split-contrast', 'close-reaction', 'prop-focus', 'foreground-pov'], label: 'Editorial paper stage', detailScore: 8 },
   { id: 'bg:underwater-stakes', background: 'underwater', templates: ['wide-establishing', 'prop-focus', 'foreground-pov', 'close-reaction'], label: 'Underwater stake environment', detailScore: 9 },
   { id: 'bg:map-tactical', background: 'map', templates: ['diagram-clean', 'split-contrast', 'prop-focus'], label: 'Tactical map environment', detailScore: 8 },
@@ -125,9 +131,15 @@ export function defaultCanvasBackgroundRef(
 }
 
 export function resolveCanvasAuthoredBackground(
-  scene: Pick<CanvasStudioScene, 'background' | 'template' | 'backgroundRef'>,
+  scene: Pick<CanvasStudioScene, 'background' | 'template' | 'backgroundRef'> & Partial<Pick<CanvasStudioScene, 'backgroundSpec'>>,
 ) {
   const id = scene.backgroundRef || defaultCanvasBackgroundRef(scene);
+  // A composed location is drawn from its own spec, so it is valid for every template.
+  if (id === COMPOSED_BACKGROUND_REF) {
+    return scene.backgroundSpec
+      ? { id: COMPOSED_BACKGROUND_REF, background: scene.background, templates: [] as CanvasSceneTemplate[], label: 'Composed new location', detailScore: 9 } satisfies CanvasAuthoredBackgroundDefinition
+      : undefined;
+  }
   const asset = id ? BACKGROUND_BY_ID.get(id) : undefined;
   if (!asset) return undefined;
   const template = scene.template || 'wide-establishing';

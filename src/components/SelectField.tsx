@@ -17,14 +17,22 @@ export function SelectField({ value, options, onChange, ariaLabel, disabled = fa
   const updatePosition = () => {
     const rect = buttonRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const spaceBelow = window.innerHeight - rect.bottom - 12;
-    const spaceAbove = rect.top - 12;
-    const maxHeight = Math.max(150, Math.min(320, Math.max(spaceBelow, spaceAbove)));
-    const opensAbove = spaceBelow < 190 && spaceAbove > spaceBelow;
-    setPosition({ top: opensAbove ? Math.max(8, rect.top - Math.min(maxHeight, options.length * 52 + 12) - 6) : rect.bottom + 6, left: Math.min(rect.left, window.innerWidth - rect.width - 10), width: rect.width, maxHeight });
+    const margin = 10, gap = 6;
+    const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - margin - gap);
+    const spaceAbove = Math.max(0, rect.top - margin - gap);
+    const contentHeight = (menuRef.current?.scrollHeight ?? options.length * 52 + 10) + 2;
+    const desiredHeight = Math.min(320, contentHeight);
+    const opensAbove = spaceBelow < desiredHeight && spaceAbove > spaceBelow;
+    const maxHeight = Math.min(320, opensAbove ? spaceAbove : spaceBelow);
+    const height = Math.min(maxHeight, contentHeight);
+    const width = Math.min(rect.width, Math.max(0, window.innerWidth - margin * 2));
+    setPosition({ top: opensAbove ? rect.top - gap - height : rect.bottom + gap, left: Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin)), width, maxHeight });
   };
 
   useLayoutEffect(() => { if (open) updatePosition(); }, [open, options.length]);
+  useLayoutEffect(() => {
+    if (open) menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]')[activeIndex]?.scrollIntoView({ block: 'nearest' });
+  }, [open, activeIndex, position.maxHeight]);
   useEffect(() => listenForOtherDropdowns(dropdownId.current, () => setOpen(false)), []);
   useEffect(() => {
     if (!open) return;

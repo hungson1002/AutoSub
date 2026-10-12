@@ -20,11 +20,16 @@ export function attachCanvasArchitecture(scene: CanvasStudioScene, width: number
   if (!door) return scene;
   const panelWidth = opening.width * 100 / CANVAS_DOOR_PANEL.width;
   const panelHeight = opening.height * 100 / CANVAS_DOOR_PANEL.height;
+  const reveal=scene.animationBeats?.find(beat=>beat.action==='reveal'&&beat.targetIds.includes(door.id));
+  const needsOpening=reveal&&!door.keyframes?.some(frame=>frame.doorOpen!==undefined);
+  const keyframes=needsOpening?[...(door.keyframes||[]),{atMs:reveal.atMs,doorOpen:0},
+    {atMs:reveal.atMs+reveal.durationMs,doorOpen:.72,easing:'ease-in-out' as const}].sort((a,b)=>a.atMs-b.atMs):door.keyframes;
   return { ...scene, objects: scene.objects.map(object => object.id !== door.id ? object : {
     ...object, environmentAnchor: 'doorway',
     x: opening.x - CANVAS_DOOR_PANEL.left * panelWidth / 100,
     y: opening.y - CANVAS_DOOR_PANEL.top * panelHeight / 100,
     width: panelWidth, height: panelHeight,
     scale: 1, rotation: 0, motion: 'none', delayMs: 0, doorOpen: object.doorOpen ?? 0,
+    ...(keyframes?{keyframes}:{}),
   }) };
 }

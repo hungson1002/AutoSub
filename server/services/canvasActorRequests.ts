@@ -1,6 +1,6 @@
 import type { CanvasAnimationAction, CanvasStudioObject, CanvasStudioProject } from '../../shared/canvasAnimationStudio';
 
-const acting = new Set<CanvasAnimationAction>(['talk', 'point', 'react', 'celebrate', 'brace', 'run', 'row']);
+const acting = new Set<CanvasAnimationAction>(['talk', 'gesture', 'nod', 'point', 'react', 'celebrate', 'brace', 'run', 'row']);
 export type CanvasActorRequest = {
   key: string;
   object: CanvasStudioObject;

@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import { available, cleanupTemporaryFiles, ensureWorkdir, run, workdir } from './services/ffmpeg';
+import { available, cleanupTemporaryFiles, ensureManagedFfmpeg, ensureWorkdir, run, workdir } from './services/ffmpeg';
 import { cleanupIncompleteUploads, MAX_UPLOAD_BYTES } from './services/uploads';
 import { providerRoutes } from './routes/providers';
 import { translationRoutes } from './routes/translate';
@@ -34,6 +34,11 @@ const app = Fastify({ logger: { level: process.env.AUTOSUB_LOG_LEVEL || (process
 await app.register(cors, { origin: true });
 await app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES } });
 await ensureWorkdir();
+if (process.platform === 'win32') {
+  await ensureManagedFfmpeg().catch((error) => {
+    app.log.warn(`FFmpeg portable chưa cài được lúc khởi động: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
 await cleanupIncompleteUploads();
 app.get('/api/health', async () => ({ ok: true }));
 app.get('/api/system', async () => {

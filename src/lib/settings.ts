@@ -91,3 +91,15 @@ export function updateCapabilityAssignments(settings: AppSettings, capability: C
     providersByCapability: { ...settings.providersByCapability, [capability]: nextChoices },
   };
 }
+
+/** Only prune local choices after the backend has confirmed its model catalog. */
+export function reconcileLocalSttAssignments(settings: AppSettings, catalogs: ReadonlyMap<string, Array<{ id: string }>>): AppSettings {
+  const previous = capabilityAssignments(settings, 'stt');
+  const choices = previous.filter(choice => !catalogs.has(choice.providerId) || catalogs.get(choice.providerId)!.some(model => model.id === choice.model));
+  if (choices.length === previous.length) return settings;
+  if (!choices.length) {
+    const whisper = [...catalogs].find(([, models]) => models.some(model => model.id === 'faster-small-int8'));
+    if (whisper) choices.push({ providerId: whisper[0], model: 'faster-small-int8' });
+  }
+  return updateCapabilityAssignments(settings, 'stt', choices);
+}

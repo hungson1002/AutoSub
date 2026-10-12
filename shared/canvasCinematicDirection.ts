@@ -1,25 +1,75 @@
 import type {CanvasStudioProject,CanvasStudioScene,CanvasAnimationAction} from './canvasAnimationStudio';
 import {defaultCanvasBackgroundRef,resolveCanvasAuthoredAsset} from './canvasAssetRegistry';
 import {synchronizeCanvasPerformance} from './canvasPerformance';
+import {directCanvasConversations} from './canvasDialogueDirection';
 
 const plain=(value:string)=>value.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/đ/g,'d');
 
 function sceneTimeOfDay(scene:CanvasStudioScene) {
   const narration=scene.dialogue?.length?scene.dialogue.filter(line=>!line.characterKey).map(line=>line.text).join(' '):scene.narration||'';
-  const current=plain(`${scene.visualBrief||''} ${narration}`);
+  const visual=plain(scene.visualBrief||''),spoken=plain(narration);
+  const saysNight=(source:string)=>/(?:^|[^\p{L}])đêm(?:$|[^\p{L}])/iu.test(source.normalize('NFC'))
+    || /ban dem|trong dem|nua dem|dem (?:toi|khuya|mu mit)|troi den|anh trang|\bnight\b|midnight|moonlight/.test(plain(source));
+  const saysDay=(source:string)=>/sang hom sau|sang ngay hom sau|rang sang|hung sang|binh minh|ban mai|suong som|buoi som mai|som mai|buoi sang|anh nang|nang mai|nang som|mat troi (?:da )?(?:len cao|moc|chieu)|\bdawn\b|\bmorning\b|\bdaylight\b|sunrise|sunlight/.test(source);
   // Current-scene morning transitions override inherited night metadata.
   // Character dialogue about tomorrow is not a scene-time change.
-  if(/sang hom sau|sang ngay hom sau|hung sang|binh minh|ban mai|suong som|ban ngay|giua trua|buoi sang|anh nang|\bdawn\b|\bdaytime\b|\bmorning\b/.test(current))return 'day' as const;
-  if(/chang vang|chap choang|hoang hon|\bdusk\b|twilight|late afternoon/.test(current))return 'dusk' as const;
-  if(/\bdem\b|bong toi|troi den|anh trang|\bnight\b|midnight|moonlight/.test(current))return 'night' as const;
+  if(saysDay(visual))return 'day' as const;
+  if(/ban ngay|\bdaytime\b/.test(visual))return 'day' as const;
+  // A legend listing times when danger occurs is not a cut to midday. The
+  // current shot's explicit environment takes precedence over such narration.
+  for(const description of [visual]){
+    if(/chang vang|chap choang|hoang hon|\bdusk\b|twilight|late afternoon/.test(description))return 'dusk' as const;
+    if(saysNight(scene.visualBrief||''))return 'night' as const;
+    if(/ban ngay|giua trua|\bdaytime\b/.test(description))return 'day' as const;
+  }
+  if(scene.atmosphere?.timeOfDay==='day'||scene.atmosphere?.timeOfDay==='dusk')return scene.atmosphere.timeOfDay;
+  // Darkness can describe grief, not the light in the current shot. A repaired
+  // daytime atmosphere wins unless the visual brief explicitly changes time.
+  if(/bong toi/.test(visual))return 'night' as const;
+  if(saysDay(spoken))return 'day' as const;
+  if(/chang vang|chap choang|hoang hon|\bdusk\b|twilight|late afternoon/.test(spoken))return 'dusk' as const;
+  if(saysNight(narration))return 'night' as const;
+  if(/ban ngay|giua trua|\bdaytime\b/.test(spoken))return 'day' as const;
+  if(scene.backgroundRef==='bg:room-stilt-day')return 'day' as const;
 }
 
 /** Compile physical staging from an authored shot, not from the global prompt.
  * Retained projects and newly generated plans use exactly the same rules. */
 export function directCanvasScene(scene:CanvasStudioScene,width:number,height:number):CanvasStudioScene {
   scene=structuredClone(scene);
+  if (scene.template && !['diagram-clean', 'split-contrast'].includes(scene.template)) {
+    scene.animationBeats = scene.animationBeats?.filter(beat => beat.action !== 'reveal' || !!beat.speechCue
+      || beat.targetIds.some(id => scene.objects.some(o => o.id === id && (o.environmentAnchor === 'doorway' || o.appearance === 'water-spirit' || o.variant === 'ghost'))));
+    for (const object of scene.objects) {
+      if (!['character', 'ship', 'prop', 'image'].includes(object.kind)) continue;
+      if (['slide-left', 'slide-right', 'slide-up', 'pop'].includes(object.motion)) {
+        object.motion = 'none'; object.delayMs = 0;
+      }
+      if (object.variant === 'lantern' && object.keyframes?.some(k => k.lightLevel !== undefined)) {
+        object.opacity = 1;
+        object.keyframes = object.keyframes.map(frame => ({...frame, opacity: 1, scale: 1}));
+      }
+      const opacityKeys = object.keyframes?.filter(k => k.opacity !== undefined) || [];
+      if (object.opacity === 1 && object.appearance !== 'water-spirit' && object.variant !== 'ghost'
+        && opacityKeys[0]?.opacity === 0 && opacityKeys[1]?.opacity === 1 && opacityKeys[1].atMs <= 1800
+        && opacityKeys.slice(1).every(k => k.opacity === 1)) {
+        object.keyframes = object.keyframes?.map(({opacity, ...frame}) => frame);
+      }
+    }
+  }
   const narration=scene.dialogue?.length?scene.dialogue.filter(line=>!line.characterKey).map(line=>line.text).join(' '):scene.narration||'';
   const story=plain(narration);
+  if(scene.template){
+    const reacted=new Set<string>();
+    scene.animationBeats=scene.animationBeats?.filter(beat=>{
+      if(beat.action!=='react')return true;
+      // One recoil can illustrate surprise. Repeating the same recoil for
+      // every clause makes a quiet narrator's ending look like an exercise loop.
+      const fresh=beat.targetIds.filter(id=>!reacted.has(id));
+      if(!fresh.length)return false;
+      fresh.forEach(id=>reacted.add(id));beat.targetIds=fresh;return true;
+    });
+  }
   for(const actor of scene.objects){
     if(actor.kind!=='character'||!['walk-left','walk-right'].includes(actor.motion)||!['idle','run',undefined].includes(actor.pose))continue;
     actor.pose='run';
@@ -32,8 +82,42 @@ export function directCanvasScene(scene:CanvasStudioScene,width:number,height:nu
     const asset=resolveCanvasAuthoredAsset(object);
     if(object.kind==='prop'&&asset?.kind==='prop')object.variant=asset.propVariant;
   }
+  // cover-face is the legacy blanket pose. A frightened standing actor must
+  // not suddenly become a sleeping horizontal body between reaction beats.
+  if(!scene.objects.some(o=>o.variant==='bed'))for(const actor of scene.objects){
+    if(actor.kind!=='character')continue;
+    if(actor.pose==='cover-face')actor.pose='brace';
+    actor.keyframes=actor.keyframes?.map(k=>k.pose==='cover-face'?{...k,pose:'brace'}:k);
+  }
+  const lamps=scene.objects.filter(o=>o.variant==='lantern');
+  scene.effects=scene.effects?.flatMap(effect=>{
+    if(!['glow','flashlight'].includes(effect.type))return [effect];
+    const source=lamps.find(o=>o.id===effect.sourceObjectId)||[...lamps].sort((a,b)=>
+      Math.hypot(a.x-effect.x,a.y-effect.y)-Math.hypot(b.x-effect.x,b.y-effect.y))[0];
+    if(source)return [{...effect,sourceObjectId:source.id}];
+    // A decorative lamp halo without a lamp reads as a floating yellow disk.
+    return effect.type==='glow'?[]:[effect];
+  });
+  if(scene.template==='prop-focus'&&scene.camera){
+    const speaker=scene.objects.find(o=>o.kind==='character'&&scene.animationBeats?.some(b=>b.action==='talk'&&b.targetIds.includes(o.id)));
+    if(speaker){
+      // A dialogue shot accidentally labelled as a prop insert must frame the
+      // speaker, not push them out while centering a pair of sandals.
+      scene.template='hero-left';speaker.role='focal';
+      for(const o of scene.objects)if(o.kind==='prop'&&o.role==='focal')o.role='support';
+      scene.camera={...scene.camera,shot:'medium',focusX:speaker.x,focusY:speaker.y,zoom:1.1};
+    }
+  }
+  if(scene.template==='prop-focus'&&scene.camera){
+    const focal=scene.objects.find(o=>o.role==='focal'&&o.kind!=='character')||scene.objects.find(o=>o.kind==='prop'&&o.variant!=='lantern');
+    if(focal)scene.camera={...scene.camera,focusX:focal.x,focusY:focal.y};
+  }
   const timeOfDay=sceneTimeOfDay(scene)||scene.atmosphere?.timeOfDay;
   if(timeOfDay)scene.atmosphere={...scene.atmosphere,timeOfDay};
+  if(!scene.backgroundImageUrl&&scene.background==='room'){
+    if(timeOfDay==='day'&&scene.backgroundRef==='bg:room-stilt-house')scene.backgroundRef='bg:room-stilt-day';
+    else if((timeOfDay==='night'||timeOfDay==='dusk')&&scene.backgroundRef==='bg:room-stilt-day')scene.backgroundRef='bg:room-stilt-house';
+  }
   const river=scene.background==='river'||scene.background==='underwater'||(scene.background==='night'&&(!scene.backgroundRef||scene.backgroundRef.includes('river')||scene.backgroundRef==='bg:night-rescue-banks'));
   if(!river)return scene;
   const night=timeOfDay==='night'||timeOfDay==='dusk';
@@ -47,7 +131,7 @@ export function directCanvasScene(scene:CanvasStudioScene,width:number,height:nu
     }
   }
   for(const prop of scene.objects){
-    if(prop.variant!=='sandals'||prop.heldBy||!/bo|shore|bank/.test(plain(`${prop.designNotes||''} ${scene.visualBrief||''}`)))continue;
+    if(prop.variant!=='sandals'||prop.heldBy||prop.onBoat||!/\bbo\b|shore|bank/.test(plain(`${prop.designNotes||''} ${scene.visualBrief||''}`)))continue;
     scene.backgroundRef=night?'bg:night-river-shoreline':'bg:river-shoreline';
     prop.x=width*.14;prop.y=height*.76;prop.width=width*.11;prop.height=height*.06;
     prop.motion='none';prop.rotation=-12;
@@ -68,6 +152,16 @@ export function directCanvasScene(scene:CanvasStudioScene,width:number,height:nu
     }
   }
   const people=scene.objects.filter(o=>o.kind==='character'&&o.appearance!=='water-spirit');
+  const ferry=scene.objects.find(o=>o.kind==='ship'&&o.depth!=='background'&&o.role!=='background'
+    &&(scene.objects.some(actor=>actor.onBoat===o.id)||scene.animationBeats?.some(beat=>beat.action==='grab'
+      &&beat.focusTargetId===o.id&&ghosts.some(ghost=>beat.targetIds.includes(ghost.id)))));
+  if(ferry)for(const spirit of ghosts){
+    // Emerge beside the gunwale, with the lower body masked by the surface.
+    spirit.x=ferry.x-ferry.width*.46;spirit.y=ferry.y+ferry.height*.13;
+    spirit.waterlineY=ferry.y+ferry.height*.30;
+    spirit.height=Math.min(spirit.height,ferry.width*.36);spirit.width=spirit.height*.55;
+    spirit.keyframes=spirit.keyframes?.map(({dx,dy,rotation,...frame})=>frame);
+  }
   const cue=(pattern:RegExp)=>{
     const match=narration.match(pattern);if(!match)return;
     const prefix=plain(narration.slice(Math.max(0,(match.index||0)-35),match.index));
@@ -133,9 +227,21 @@ export function directCanvasScene(scene:CanvasStudioScene,width:number,height:nu
 
 export function directCanvasProject(project:CanvasStudioProject):CanvasStudioProject {
   let timeOfDay:NonNullable<CanvasStudioScene['atmosphere']>['timeOfDay'];
-  const result={...project,scenes:project.scenes.map(s=>{
-    timeOfDay=sceneTimeOfDay(s)||timeOfDay;
-    return directCanvasScene({...s,atmosphere:{...s.atmosphere,...(timeOfDay?{timeOfDay}:{})}},project.width,project.height);
+  const horrorProject=/ma xo|ma da|truyen ma|kinh di|horror/.test(plain(project.sourcePrompt||''));
+  const result={...project,scenes:project.scenes.map((s,index)=>{
+    timeOfDay=sceneTimeOfDay(s)||timeOfDay||s.atmosphere?.timeOfDay;
+    const scene=directCanvasScene({...s,atmosphere:{...s.atmosphere,...(timeOfDay?{timeOfDay}:{})}},project.width,project.height);
+    if(scene.template&&scene.camera&&!horrorProject){
+      const travel=scene.objects.some(o=>o.kind==='character'&&(['walk-left','walk-right'].includes(o.motion)||o.keyframes?.some(k=>Math.abs(k.dx||0)>60)));
+      // Quiet dialogue and inserts need time to be read. Reserve camera motion
+      // for occasional shots and purposeful travel, never every generated cut.
+      if(!travel&&index%4!==0)scene.camera={...scene.camera,motion:'none',keyframes:undefined};
+      else if(!travel&&scene.camera.motion!=='none'){
+        const zoom=scene.camera.zoom||1;
+        scene.camera={...scene.camera,motion:'none',keyframes:[{atMs:0,zoom},{atMs:scene.durationMs,zoom:zoom+Math.min(.04,Math.max(0,1.35-zoom)),easing:'ease-in-out'}]};
+      }
+    }
+    return scene;
   })};
   const cast=new Map<string,typeof result.scenes[number]['objects'][number]>();
   const visualStyle=/ma xo|ma da|truyen ma|kinh di|horror/.test(plain(project.sourcePrompt||''))?'horror':'story';
@@ -148,5 +254,11 @@ export function directCanvasProject(project:CanvasStudioProject):CanvasStudioPro
     actor.color=original.color;actor.secondaryColor=original.secondaryColor;actor.appearance=original.appearance;
     actor.visualStyle=original.visualStyle;actor.voiceGender=original.voiceGender||actor.voiceGender;
   }
+  directCanvasConversations(result);
+  // Every scene must leave direction with synchronized character performance.
+  // Some scene branches (for example room/field shots) return before the
+  // river-specific synchronizer in directCanvasScene, so enforce it once at
+  // project level as the final deterministic pass.
+  for(const scene of result.scenes)synchronizeCanvasPerformance(scene);
   return result;
 }

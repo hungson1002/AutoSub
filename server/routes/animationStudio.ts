@@ -11,7 +11,7 @@ import {
 } from '../services/animationProjects';
 import { batchDirectAnimationProjects, directAnimationProject, editAnimationProject, editAnimationScene, generateAnimationCharacterOptions, retryMissingAnimationImages } from '../services/animationDirector';
 import { generateAnimationThumbnailOptions } from '../services/animationThumbnail';
-import { enqueueAnimationProjectRender, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
+import { cancelAnimationRenderJob, enqueueAnimationProjectRender, enqueueAnimationRender, getAnimationRenderJob, initializeAnimationRenderJobs, listAnimationRenderJobs, transcodeAnimationRecording } from '../services/animationRender';
 import { generateAnimationAsset, generateAnimationNarration, getAnimationAssetFile, listAnimationAssets, registerAnimationAsset, resolveAnimationAssets, updateAnimationAsset } from '../services/animationAssets';
 import { autoFixAnimationQuality, checkAnimationQuality } from '../services/animationQuality';
 import { buildAnimationAssetManifest } from '../services/animationManifest';
@@ -99,6 +99,10 @@ export async function animationStudioRoutes(app: FastifyInstance) {
   app.post('/api/animation-studio/projects/:id/render-jobs', async (request, reply) => { try { const durationMs = Number(request.headers['x-animation-duration-ms']); const fps = Number(request.headers['x-animation-fps']); const timeline = Number.isFinite(durationMs) && durationMs > 0 && Number.isFinite(fps) && fps > 0 ? { durationMs, fps } : undefined; return reply.code(202).send(await enqueueAnimationRender(String((request.params as { id?: string }).id || ''), request.body as Buffer, String(request.headers['x-animation-cache-key'] || ''), timeline)); } catch (error) { return reply.code(400).send({ error: message(error, 'Không thể xếp render job.') }); } });
   app.post('/api/animation-studio/projects/:id/remotion-render-jobs', async (request, reply) => { try { const body = request.body as { project?: unknown; showSubtitles?: boolean; cacheKey?: string }; return reply.code(202).send(await enqueueAnimationProjectRender(String((request.params as { id?: string }).id || ''), body.project as Parameters<typeof enqueueAnimationProjectRender>[1], body.showSubtitles !== false, String(body.cacheKey || ''))); } catch (error) { return reply.code(400).send({ error: message(error, 'Không thể xếp render Remotion.') }); } });
   app.get('/api/animation-studio/render-jobs', async () => listAnimationRenderJobs());
+  app.post('/api/animation-studio/render-jobs/:id/cancel', async (request, reply) => {
+    try { return await cancelAnimationRenderJob(String((request.params as {id?:string}).id || '')); }
+    catch(error) { return reply.code(404).send({error:message(error,'Không tìm thấy render job.')}); }
+  });
   app.get('/api/animation-studio/render-jobs/:id', async (request, reply) => { try { return getAnimationRenderJob(String((request.params as { id?: string }).id || '')); } catch (error) { return reply.code(404).send({ error: message(error, 'Không tìm thấy render job.') }); } });
   app.get('/api/animation-studio/render-jobs/:id/video', async (request, reply) => { try { const job = getAnimationRenderJob(String((request.params as { id?: string }).id || '')); if (!job.result) throw new Error('Render chưa hoàn tất.'); reply.header('Content-Type', 'video/mp4').header('Content-Length', String(job.result.size)).header('Content-Disposition', 'attachment; filename="autosub-animation.mp4"').header('X-AutoSub-Render-Cache', job.cached ? 'hit' : 'miss'); return reply.send(createReadStream(job.result.path)); } catch (error) { return reply.code(404).send({ error: message(error, 'Video chưa sẵn sàng.') }); } });
   app.post('/api/animation-studio/direct', async (request, reply) => {

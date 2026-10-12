@@ -1,6 +1,7 @@
 import type { CanvasCameraMotion, CanvasMotion, CanvasShotType, CanvasStudioObject, CanvasStudioScene } from './types';
 import { evaluateCanvasChoreographyOffset } from './choreography';
 import { evaluateCameraKeyframes, evaluateObjectKeyframes } from './keyframes';
+import { folkCharacterScale, isFolkHorrorScene } from '../../shared/canvasFolkHorror';
 
 export type EvaluatedCanvasTransform = {
   x: number;
@@ -196,23 +197,89 @@ function shotScale(shot: CanvasShotType) {
   return 1;
 }
 
+function evaluateFolkCamera(scene: CanvasStudioScene, timeMs: number, width: number, height: number): EvaluatedCanvasCamera | undefined {
+  if (!isFolkHorrorScene(scene) || scene.backgroundImageUrl || !scene.backgroundRef?.startsWith('bg:folk-')) return;
+  const actors = scene.objects.filter(o => o.kind === 'character' && o.role !== 'background' && o.depth !== 'background');
+  if (!actors.length || actors.some(o => o.imageUrl || o.sprite || o.spriteActs?.length)) return;
+  const contactShot = scene.animationBeats?.some(b => ['grab', 'pull', 'release'].includes(b.action)) === true;
+  const victim = actors.find(o => o.role === 'focal' && o.appearance !== 'long-limbed-spirit'
+    && (o.pose === 'lie-down' || Math.abs(o.rotation) >= 60));
+  const fallenShot = !contactShot && (Boolean(victim) || actors.every(o => o.pose === 'lie-down' || Math.abs(o.rotation) >= 60));
+  const portrait = !contactShot && ['close-up', 'extreme-close-up'].includes(scene.camera?.shot || '');
+  const focal = victim || actors.find(o => o.role === 'focal') || actors[0]!;
+  const subjects = portrait || fallenShot ? [focal] : actors;
+  const bounds: { x: number; y: number }[] = [];
+  for (const actor of subjects) {
+    const ghost = actor.appearance === 'long-limbed-spirit';
+    const times = new Set([0, scene.durationMs, ...(actor.keyframes || []).map(k => k.atMs),
+      ...(scene.animationBeats || []).flatMap(b => [b.atMs, b.atMs + b.durationMs])]);
+    for (const time of times) {
+      const frame = evaluateCanvasObject(actor, scene, time);
+      if (frame.opacity < .05) continue;
+      const s = folkCharacterScale(actor) * frame.scale, angle = frame.rotation * Math.PI / 180;
+      // A portrait reserves the head, not the entire robe. Physical shots fit
+      // both actors through the complete fall, so camera movement cannot crop contact.
+      const half = portrait ? ghost ? 18 : 16 : ghost ? 29 : 25;
+      const top = portrait ? ghost ? -59 : -52 : ghost ? -59 : -52;
+      const bottom = portrait ? ghost ? -17 : -18 : ghost ? 85 : 39;
+      for (const x of [-half, half]) for (const y of [top, bottom]) bounds.push({
+        x: frame.x + s * (x * Math.cos(angle) - y * Math.sin(angle)),
+        y: frame.y + s * (x * Math.sin(angle) + y * Math.cos(angle)),
+      });
+    }
+  }
+  if (!portrait && !fallenShot && scene.camera?.shot !== 'medium') for (const tree of scene.objects.filter(o => o.variant === 'tree' && !o.imageUrl)) {
+    bounds.push({ x: tree.x - tree.width * .54, y: tree.y - tree.height * .66 },
+      { x: tree.x + tree.width * .54, y: tree.y + tree.height * .51 });
+  }
+  if (!bounds.length) return;
+  const left = Math.min(...bounds.map(p => p.x)), right = Math.max(...bounds.map(p => p.x));
+  const top = Math.min(...bounds.map(p => p.y)), bottom = Math.max(...bounds.map(p => p.y));
+  const wide = scene.camera?.shot === 'wide' && !fallenShot;
+  const fit = Math.min(width * (portrait ? .76 : wide ? .90 : .85) / Math.max(1, right - left),
+    height * (portrait ? .56 : .70) / Math.max(1, bottom - top));
+  const keyed = evaluateCameraKeyframes(scene.camera?.keyframes, timeMs);
+  const firstZoom = scene.camera?.keyframes?.find(k => k.zoom !== undefined)?.zoom || 1;
+  const breath = scene.camera?.keyframes?.some(k => k.zoom !== undefined) ? keyed.zoom / firstZoom : 1;
+  const requestedScale = fit * breath * Math.max(.8, Math.min(2, scene.camera?.zoom || 1));
+  const contactLimit = contactShot ? Math.min(width * .96 / Math.max(1, right - left), height * .82 / Math.max(1, bottom - top)) : 6;
+  const rotation = keyed.rotation, angle = rotation * Math.PI / 180;
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  const scale = Math.max(1, Math.min(6, requestedScale, Math.max(1, contactLimit)),
+    (Math.abs(cos) * width + Math.abs(sin) * height) / width,
+    (Math.abs(sin) * width + Math.abs(cos) * height) / height);
+  const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+  const halfWidth = (Math.abs(cos) * width + Math.abs(sin) * height) / (2 * scale);
+  const halfHeight = (Math.abs(sin) * width + Math.abs(cos) * height) / (2 * scale);
+  const centerX = clamp((left + right) / 2 - keyed.dx / scale, halfWidth, width - halfWidth);
+  // Put the action below captions, while keeping the background over the whole viewport.
+  const centerY = clamp((top + bottom) / 2 - height * .10 / scale - keyed.dy / scale,
+    halfHeight, height - halfHeight);
+  return { focusX: width / 2, focusY: height / 2, scale,
+    offsetX: -scale * ((centerX - width / 2) * cos - (centerY - height / 2) * sin),
+    offsetY: -scale * ((centerX - width / 2) * sin + (centerY - height / 2) * cos), rotation };
+}
+
 export function evaluateCanvasCamera(scene: CanvasStudioScene, timeMs: number, width: number, height: number): EvaluatedCanvasCamera {
+  const folkCamera = evaluateFolkCamera(scene, timeMs, width, height);
+  if (folkCamera) return folkCamera;
   const camera = scene.camera;
   const progress = sceneProgress(scene, timeMs);
   const motion: CanvasCameraMotion = camera?.motion || 'none';
-  const base = Math.max(.8, Math.min(2, camera?.zoom || 1)) * shotScale(camera?.shot || 'wide');
+  const base = camera?.zoom && camera.zoom!==1 ? Math.max(.8,Math.min(2,camera.zoom)) : shotScale(camera?.shot || 'wide');
   let scale = base;
   let offsetX = 0;
   let offsetY = 0;
   let rotation = 0;
-  if (motion === 'push-in') scale *= 1 + progress * .14;
-  else if (motion === 'pull-out') scale *= 1.14 - progress * .14;
-  else if (motion === 'pan-left') offsetX = progress * 120;
-  else if (motion === 'pan-right') offsetX = -progress * 120;
-  else if (motion === 'follow') {
+  const authoredTrack=Boolean(camera?.keyframes?.length);
+  if (!authoredTrack && motion === 'push-in') scale *= 1 + progress * .06;
+  else if (!authoredTrack && motion === 'pull-out') scale *= 1.06 - progress * .06;
+  else if (!authoredTrack && motion === 'pan-left') offsetX = progress * 120;
+  else if (!authoredTrack && motion === 'pan-right') offsetX = -progress * 120;
+  else if (!authoredTrack && motion === 'follow') {
     offsetX = Math.sin(progress * Math.PI) * -70;
     scale *= 1 + Math.sin(progress * Math.PI) * .05;
-  } else if (motion === 'impact') {
+  } else if (!authoredTrack && motion === 'impact') {
     const burst = Math.exp(-Math.pow((progress - .48) / .08, 2));
     scale *= 1 + burst * .12;
     offsetX += Math.sin(timeMs / 16) * 11 * burst;
@@ -220,18 +287,25 @@ export function evaluateCanvasCamera(scene: CanvasStudioScene, timeMs: number, w
     rotation += Math.sin(timeMs / 19) * 1.3 * burst;
   }
 
-  // Frame-addressable camera choreography layers cleanly over the lightweight
-  // preset motion, mirroring code-first video systems that interpolate tracks.
+  // An explicit track owns the camera. Zoom values are absolute scene scales,
+  // not another multiplier on top of the shot, base zoom and preset motion.
   const keyedCamera = evaluateCameraKeyframes(camera?.keyframes, timeMs);
   offsetX += keyedCamera.dx;
   offsetY += keyedCamera.dy;
-  scale *= keyedCamera.zoom;
+  if(camera?.keyframes?.some(k=>k.zoom!==undefined))scale=keyedCamera.zoom;
   rotation += keyedCamera.rotation;
 
   const focusX = Math.max(0, Math.min(width, camera?.focusX ?? width / 2));
   const focusY = Math.max(0, Math.min(height, camera?.focusY ?? height / 2));
   const physicalShot=scene.template&&scene.animationBeats?.some(beat=>['run','row','brace','celebrate','aid','assist','reach','tie','wipe','write'].includes(beat.action));
-  const actors=physicalShot?scene.objects.filter(o=>o.kind==='character'&&o.role!=='background'&&o.depth!=='background'):[];
+  const visibleActors=scene.template&&scene.template!=='prop-focus'&&(physicalShot||camera?.shot!=='wide')?scene.objects.filter(o=>o.kind==='character'&&o.role!=='background'&&o.depth!=='background'):[];
+  const portrait=['close-up','extreme-close-up'].includes(camera?.shot||'')&&!physicalShot;
+  const focalActor=visibleActors&&visibleActors.find(o=>o.role==='focal');
+  const continuityKeys=new Set(scene.continuityCameraCharacterKeys||[]);
+  const continuityActors=continuityKeys.size
+    ? (visibleActors||[]).filter(actor=>actor.characterKey&&continuityKeys.has(actor.characterKey))
+    : [];
+  const actors=continuityActors.length?continuityActors:portrait&&focalActor?[focalActor]:visibleActors||[];
   if(actors.length){
     // Reserve the whole action area, including feet and authored travel, for
     // physical scenes. A portrait crop must not hide the action below the waist.
@@ -240,21 +314,21 @@ export function evaluateCanvasCamera(scene: CanvasStudioScene, timeMs: number, w
       const size=Math.max(actor.scale||1,...frames.map(k=>k.scale??1));
       const xs=[0,...frames.map(k=>k.dx??0)],ys=[0,...frames.map(k=>k.dy??0)];
       return {left:actor.x+Math.min(...xs)-actor.width*.6*size,right:actor.x+Math.max(...xs)+actor.width*.6*size,
-        top:actor.y+Math.min(...ys)-fit*70*size,bottom:actor.y+Math.max(...ys)+fit*60*size};
+        top:actor.y+Math.min(...ys)-fit*70*size,bottom:actor.y+Math.max(...ys)+fit*(portrait?20:60)*size};
     });
     const left=Math.min(...bounds.map(b=>b.left)),right=Math.max(...bounds.map(b=>b.right));
     const top=Math.min(...bounds.map(b=>b.top)),bottom=Math.max(...bounds.map(b=>b.bottom));
     const safeScale=Math.min((width-48)/Math.max(1,right-left),(height-48)/Math.max(1,bottom-top));
     scale=Math.min(scale,Math.max(1,safeScale));
-    offsetX+=width/2-focusX-scale*((left+right)/2-focusX);
-    offsetY+=height/2-focusY-scale*((top+bottom)/2-focusY);
+    offsetX=width/2-focusX-scale*((left+right)/2-focusX);
+    offsetY=height/2-focusY-scale*((top+bottom)/2-focusY);
   }
   const angle = rotation * Math.PI / 180;
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
   // Reserve a stable crop for pans so keeping the background in view does not
   // turn a wide shot into a stationary camera or zoom in during the movement.
-  const panMargin = motion === 'pan-left' || motion === 'pan-right' ? 120 : motion === 'follow' ? 70 : 0;
+  const panMargin = authoredTrack ? 0 : motion === 'pan-left' || motion === 'pan-right' ? 120 : motion === 'follow' ? 70 : 0;
   scale = Math.max(scale, 1 + 2 * panMargin / width,
     (Math.abs(cos) * width + Math.abs(sin) * height) / width,
     (Math.abs(sin) * width + Math.abs(cos) * height) / height);

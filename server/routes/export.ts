@@ -13,7 +13,10 @@ import os from "node:os";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { run, ensureWorkdir, preferredH264Encoder, probeDimensions, workdir } from "../services/ffmpeg";
+import type { H264Encoder } from "../services/ffmpeg";
 import { getDubbingResult } from "../services/dubbingJobs";
+import { cancelPersistentExportJob, createPersistentExportJob, getPersistentExportJob, initializePersistentExportJobs, listPersistentExportJobs, openPersistentExportResult, startPersistentExportJob } from "../services/exportRenderJobs";
+import { listAnimationRenderJobs } from "../services/animationRender";
 import { assertDubbingSourceDuration, buildExportAudioFilter, buildRetimedSourceAudioFilter, retimedDurationMs, retimedTimeMs, retimedWindows } from "../services/exportAudio";
 import {
   cleanupUploadSession,
@@ -68,12 +71,15 @@ type VideoEdit = {
 type ExportProgress = {
   percent: number;
   stage: string;
-  status: "running" | "completed" | "failed" | "cancelled";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   error?: string;
   updatedAt: number;
+  createdAt: number;
+  name?: string;
 };
 
 const exportProgress = new Map<string, ExportProgress>();
+const exportControllers = new Map<string, AbortController>();
 const setExportProgress = (
   id: string | undefined,
   patch: Partial<ExportProgress>,
@@ -84,6 +90,7 @@ const setExportProgress = (
     stage: "Đang nhận video",
     status: "running" as const,
     updatedAt: Date.now(),
+    createdAt: Date.now(),
   };
   exportProgress.set(id, { ...current, ...patch, updatedAt: Date.now() });
 };
@@ -240,34 +247,34 @@ async function probeVideoFrameRate(file: string, signal?: AbortSignal) {
   return "30";
 }
 
-export function boundedSourceVideoBitrate(
-  streamBitrate: number | undefined,
-  totalBitrate: number | undefined,
-) {
-  const measured = Number.isFinite(streamBitrate) && Number(streamBitrate) > 0
-    ? Number(streamBitrate)
-    : Math.max(0, Number(totalBitrate) - 160_000);
-  // Avoid broken metadata producing either an unusable encode or another
-  // multi-gigabyte export. This range still covers normal SD through 4K input.
-  return Math.round(clamp(measured || 2_500_000, 350_000, 40_000_000));
-}
-
-async function probeSourceVideoBitrate(file: string, signal?: AbortSignal) {
-  const result = await run("ffprobe", [
-    "-v", "error",
-    "-select_streams", "v:0",
-    "-show_entries", "stream=bit_rate:format=bit_rate",
-    "-of", "json",
-    file,
-  ], signal);
-  const parsed = JSON.parse(result.stdout || "{}") as {
-    streams?: Array<{ bit_rate?: string }>;
-    format?: { bit_rate?: string };
-  };
-  return boundedSourceVideoBitrate(
-    Number(parsed.streams?.[0]?.bit_rate),
-    Number(parsed.format?.bit_rate),
-  );
+export function h264QualityArgs(encoder: H264Encoder, requestedCrf = 18) {
+  const quality = String(Math.round(clamp(Number(requestedCrf) || 18, 16, 35)));
+  const common = ["-pix_fmt", "yuv420p", "-profile:v", "high", "-tag:v", "avc1"];
+  if (encoder === "h264_amf") {
+    return [
+      "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality",
+      "-rc", "qvbr", "-qvbr_quality_level", quality,
+      "-vbaq", "true", "-preanalysis", "true",
+      ...common,
+    ];
+  }
+  if (encoder === "h264_nvenc") {
+    return [
+      "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
+      "-rc", "vbr", "-cq", quality, "-b:v", "0",
+      ...common,
+    ];
+  }
+  if (encoder === "h264_qsv") {
+    return [
+      "-c:v", "h264_qsv", "-preset", "medium", "-global_quality", quality,
+      ...common,
+    ];
+  }
+  return [
+    "-c:v", "libx264", "-preset", "fast", "-crf", quality,
+    ...common,
+  ];
 }
 
 async function probeVideoStartSeconds(file: string, signal?: AbortSignal) {
@@ -451,15 +458,73 @@ const outputSize = (
 };
 
 export async function exportRoutes(app: FastifyInstance) {
+  await initializePersistentExportJobs();
+
+  app.get('/api/export/jobs', async () => {
+    const exports = await listPersistentExportJobs();
+    const persisted = new Set(exports.map(job => job.id));
+    const preparing = [...exportControllers.keys()].flatMap(id => {
+      const job=exportProgress.get(id);
+      return job&&!persisted.has(id)?[{id,kind:'video-export' as const,name:job.name || 'Video đang chuẩn bị xuất',status:job.status,progress:job.percent,stage:job.stage,
+        createdAt:new Date(job.createdAt).toISOString(),updatedAt:new Date(job.updatedAt).toISOString(),error:job.error}]:[];
+    });
+    const animations = listAnimationRenderJobs().map(job => ({
+      id: job.id, kind: 'animation-render' as const, name: job.name || 'Video Animation Studio',
+      status: job.status === 'rendering' ? 'running' : job.status,
+      progress: job.progress, stage: job.stage || (job.status === 'queued' ? 'Đang chờ xuất video' : job.status === 'rendering' ? 'Đang render video' : ''),
+      createdAt: job.createdAt, updatedAt: job.updatedAt, error: job.error,
+    }));
+    const jobs = [...exports, ...preparing, ...animations].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return [...jobs.filter(job => ['running', 'queued'].includes(job.status)), ...jobs.filter(job => !['running', 'queued'].includes(job.status)).slice(0, 20)];
+  });
+
   app.get("/api/export/progress/:id", async (request, reply) => {
     const id = String((request.params as { id?: string }).id || "");
-    return reply.send(
-      exportProgress.get(id) || {
-        percent: 1,
-        stage: "Đang tải video lên máy",
-        status: "running",
-      },
-    );
+    const persisted = await getPersistentExportJob(id).catch(() => undefined);
+    if (persisted) {
+      return reply.send({
+        percent: persisted.percent,
+        stage: persisted.stage,
+        status: persisted.status,
+        error: persisted.error,
+      });
+    }
+    const inMemory = exportProgress.get(id);
+    if (inMemory) return reply.send(inMemory);
+    return reply.send({
+      percent: 1,
+      stage: "Đang tải video lên máy",
+      status: "running",
+    });
+  });
+
+  app.post("/api/export/cancel/:id", async (request, reply) => {
+    const id = String((request.params as { id?: string }).id || "");
+    try {
+      const job = await cancelPersistentExportJob(id);
+      setExportProgress(id, { status: "cancelled", stage: job.stage });
+      return reply.send({ status: job.status, stage: job.stage });
+    } catch {
+      if (exportProgress.has(id)) {
+        setExportProgress(id, { status: "cancelled", stage: "Đã hủy render theo yêu cầu người dùng" });
+        exportControllers.get(id)?.abort();
+        return reply.send({ status: "cancelled", stage: "Đã hủy render theo yêu cầu người dùng" });
+      }
+      return reply.code(404).send({ error: "Không tìm thấy export job." });
+    }
+  });
+
+  app.get("/api/export/result/:id", async (request, reply) => {
+    const id = String((request.params as { id?: string }).id || "");
+    try {
+      const result = await openPersistentExportResult(id);
+      reply.header("Content-Type", "video/mp4");
+      reply.header("Content-Length", String(result.totalSize));
+      reply.header("Content-Disposition", 'attachment; filename="autosub-final.mp4"');
+      return reply.send(result.stream);
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : "Export job chưa hoàn tất." });
+    }
   });
 
   app.post("/api/export/audio", async (request, reply) => {
@@ -861,10 +926,12 @@ export async function exportRoutes(app: FastifyInstance) {
     const stagedOutput = path.join(uploadDir, `${job}.rendering.mp4`);
     const separationDir = path.join(uploadDir, `${job}-stems`);
     const requestAbort = new AbortController();
+    if (exportId) {
+      exportControllers.set(exportId, requestAbort);
+      setExportProgress(exportId, {name: path.basename(input)});
+    }
     let responseSent = false;
-    const abortOnClientClose = () => { if (!responseSent) requestAbort.abort(); };
-    request.raw.once("aborted", abortOnClientClose);
-    reply.raw.once("close", abortOnClientClose);
+    let persistentRenderCreated = false;
     let responseStream: ReturnType<typeof createReadStream> | undefined;
 
     try {
@@ -1252,48 +1319,17 @@ export async function exportRoutes(app: FastifyInstance) {
       if (audio) args.push("-map", "[audioout]");
       if (scaledOutput) args.push("-s", scaledOutput);
       // Keep H.264 compatibility and benchmark the available encoders once per
-      // server run. Prefer hardware encoders when they are faster on this box.
-      const requestedCrf = Math.round(clamp(Number(options.crf ?? 20), 16, 35));
-      const requestedQuality = String(requestedCrf);
+      // server run. When filters/subtitles force a re-encode, use quality-based
+      // rate control instead of copying the source bitrate. Reusing the source
+      // bitrate is especially destructive when the input is HEVC/AV1 or when
+      // ffprobe cannot report a stream bitrate (the old path fell back to only
+      // 2.5 Mbps, which can make a 1080p export look like 720p).
+      const requestedCrf = Math.round(clamp(Number(options.crf ?? 18), 16, 35));
       const videoEncoder = copyVideoStream ? undefined : await preferredH264Encoder();
-      const targetVideoBitrate = copyVideoStream
-        ? undefined
-        : await probeSourceVideoBitrate(input, requestAbort.signal);
-      const targetBitrate = `${Math.round((targetVideoBitrate || 2_500_000) / 1000)}k`;
-      const maxBitrate = `${Math.round((targetVideoBitrate || 2_500_000) * 1.35 / 1000)}k`;
-      const bufferSize = `${Math.round((targetVideoBitrate || 2_500_000) * 2 / 1000)}k`;
       if (copyVideoStream) {
         args.push("-c:v", "copy");
-      } else if (videoEncoder === "h264_amf") {
-        args.push(
-          "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality",
-          "-rc", "vbr_peak", "-b:v", targetBitrate,
-          "-maxrate", maxBitrate, "-bufsize", bufferSize,
-          "-vbaq", "true", "-preanalysis", "true",
-          "-pix_fmt", "yuv420p", "-profile:v", "high", "-tag:v", "avc1",
-        );
-      } else if (videoEncoder === "h264_nvenc") {
-        args.push(
-          "-c:v", "h264_nvenc", "-preset", "fast",
-          "-rc", "vbr", "-cq", requestedQuality, "-b:v", targetBitrate,
-          "-maxrate", maxBitrate, "-bufsize", bufferSize,
-          "-pix_fmt", "yuv420p", "-profile:v", "high", "-tag:v", "avc1",
-        );
-      } else if (videoEncoder === "h264_qsv") {
-        args.push(
-          "-c:v", "h264_qsv", "-preset", "veryfast",
-          "-b:v", targetBitrate, "-maxrate", maxBitrate, "-bufsize", bufferSize,
-          "-pix_fmt", "yuv420p", "-profile:v", "high", "-tag:v", "avc1",
-        );
       } else {
-        args.push(
-          "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high",
-          // One-pass average bitrate keeps long exports close to the source
-          // size. The old CRF 16 + ultrafast combination could inflate 1 GB
-          // source videos to several gigabytes.
-          "-tag:v", "avc1", "-preset", "veryfast",
-          "-b:v", targetBitrate, "-maxrate", maxBitrate, "-bufsize", bufferSize,
-        );
+        args.push(...h264QualityArgs(videoEncoder || "libx264", requestedCrf));
       }
       if (audio) args.push("-c:a", "aac", "-b:a", "160k");
       else args.push("-an");
@@ -1304,146 +1340,44 @@ export async function exportRoutes(app: FastifyInstance) {
       // full-file faststart relocation is unnecessary. The staged file is
       // validated and atomically renamed before it is sent to the browser.
       args.push("-progress", "pipe:2", "-nostats", stagedOutput);
-      let progressBuffer = "";
-      let renderSpeed = "";
-      let renderStalled = false;
-      const renderAbort = new AbortController();
-      const abortRender = () => renderAbort.abort();
-      requestAbort.signal.addEventListener("abort", abortRender, {
-        once: true,
+      const rendererStage = copyVideoStream
+        ? "Đang ghép nhanh audio với video gốc"
+        : videoEncoder === "h264_amf"
+          ? "AMD GPU đang render video và âm thanh"
+          : videoEncoder === "h264_nvenc"
+            ? "NVIDIA GPU đang render video và âm thanh"
+            : videoEncoder === "h264_qsv"
+              ? "Intel GPU đang render video và âm thanh"
+              : "FFmpeg CPU đang render video và âm thanh";
+      if (!exportId) throw new Error("Thiếu exportId cho durable export job.");
+      if (exportProgress.get(exportId)?.status === "cancelled") return reply.code(409).send({error:'Đã hủy xuất video.',code:'EXPORT_CANCELLED'});
+      await createPersistentExportJob({
+        id: exportId,
+        args,
+        stagedOutput,
+        output,
+        expectedDurationSeconds: renderDurationMs / 1000,
+        cleanupDir: uploadDir,
+        stage: rendererStage,
       });
-      let stallTimer: ReturnType<typeof setTimeout> | undefined;
-      const armStallTimer = () => {
-        if (stallTimer) clearTimeout(stallTimer);
-        stallTimer = setTimeout(() => {
-          renderStalled = true;
-          renderAbort.abort();
-        }, 180_000);
-      };
+      persistentRenderCreated = true;
+      setExportProgress(exportId, { percent: 45, stage: rendererStage, status: "running" });
+      const durableResult = await startPersistentExportJob(exportId);
       setExportProgress(exportId, {
-        percent: Math.max(45, exportProgress.get(exportId || "")?.percent || 0),
-        stage: copyVideoStream ? "Đang ghép nhanh audio với video gốc" : videoEncoder === "h264_amf" ? "AMD GPU đang render video và âm thanh" : videoEncoder === "h264_nvenc" ? "NVIDIA GPU đang render video và âm thanh" : videoEncoder === "h264_qsv" ? "Intel GPU đang render video và âm thanh" : "FFmpeg CPU đang render video và âm thanh",
-        status: "running",
+        percent: durableResult.percent,
+        stage: durableResult.stage,
+        status: durableResult.status,
+        error: durableResult.error,
       });
-      armStallTimer();
-      try {
-        await run("ffmpeg", args, renderAbort.signal, (chunk) => {
-          armStallTimer();
-          progressBuffer += chunk;
-          const lines = progressBuffer.split(/\r?\n/);
-          progressBuffer = lines.pop() || "";
-          for (const line of lines) {
-            const trimmed = line.trim();
-            const speedMatch = /^speed=([^\s]+)/.exec(trimmed);
-            if (speedMatch) renderSpeed = speedMatch[1];
-            const match = /^out_time_(?:us|ms)=(\d+)/.exec(trimmed);
-            if (!match) continue;
-            const renderedMs = Number(match[1]) / 1000;
-            const renderer = copyVideoStream ? "Ghép nhanh" : videoEncoder === "h264_amf" ? "AMD GPU" : videoEncoder === "h264_nvenc" ? "NVIDIA GPU" : videoEncoder === "h264_qsv" ? "Intel GPU" : "FFmpeg CPU";
-            const stage = renderSpeed
-              ? `${renderer} đang render video và âm thanh · ${renderSpeed}`
-              : `${renderer} đang render video và âm thanh`;
-            setExportProgress(exportId, {
-              percent: Math.round(
-                Math.min(96, Math.max(45, 45 + (renderedMs / renderDurationMs) * 51)),
-              ),
-              stage,
-              status: "running",
-            });
-          }
-        });
-      } catch (error) {
-        if (renderStalled) {
-          throw new Error(
-            "FFmpeg không tạo thêm dữ liệu trong 3 phút nên AutoSub đã dừng job bị treo. Hãy thử xuất lại và kiểm tra dung lượng đĩa nếu lỗi lặp lại.",
-          );
-        }
-        throw error;
-      } finally {
-        if (stallTimer) clearTimeout(stallTimer);
-        requestAbort.signal.removeEventListener("abort", abortRender);
+      if (durableResult.status === "cancelled") return reply.code(409).send({error:'Đã hủy xuất video.',code:'EXPORT_CANCELLED'});
+      if (durableResult.status !== "completed") {
+        throw new Error(durableResult.error || "FFmpeg không thể render video.");
       }
-
-      setExportProgress(exportId, {
-        percent: 97,
-        stage: "Đã mã hóa xong, đang kiểm tra file MP4",
-        status: "running",
-      });
-      const renderProbe = await run(
-        "ffprobe",
-        [
-          "-v",
-          "error",
-          "-show_entries",
-          "format=format_name,duration:stream=codec_type",
-          "-of",
-          "json",
-          stagedOutput,
-        ],
-        requestAbort.signal,
-      );
-      let renderInfo: {
-        format?: { format_name?: string; duration?: string };
-        streams?: Array<{ codec_type?: string }>;
-      };
-      try {
-        renderInfo = JSON.parse(renderProbe.stdout) as typeof renderInfo;
-      } catch {
-        throw new Error(
-          "FFmpeg tạo file MP4 chưa hoàn chỉnh; không thể xác minh trước khi tải.",
-        );
-      }
-      const hasVideo = renderInfo.streams?.some(
-        (stream) => stream.codec_type === "video",
-      );
-      const validMp4 = renderInfo.format?.format_name
-        ?.split(",")
-        .includes("mp4");
-      const renderedDuration = Number(renderInfo.format?.duration);
-      if (
-        !hasVideo ||
-        !validMp4 ||
-        !Number.isFinite(renderedDuration) ||
-        renderedDuration <= 0
-      ) {
-        throw new Error(
-          "FFmpeg tạo file MP4 chưa hoàn chỉnh; AutoSub đã chặn tải file lỗi. Hãy xuất lại video.",
-        );
-      }
-      const expectedDurationSeconds = renderDurationMs / 1000;
-      const minimumCompleteDuration = Math.max(
-        0,
-        expectedDurationSeconds - Math.max(3, expectedDurationSeconds * 0.001),
-      );
-      if (renderedDuration < minimumCompleteDuration) {
-        throw new Error(
-          `FFmpeg chỉ render được ${renderedDuration.toFixed(1)}s / ${expectedDurationSeconds.toFixed(1)}s; AutoSub đã chặn tải video bị cắt ngắn.`,
-        );
-      }
-      setExportProgress(exportId, {
-        percent: 99,
-        stage: "File hợp lệ, đang hoàn tất tải xuống",
-        status: "running",
-      });
-      await rename(stagedOutput, output);
-      const outputStat = await stat(output);
-      setExportProgress(exportId, {
-        percent: 100,
-        stage: "Đã render xong video",
-        status: "completed",
-      });
+      const outputStat = await stat(durableResult.output);
       reply.header("Content-Type", "video/mp4");
       reply.header("Content-Length", String(outputStat.size));
-      reply.header(
-        "Content-Disposition",
-        'attachment; filename="autosub-final.mp4"',
-      );
-      responseStream = createReadStream(output);
-      const cleanupOutput = () => {
-        void cleanupUploadSession(uploadDir);
-      };
-      responseStream.once("close", cleanupOutput);
-      responseStream.once("error", cleanupOutput);
+      reply.header("Content-Disposition", 'attachment; filename="autosub-final.mp4"');
+      responseStream = createReadStream(durableResult.output);
       responseSent = true;
       return reply.send(responseStream);
     } catch (error) {
@@ -1452,7 +1386,7 @@ export async function exportRoutes(app: FastifyInstance) {
           status: "cancelled",
           stage: "Đã hủy render",
         });
-        return;
+        return reply.code(409).send({error:'Đã hủy xuất video.',code:'EXPORT_CANCELLED'});
       }
       const message =
         error instanceof Error
@@ -1468,17 +1402,16 @@ export async function exportRoutes(app: FastifyInstance) {
       });
       return reply.code(500).send({ error: friendly });
     } finally {
-      request.raw.off("aborted", abortOnClientClose);
-      reply.raw.off("close", abortOnClientClose);
-      await Promise.all(
-        [assFile, stagedOutput, responseSent ? undefined : output]
-          .filter((file): file is string => Boolean(file))
-          .map((file) => unlink(file).catch(() => undefined)),
-      );
-      await rm(separationDir, { recursive: true, force: true }).catch(
-        () => undefined,
-      );
-      if (!responseSent) await cleanupUploadSession(uploadDir);
+      if (exportId) exportControllers.delete(exportId);
+      if (!persistentRenderCreated) {
+        await Promise.all(
+          [assFile, stagedOutput, responseSent ? undefined : output]
+            .filter((file): file is string => Boolean(file))
+            .map((file) => unlink(file).catch(() => undefined)),
+        );
+        await rm(separationDir, { recursive: true, force: true }).catch(() => undefined);
+        if (!responseSent) await cleanupUploadSession(uploadDir);
+      }
       if (fields.exportId)
         setTimeout(
           () => exportProgress.delete(fields.exportId),

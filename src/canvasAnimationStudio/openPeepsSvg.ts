@@ -51,6 +51,7 @@ function selectedExpression(object: CanvasStudioObject) {
 
 export function shouldUseOpenPeeps(scene: CanvasStudioScene, object: CanvasStudioObject) {
   if (object.kind !== 'character') return false;
+  if(object.visualStyle==='horror')return false;
   // Open Peeps works for bright editorial explainers, but its friendly facial
   // vocabulary reads as comedy in the Ma Xó world. Horror shots stay on the
   // authored hand-drawn actor so close-ups remain restrained and ominous.

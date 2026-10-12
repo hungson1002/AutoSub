@@ -5,6 +5,8 @@ import type {
 } from './types';
 import { evaluateObjectKeyframes } from './keyframes';
 import { isCanvasDialogueSpeaker } from '../../shared/canvasDialogue';
+import {canvasContactRelease} from '../../shared/canvasSpatialRelations';
+import { evaluateFolkVictimPull } from './folkHorrorContact';
 
 export type CanvasChoreographyOffset = {
   x: number;
@@ -33,6 +35,14 @@ function beatProgress(beat: CanvasAnimationBeat, timeMs: number) {
   return clamp01(local / Math.max(120, beat.durationMs));
 }
 
+function poseHoldEnvelope(beat:CanvasAnimationBeat,timeMs:number){
+  const elapsed=Math.max(0,timeMs-beat.atMs),duration=Math.max(180,beat.durationMs);
+  const ramp=Math.min(300,duration*.30);
+  const inWeight=easeInOutCubic(elapsed/ramp);
+  const outWeight=easeInOutCubic((duration-elapsed)/ramp);
+  return clamp01(inWeight*outWeight);
+}
+
 function activeBeats(scene: CanvasStudioScene, objectId: string, timeMs: number) {
   return (scene.animationBeats || []).filter((beat) =>
     beat.targetIds.includes(objectId)
@@ -43,7 +53,7 @@ function activeBeats(scene: CanvasStudioScene, objectId: string, timeMs: number)
 
 /** Ease limbs into and out of authored actions without changing speech timing. */
 export function canvasActingTiming(object: CanvasStudioObject, scene: CanvasStudioScene, timeMs: number) {
-  const actions: Record<string, string> = {grab:'reach',struggle:'struggle',sink:'struggle',surface:'idle',talk: 'talk', point: 'point', react: 'brace', brace: 'brace', run: 'run', row: 'row', celebrate: 'celebrate',reach:'reach',wipe:'wipe',write:'write',tie:'tie',aid:'aid',assist:'assist' };
+  const actions: Record<string, string> = {gesture:'gesture',nod:'nod',grab:'reach',struggle:'struggle',sink:'struggle',surface:'idle',talk: 'talk', point: 'point', react: 'brace', brace: 'brace', run: 'run', row: 'row', celebrate: 'celebrate',reach:'reach',wipe:'wipe',write:'write',tie:'tie',aid:'aid',assist:'assist' };
   const beat = scene.animationBeats?.filter(item=>item.targetIds.includes(object.id)&&item.atMs<=timeMs&&actions[item.action]===object.pose)
     .sort((a,b)=>a.atMs-b.atMs).at(-1);
   if (!beat) return { weight: 1, localMs: timeMs };
@@ -52,6 +62,7 @@ export function canvasActingTiming(object: CanvasStudioObject, scene: CanvasStud
   const ramp = Math.min(320, beat.durationMs / 3);
   const source=scene.objects.find(actor=>actor.id===object.id)||object;
   const nextPose=evaluateObjectKeyframes(source.keyframes,beat.atMs+beat.durationMs+1).pose||source.pose;
+  if(beat.action==='row'&&object.onBoat&&nextPose==='row')return {localMs:elapsed,weight:easeInOutCubic(elapsed/ramp)};
   const walkingTrack=object.pose==='run'&&nextPose==='run'&&source.keyframes?.some(frame=>frame.dx!==undefined&&frame.dx!==0);
   const hold=beat.action==='grab'||(['aid','assist','tie','wipe','write','reach'].includes(object.pose||'')&&nextPose===object.pose)||walkingTrack;
   if(hold)return {localMs,weight:easeInOutCubic(localMs/ramp)};
@@ -68,8 +79,12 @@ export function applyCanvasChoreographyState(
   const keyed = evaluateObjectKeyframes(object.keyframes, timeMs);
   const speaker = scene.dialogue?.find(line => timeMs >= (line.atMs || 0) && timeMs < (line.atMs || 0) + (line.durationMs || 0));
   const speakerObject = speaker && scene.objects.find(actor => actor.kind === 'character' && isCanvasDialogueSpeaker(actor,speaker));
-  let lookAtId = object.lookAtId || (speakerObject?.id !== object.id ? speakerObject?.id : undefined);
-  const grip=scene.animationBeats?.find(beat=>beat.action==='grab'&&beat.targetIds.includes(object.id)&&timeMs>=beat.atMs);
+  let lookAtId = keyed.lookAtId ?? object.lookAtId ?? (speakerObject?.id !== object.id ? speakerObject?.id : undefined);
+  const completed=scene.objects.find(prop=>prop.handling?.actorId===object.id&&timeMs>=prop.handling.atMs+prop.handling.durationMs)?.handling;
+  const carryingPlace=scene.objects.some(prop=>prop.handling?.actorId===object.id&&prop.handling.kind==='place'&&timeMs<prop.handling.atMs);
+  const grip=scene.animationBeats?.filter(beat=>beat.action==='grab'&&beat.targetIds.includes(object.id)&&timeMs>=beat.atMs
+    &&!scene.animationBeats?.some(end=>end.targetIds.includes(object.id)&&end.atMs>=beat.atMs&&timeMs>=end.atMs+(end.action==='sink'?end.durationMs:0)
+      &&canvasContactRelease(end))).at(-1);
   if(grip)lookAtId=grip.focusTargetId;
   // A held physical pose must keep its contact anchor after the cue window.
   // Otherwise an aid/tie pose falls back to a generic raised arm mid-scene.
@@ -82,12 +97,13 @@ export function applyCanvasChoreographyState(
   if (!beats.length) {
     return {
       ...object,
-      pose: grip?'reach':keyed.pose || ((object.motion==='walk-left'||object.motion==='walk-right') && (!object.pose||object.pose==='idle')?'run':object.pose),
+      pose: carryingPlace?'reach':completed?(completed.kind==='pick-up'?'reach':'idle'):grip?'reach':keyed.pose || ((object.motion==='walk-left'||object.motion==='walk-right') && (!object.pose||object.pose==='idle')?'run':object.pose),
       expression: keyed.expression || object.expression,
       facing: keyed.facing || object.facing,
-      lookAtId,
+      lookAtId:completed||carryingPlace?undefined:lookAtId,
       doorOpen: keyed.doorOpen ?? object.doorOpen,
       lightLevel: keyed.lightLevel ?? object.lightLevel,
+      revealProgress: keyed.revealProgress ?? object.revealProgress,
       boxOpen: keyed.boxOpen ?? object.boxOpen,
       bandageProgress: keyed.bandageProgress ?? object.bandageProgress,
     };
@@ -104,6 +120,13 @@ export function applyCanvasChoreographyState(
     else if (beat.action === 'talk') {
       // Speech changes the face, not a seated/walking/pointing body or its mood.
       pose = !object.pose || object.pose==='idle' || object.pose==='talk' ? 'talk' : object.pose;
+    } else if (beat.action === 'gesture') {
+      pose = beat.action;
+    } else if (beat.action === 'nod') {
+      // Horror nod/listen/head-up is a head overlay. Replacing a seated or
+      // planted pose with "nod" used to re-solve both arms and legs, making a
+      // simple head turn look like the whole character popped to another rig.
+      if(object.visualStyle!=='horror')pose='nod';
     } else if (beat.action === 'point') {
       pose = 'point';
     } else if (beat.action === 'react') {
@@ -123,14 +146,17 @@ export function applyCanvasChoreographyState(
     }
   }
 
+  const lastPoseFrameAt=object.keyframes?.reduce((at,k)=>k.pose&&k.atMs<=timeMs?Math.max(at,k.atMs):at,-1)??-1;
+  const baselineIdle=(keyed.pose==='idle'||keyed.pose==='talk')&&lastPoseFrameAt<=Math.max(...beats.map(b=>b.atMs));
   return {
     ...object,
-    pose: keyed.pose==='idle'&&['run','assist','aid','tie','wipe','write'].includes(pose||'')?pose:keyed.pose || pose,
+    pose: carryingPlace?'reach':baselineIdle || (keyed.pose==='idle'&&['run','assist','aid','tie','wipe','write'].includes(pose||''))?pose:keyed.pose || pose,
     expression: keyed.expression || expression,
     facing: keyed.facing || object.facing,
-    lookAtId,
+    lookAtId:carryingPlace?undefined:lookAtId,
     doorOpen: keyed.doorOpen ?? object.doorOpen,
     lightLevel: keyed.lightLevel ?? object.lightLevel,
+    revealProgress: keyed.revealProgress ?? object.revealProgress,
     boxOpen: keyed.boxOpen ?? object.boxOpen,
     bandageProgress: keyed.bandageProgress ?? object.bandageProgress,
   };
@@ -147,6 +173,13 @@ export function evaluateCanvasChoreographyOffset(
   let scale = 1;
   let rotation = 0;
   let opacity = 1;
+
+  const entrance = scene.animationBeats?.find(beat => beat.action === 'reveal' && beat.targetIds.includes(object.id));
+  if (entrance) {
+    const reveal = easeOutCubic(Math.min(1, beatProgress(entrance, timeMs) * 1.6));
+    scale *= .72 + .28 * reveal;
+    opacity *= reveal;
+  }
 
   const authoredTravel = object.keyframes?.some(frame => frame.dx !== undefined || frame.dy !== undefined);
   // Physical emergence/descent is one persistent trajectory, not a loop or fade.
@@ -170,16 +203,19 @@ export function evaluateCanvasChoreographyOffset(
     const intensity = Math.max(.2, Math.min(2.5, beat.intensity || 1));
     const ease = easeOutCubic(progress);
 
-    if (beat.action === 'reveal') {
-      const reveal = easeOutCubic(Math.min(1, progress * 1.6));
-      scale *= .72 + .28 * reveal;
-      opacity *= reveal;
-    } else if (beat.action === 'react') {
-      const envelope = Math.sin(progress * Math.PI);
-      // A single recoil and recovery, not a high-frequency tremor.
-      x -= 4 * envelope * intensity;
-      rotation -= 1.5 * envelope * intensity;
-      scale *= 1 + envelope * .03 * intensity;
+    if (beat.action === 'react') {
+      const envelope=poseHoldEnvelope(beat,timeMs);
+      const anticipation=Math.max(0,1-Math.abs(progress-.12)/.12);
+      const focus=beat.focusTargetId&&scene.objects.find(target=>target.id===beat.focusTargetId);
+      const away=focus?(focus.x>=object.x?-1:1):(object.facing==='left'?1:-1);
+      // One short pre-tension, then a readable recoil/hold/settle AWAY from
+      // the actual threat. This keeps the same motion grammar when staging is
+      // mirrored rather than hard-coding every scare toward screen-left.
+      x -= away*anticipation*1.2*intensity;
+      x += away*5.2*envelope*intensity;
+      rotation -= away*anticipation*.6*intensity;
+      rotation += away*2.0*envelope*intensity;
+      scale *= 1 + envelope * .022 * intensity;
     } else if (beat.action === 'impact') {
       const anticipation = Math.exp(-Math.pow((progress - .28) / .12, 2));
       const impact = Math.exp(-Math.pow((progress - .52) / .1, 2));
@@ -198,14 +234,19 @@ export function evaluateCanvasChoreographyOffset(
     } else if (beat.action === 'row') {
       rotation += Math.sin(progress * Math.PI * 2) * 2.5 * intensity;
     } else if (beat.action === 'talk') {
-      y += Math.sin(progress * Math.PI * 2) * .6 * intensity;
+      // Speech animates the mouth; it must not bounce the actor or held props.
     } else if (beat.action === 'celebrate') {
       y -= Math.sin(progress * Math.PI) * 9 * intensity;
       scale *= 1 + Math.sin(progress * Math.PI) * .035 * intensity;
     } else if (beat.action === 'brace') {
-      rotation += Math.sin(progress * Math.PI) * -2.5 * intensity;
+      const envelope=poseHoldEnvelope(beat,timeMs);
+      const focus=beat.focusTargetId&&scene.objects.find(target=>target.id===beat.focusTargetId);
+      const away=focus?(focus.x>=object.x?-1:1):(object.facing==='left'?1:-1);
+      rotation += away*1.8*envelope*intensity;
+      x += away*1.8*envelope*intensity;
     }
   }
 
-  return { x, y, scale, rotation, opacity };
+  const pull = evaluateFolkVictimPull(object, scene, timeMs);
+  return { x: x + pull.x, y: y + pull.y, scale, rotation: rotation + pull.rotation, opacity };
 }

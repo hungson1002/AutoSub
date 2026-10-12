@@ -27,7 +27,7 @@ import {
   Scissors,
   Volume2,
 } from "../components/Icons";
-import { formatClock, wrapSubtitleText } from "../lib/subtitles";
+import { cuesForDubbingTimeline, formatClock, hasDubbingTimeline, wrapSubtitleText } from "../lib/subtitles";
 import { layoutTimelineCues } from "../lib/subtitleTimeline";
 import {
   announceDropdownOpen,
@@ -40,7 +40,7 @@ import { VideoTrimModal } from "./VideoTrimModal";
 import { VideoCropModal } from "./VideoCropModal";
 import { SubtitleTimeline } from "./SubtitleTimeline";
 import { cropVideoStyle } from "../lib/videoCrop";
-import { buildActiveCueIndex, findActiveCue, findActiveCues } from "../lib/activeCue";
+import { buildActiveCueIndex, filterPreviewActiveCues, findPreviewActiveCue, findActiveCues } from "../lib/activeCue";
 import { dubAudioNeedsResync } from "../lib/mediaSync";
 
 type Roi = { x: number; y: number; w: number; h: number };
@@ -93,7 +93,7 @@ const VIDEO_CENTER_SNAP_PX = 14;
 const RECT_RESIZE_HANDLES: ResizeKind[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 const TEXT_RESIZE_HANDLES: ResizeKind[] = ["nw", "ne", "se", "sw", "e", "w"];
 const activeCueSignature = (index: ReturnType<typeof buildActiveCueIndex>, timeMs: number) =>
-  findActiveCues(index, timeMs).map((cue) => cue.id).join("\u0000");
+  filterPreviewActiveCues(findActiveCues(index, timeMs)).map((cue) => cue.id).join("\u0000");
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 const audioRefTime = (audio: HTMLAudioElement) =>
@@ -267,12 +267,17 @@ export function VideoPlayer({
   const videoRef = useRef<HTMLVideoElement>(null);
   const appliedSeekRef = useRef<{ source?: string; id: number } | undefined>(undefined);
   const dubAudioRef = useRef<HTMLAudioElement>(null);
+  const dubAudioElementRef = useRef<HTMLAudioElement>();
+  const dubAudioContextRef = useRef<AudioContext>();
+  const dubAudioSourceRef = useRef<MediaElementAudioSourceNode>();
+  const dubAudioGainRef = useRef<GainNode>();
   const stageRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
   const playIntentRef = useRef(false);
   const [time, setTime] = useState(0);
   const [subtitleClockTime, setSubtitleClockTime] = useState(0);
+  const subtitleClockTimeRef = useRef(0);
   const subtitleClockSignatureRef = useRef("");
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
@@ -320,19 +325,23 @@ export function VideoPlayer({
     trimStartMs: 0,
   });
   const effectiveVideoEdit = videoEdit || internalVideoEdit;
-  const cueIndex = useMemo(() => buildActiveCueIndex(slowVideoToMatchSpeech ? cues.map((cue) => cue.dubbing && Number.isFinite(cue.dubbing.timelineStartMs) && Number.isFinite(cue.dubbing.timelineEndMs) ? { ...cue, startMs: cue.dubbing.timelineStartMs as number, endMs: cue.dubbing.timelineEndMs as number } : cue) : cues), [cues, slowVideoToMatchSpeech]);
+  const useDubbingSubtitleTimeline = (audioMode === "dubbed" && Boolean(dubAudioUrl)) || slowVideoToMatchSpeech || hasDubbingTimeline(cues);
+  const timelineCues = useMemo(() => cuesForDubbingTimeline(cues, useDubbingSubtitleTimeline), [cues, useDubbingSubtitleTimeline]);
+  const cueIndex = useMemo(() => buildActiveCueIndex(timelineCues), [timelineCues]);
   const [activeCueId, setActiveCueId] = useState<string>();
   const syncSubtitleClock = useCallback(
     (nextTimeMs: number, force = false) => {
       const signature = activeCueSignature(cueIndex, nextTimeMs);
-      if (!force && signature === subtitleClockSignatureRef.current) return;
+      const previousTimeMs = subtitleClockTimeRef.current;
+      if (!force && signature === subtitleClockSignatureRef.current && Math.abs(nextTimeMs - previousTimeMs) < 16) return;
       subtitleClockSignatureRef.current = signature;
+      subtitleClockTimeRef.current = nextTimeMs;
       setSubtitleClockTime(nextTimeMs);
     },
     [cueIndex],
   );
-  const activeCues = useMemo(() => findActiveCues(cueIndex, subtitleClockTime), [cueIndex, subtitleClockTime]);
-  const cueLayerLayout = useMemo(() => layoutTimelineCues(cues), [cues]);
+  const activeCues = useMemo(() => filterPreviewActiveCues(findActiveCues(cueIndex, subtitleClockTime)), [cueIndex, subtitleClockTime]);
+  const cueLayerLayout = useMemo(() => layoutTimelineCues(timelineCues), [timelineCues]);
   const cueLayers = useMemo(() => new Map(cueLayerLayout.items.map(({ cue, lane }) => [cue.id, lane])), [cueLayerLayout.items]);
   const displayDuration = Math.max(
     1,
@@ -370,6 +379,11 @@ export function VideoPlayer({
     const cue = retimeCues.find((item) => sourceMs >= item.sourceStartMs && sourceMs < item.sourceStartMs + item.durationMs && item.extensionMs > 0);
     return cue ? Math.max(0.0625, cue.durationMs / (cue.durationMs + cue.extensionMs)) : 1;
   }, [retimeCues]);
+  const previewTimelineMs = useCallback((sourceMs: number) => {
+    const audio = dubAudioRef.current;
+    if (playingDub && audio && !audio.paused) return audioRefTime(audio) * 1000;
+    return sourceToTimelineMs(sourceMs);
+  }, [playingDub, sourceToTimelineMs]);
   // The returned dub track is the single source of truth for preview. Playing
   // the source video's dialogue underneath it creates the exact two-speaker
   // echo users hear, especially for older jobs saved with original audio on.
@@ -380,7 +394,7 @@ export function VideoPlayer({
   const muteOriginal = playingDub && originalMixVolume <= 0;
   const syncActiveCue = useCallback(
     (nextTimeMs: number) => {
-      const nextId = findActiveCue(cueIndex, nextTimeMs)?.id;
+      const nextId = findPreviewActiveCue(cueIndex, nextTimeMs)?.id;
       setActiveCueId((current) => (current === nextId ? current : nextId));
     },
     [cueIndex],
@@ -405,8 +419,35 @@ export function VideoPlayer({
     if (playIntentRef.current && !video.paused) void audio.play().catch(() => undefined);
   }, [audioMode, dubAudioUrl, sourceToTimelineMs]);
   useEffect(() => {
-    if (dubAudioRef.current) dubAudioRef.current.volume = clamp(volume * dubMixVolume, 0, 1);
+    const audio = dubAudioRef.current;
+    if (!audio) return;
+    if (dubAudioElementRef.current !== audio) {
+      dubAudioSourceRef.current?.disconnect();
+      dubAudioGainRef.current?.disconnect();
+      void dubAudioContextRef.current?.close().catch(() => undefined);
+      const context = new AudioContext();
+      const source = context.createMediaElementSource(audio);
+      const gain = context.createGain();
+      source.connect(gain);
+      gain.connect(context.destination);
+      dubAudioElementRef.current = audio;
+      dubAudioContextRef.current = context;
+      dubAudioSourceRef.current = source;
+      dubAudioGainRef.current = gain;
+    }
+    audio.volume = clamp(volume, 0, 1);
+    if (dubAudioGainRef.current)
+      dubAudioGainRef.current.gain.value = clamp(dubMixVolume, 0, 5);
   }, [dubAudioUrl, volume, dubMixVolume]);
+  useEffect(() => () => {
+    dubAudioSourceRef.current?.disconnect();
+    dubAudioGainRef.current?.disconnect();
+    void dubAudioContextRef.current?.close().catch(() => undefined);
+    dubAudioElementRef.current = undefined;
+    dubAudioSourceRef.current = undefined;
+    dubAudioGainRef.current = undefined;
+    dubAudioContextRef.current = undefined;
+  }, []);
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
@@ -442,9 +483,10 @@ export function VideoPlayer({
     setPlaying(false);
     setTime(0);
     subtitleClockSignatureRef.current = "";
+    subtitleClockTimeRef.current = 0;
     setSubtitleClockTime(0);
     setDuration((asset?.durationMs || 0) + retimedDurationExtensionMs);
-    setActiveCueId(findActiveCue(cueIndex, 0)?.id);
+    setActiveCueId(findPreviewActiveCue(cueIndex, 0)?.id);
     // Cue edits rebuild the active-cue index. They must not reset a paused
     // preview to 00:00; only a changed media source/duration starts from zero.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -528,20 +570,23 @@ export function VideoPlayer({
     onActiveCueChange?.(activeCueId);
   }, [activeCueId, onActiveCueChange]);
   useEffect(() => {
-    const next = sourceToTimelineMs((videoRef.current?.currentTime || 0) * 1000);
+    const next = previewTimelineMs((videoRef.current?.currentTime || 0) * 1000);
     syncActiveCue(next);
     syncSubtitleClock(next, true);
-  }, [syncActiveCue, syncSubtitleClock, sourceToTimelineMs]);
+  }, [syncActiveCue, syncSubtitleClock, previewTimelineMs]);
   useEffect(() => {
     const video = videoRef.current;
     if (!video || typeof video.requestVideoFrameCallback !== "function") return;
     let frameId = 0;
     let cancelled = false;
     const updateActiveCue: VideoFrameRequestCallback = (_now, metadata) => {
-      const timelineMs = sourceToTimelineMs(metadata.mediaTime * 1000);
+      const sourceMs = metadata.mediaTime * 1000;
+      const timelineMs = previewTimelineMs(sourceMs);
+      setTime((current) => Math.abs(current - timelineMs) < 8 ? current : timelineMs);
+      onTime?.(timelineMs);
       syncSubtitleClock(timelineMs);
       syncActiveCue(timelineMs);
-      const rate = playbackRateAt(metadata.mediaTime * 1000);
+      const rate = playbackRateAt(sourceMs);
       if (Math.abs(video.playbackRate - rate) > 0.001) video.playbackRate = rate;
       const audio = dubAudioRef.current;
       if (
@@ -559,7 +604,7 @@ export function VideoPlayer({
       cancelled = true;
       video.cancelVideoFrameCallback(frameId);
     };
-  }, [asset?.url, playingDub, syncActiveCue, syncSubtitleClock, sourceToTimelineMs, playbackRateAt]);
+  }, [asset?.url, playingDub, syncActiveCue, syncSubtitleClock, previewTimelineMs, playbackRateAt]);
   useEffect(() => {
     if (!videoRef.current || !seekRequest) return;
     // Cue edits recreate the clock callbacks. An already consumed seek must
@@ -592,6 +637,7 @@ export function VideoPlayer({
       if (audioMode === "dubbed" && dubAudioUrl && audio) {
         audio.pause();
         audio.currentTime = sourceToTimelineMs(video.currentTime * 1000) / 1000;
+        void dubAudioContextRef.current?.resume().catch(() => undefined);
       }
       void video
         .play()

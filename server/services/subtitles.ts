@@ -1,4 +1,4 @@
-import type { SubtitleSegment } from '../types';
+import type { SubtitleSegment, SubtitleWord } from '../types';
 
 type OcrSymbolLanguage = 'vi' | 'en' | 'zh' | 'ko';
 const ocrSymbolWords: Record<OcrSymbolLanguage, Record<string, string>> = {
@@ -152,6 +152,174 @@ export function offsetSubtitleSegments(segments: SubtitleSegment[], offsetSecond
       })),
     } : {}),
   }));
+}
+
+type TimedSubtitleWord = {
+  raw: SubtitleWord;
+  text: string;
+  start: number;
+  end: number;
+};
+
+const subtitleWordText = (word: SubtitleWord) => String(word.text ?? word.word ?? '').trim();
+
+function timedSubtitleWords(segment: SubtitleSegment): TimedSubtitleWord[] | undefined {
+  if (!Array.isArray(segment.words) || !segment.words.length) return undefined;
+  const words = segment.words.map((word) => {
+    const text = subtitleWordText(word);
+    const start = finiteTimestamp(word.start)
+      ? word.start
+      : finiteTimestamp(word.startMs)
+        ? word.startMs / 1000
+        : undefined;
+    const end = finiteTimestamp(word.end)
+      ? word.end
+      : finiteTimestamp(word.endMs)
+        ? word.endMs / 1000
+        : undefined;
+    if (!text || !finiteTimestamp(start) || !finiteTimestamp(end) || end <= start || word.type === 'audio_event') return undefined;
+    return { raw: word, text, start, end };
+  });
+  if (words.some((word) => !word)) return undefined;
+  return words as TimedSubtitleWord[];
+}
+
+const strongSubtitleBoundary = (text: string) => /[.!?。！？…][”’"'）)\]】》]*$/u.test(text.trim());
+const weakSubtitleBoundary = (text: string) => /[,，、;；:：][”’"'）)\]】》]*$/u.test(text.trim());
+const openingPunctuation = /[(\[【《“‘]$/u;
+const closingPunctuation = /^[,.;:!?%。，、！？；：…）)\]】》”’]+$/u;
+const hanCharacter = /\p{Script=Han}/u;
+const awkwardCueStart = new Set([
+  'thì', 'là', 'mà', 'của', 'được', 'đã', 'đang', 'sẽ', 'vẫn', 'cũng',
+  '的', '了', '着', '过', '得', '地', '呢', '吧', '吗', '啊', '呀', '嘛',
+]);
+
+function joinSubtitleWords(words: TimedSubtitleWord[]) {
+  let output = '';
+  for (const word of words) {
+    const token = word.text.trim();
+    if (!token) continue;
+    if (!output) {
+      output = token;
+      continue;
+    }
+    const previousCharacter = [...output].at(-1) || '';
+    const firstCharacter = [...token][0] || '';
+    if (
+      closingPunctuation.test(token)
+      || openingPunctuation.test(output)
+      || (hanCharacter.test(previousCharacter) && hanCharacter.test(firstCharacter))
+    ) {
+      output += token;
+    } else {
+      output += ` ${token}`;
+    }
+  }
+  return output.replace(/\s+([,.;:!?%。，、！？；：…])/gu, '$1').trim();
+}
+
+function normalizedCueStart(text: string) {
+  return text.toLocaleLowerCase().replace(/^[\s"'“”‘’([{【《]+/u, '').replace(/[\s,.;:!?。！？；：]+$/u, '').trim();
+}
+
+function boundaryScore(words: TimedSubtitleWord[], boundary: number, originalBoundary: number) {
+  const previous = words[boundary - 1];
+  const next = words[boundary];
+  if (!previous || !next) return { score: Number.NEGATIVE_INFINITY, evidence: false };
+  const gapMs = Math.round((next.start - previous.end) * 1000);
+  let score = 0;
+  let evidence = false;
+  if (strongSubtitleBoundary(previous.text)) {
+    score += 130;
+    evidence = true;
+  } else if (weakSubtitleBoundary(previous.text)) {
+    score += 78;
+    evidence = true;
+  }
+  if (gapMs >= 550) {
+    score += 120;
+    evidence = true;
+  } else if (gapMs >= 320) {
+    score += 80;
+    evidence = true;
+  } else if (gapMs >= 180) {
+    score += 45;
+    evidence = true;
+  } else if (gapMs >= 100) {
+    score += 18;
+    evidence = true;
+  }
+  if (awkwardCueStart.has(normalizedCueStart(next.text))) score -= 36;
+  score -= Math.abs(boundary - originalBoundary) * 7;
+  return { score, evidence };
+}
+
+/**
+ * Repair suspicious provider boundaries using native word timestamps without
+ * rebuilding the whole subtitle track. Only a few words around each cut are
+ * reconsidered, and a cut moves only when punctuation/acoustic evidence is
+ * clearly stronger than the provider boundary.
+ */
+export function rebalanceWordTimedSegmentBoundaries(segments: SubtitleSegment[]) {
+  if (segments.length < 2) return segments;
+  const output = segments.map((segment) => ({
+    ...segment,
+    ...(Array.isArray(segment.words) ? { words: [...segment.words] } : {}),
+  }));
+
+  for (let index = 0; index < output.length - 1; index += 1) {
+    const left = output[index];
+    const right = output[index + 1];
+    const leftWords = timedSubtitleWords(left);
+    const rightWords = timedSubtitleWords(right);
+    if (!leftWords?.length || !rightWords?.length) continue;
+
+    const leftSpeaker = String(left.speakerId || left.speaker_id || leftWords.map((word) => wordSpeaker(word.raw)).find(Boolean) || '').trim();
+    const rightSpeaker = String(right.speakerId || right.speaker_id || rightWords.map((word) => wordSpeaker(word.raw)).find(Boolean) || '').trim();
+    if (leftSpeaker && rightSpeaker && leftSpeaker !== rightSpeaker) continue;
+
+    const currentGapMs = Math.round((rightWords[0].start - leftWords[leftWords.length - 1].end) * 1000);
+    if (currentGapMs > 550 || currentGapMs < -120) continue;
+    if (strongSubtitleBoundary(leftWords[leftWords.length - 1].text)) continue;
+
+    const combined = [...leftWords, ...rightWords];
+    const originalBoundary = leftWords.length;
+    const original = boundaryScore(combined, originalBoundary, originalBoundary);
+    const minimumLeftStart = combined[0].start;
+    const maximumRightEnd = combined[combined.length - 1].end;
+    const from = Math.max(1, originalBoundary - 5);
+    const to = Math.min(combined.length - 1, originalBoundary + 5);
+    let bestBoundary = originalBoundary;
+    let bestScore = original.score;
+
+    for (let boundary = from; boundary <= to; boundary += 1) {
+      if (boundary === originalBoundary) continue;
+      const leftEnd = combined[boundary - 1].end;
+      const rightStart = combined[boundary].start;
+      if ((leftEnd - minimumLeftStart) < 0.55 || (maximumRightEnd - rightStart) < 0.55) continue;
+      const candidate = boundaryScore(combined, boundary, originalBoundary);
+      if (!candidate.evidence) continue;
+      if (candidate.score > bestScore) {
+        bestBoundary = boundary;
+        bestScore = candidate.score;
+      }
+    }
+
+    if (bestBoundary === originalBoundary || bestScore < original.score + 24) continue;
+
+    const nextLeftWords = combined.slice(0, bestBoundary);
+    const nextRightWords = combined.slice(bestBoundary);
+    left.words = nextLeftWords.map((word) => word.raw);
+    left.start = nextLeftWords[0].start;
+    left.end = nextLeftWords[nextLeftWords.length - 1].end;
+    left.text = joinSubtitleWords(nextLeftWords);
+    right.words = nextRightWords.map((word) => word.raw);
+    right.start = nextRightWords[0].start;
+    right.end = nextRightWords[nextRightWords.length - 1].end;
+    right.text = joinSubtitleWords(nextRightWords);
+  }
+
+  return output;
 }
 
 /**

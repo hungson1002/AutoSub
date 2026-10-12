@@ -1,4 +1,5 @@
 import type {CanvasStudioProject,CanvasAnimationAction} from './canvasAnimationStudio';
+import { isFolkHorrorBrief } from './canvasFolkHorror';
 
 const normalize=(text:string)=>text.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/đ/g,'d');
 type Rule={pattern:RegExp;action:CanvasAnimationAction;prop?:string;person?:boolean};
@@ -19,11 +20,18 @@ export type CanvasActionCoverageIssue={sceneId:string;sceneName:string;cue:strin
  * The Director's independent review covers the remaining narration semantics. */
 export function evaluateCanvasActionCoverage(project:CanvasStudioProject):CanvasActionCoverageIssue[]{
   const issues:CanvasActionCoverageIssue[]=[];
+  const storyRules:Rule[] = isFolkHorrorBrief(project.sourcePrompt || '') ? [...rules,
+    {pattern:/quấn[^.!?,]{0,45}(?:vào cổ|quanh cổ|cổ)/giu,action:'grab',person:true},
+    {pattern:/kéo[^.!?,]{0,45}ngã/giu,action:'pull',person:true},
+  ] : rules;
   for(const scene of project.scenes){
     // Quoted dialogue may describe plans, memories or commands to someone off-screen.
     const narration=scene.dialogue?.length?scene.dialogue.filter(l=>!l.characterKey).map(l=>l.text).join(' '):scene.narration||'';
     const normalized=normalize(narration);
-    for(const rule of rules)for(const match of narration.matchAll(rule.pattern)){
+    for(const rule of storyRules)for(const match of narration.matchAll(rule.pattern)){
+      // A ground fall is not a water descent merely because the phrase contains "xuống".
+      if (rule.action === 'sink' && isFolkHorrorBrief(project.sourcePrompt || '') && /ngã/iu.test(match[0])
+        && scene.objects.some(object => object.appearance === 'long-limbed-spirit')) continue;
       const prefix=normalized.slice(Math.max(0,match.index!-35),match.index);
       const nonEvent=rule.action==='grab'||rule.action==='sink'
         ? /(?:khong|dung|dinh|tung)\b[^,.;!?]{0,28}$/
@@ -37,7 +45,7 @@ export function evaluateCanvasActionCoverage(project:CanvasStudioProject):Canvas
       if(!valid)issues.push({sceneId:scene.id,sceneName:scene.name,cue,message:`Lời kể “${cue}” cần ${rule.action}, đúng người và đích tương tác${rule.prop?` (${rule.prop})`:''}; đứng/chỉ tay không minh họa hành động này.`});
     }
     const sit=narration.match(/\bngồi\b/iu);
-    if(sit&&!/(?:khong|dung|se|cu)\s+ngoi/.test(normalized)&&!scene.objects.some(o=>o.kind==='character'&&(o.pose==='sit'||o.keyframes?.some(k=>k.pose==='sit')))){
+    if(sit&&!/(?:khong(?:\s+the)?|dung|se|cu)\s+ngoi/.test(normalized)&&!scene.objects.some(o=>o.kind==='character'&&(o.pose==='sit'||o.keyframes?.some(k=>k.pose==='sit')))){
       issues.push({sceneId:scene.id,sceneName:scene.name,cue:'ngồi',message:'Lời kể mô tả ngồi nhưng không có nhân vật ngồi.'});
     }
   }

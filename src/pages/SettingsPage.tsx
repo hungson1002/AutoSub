@@ -7,7 +7,7 @@ import { ProviderSelector } from '../components/ProviderSelector';
 import { ProviderConfigForm, type ProviderConfigMode } from '../components/ProviderConfigForm';
 import { CapabilityProvidersPanel } from '../components/CapabilityProvidersPanel';
 import { Check, ChevronDown, CirclePlay, LoaderCircle, Plus, RefreshCw, Settings2, Trash2, X, Zap } from '../components/Icons';
-import { isRequiredTtsProvider, normalizeProvider, presetCapabilities, resolvedProviderType } from '../lib/providers';
+import { ensureBuiltInProviders, isRequiredTtsProvider, normalizeProvider, presetCapabilities, resolvedProviderType } from '../lib/providers';
 import { capabilityAssignments, updateCapabilityAssignments } from '../lib/settings';
 import { McpSettingsPanel } from '../components/McpSettingsPanel';
 
@@ -65,6 +65,16 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
   const ima2LoginAttempt = useRef(0);
   const ima2VerificationTab = useRef<Window | null>(null);
 
+  useEffect(() => {
+    const ensured = ensureBuiltInProviders(providers);
+    const currentSignature = providers.map((provider) => `${provider.id}:${provider.providerType}:${provider.models.map((model) => model.id).join(',')}`).join('|');
+    const ensuredSignature = ensured.map((provider) => `${provider.id}:${provider.providerType}:${provider.models.map((model) => model.id).join(',')}`).join('|');
+    if (currentSignature !== ensuredSignature) {
+      onProvidersChange(ensured);
+      storage.saveProviders(ensured);
+    }
+  }, [providers, onProvidersChange, ensureBuiltInProviders]);
+
   useEffect(() => { void api.system().then(setSystem).catch(() => setSystem({ ffmpeg: false, ffprobe: false, workdir: settings.workdir })); }, [settings.workdir]);
   useEffect(() => {
     let mounted = true;
@@ -110,7 +120,7 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
     try {
       const result = await api.listModels(normalized);
       let voices = normalized.voices;
-      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts' || resolvedProviderType(normalized) === 'edge-tts' || resolvedProviderType(normalized) === 'vieneu-local' || resolvedProviderType(normalized) === 'kokoro-local') {
+      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts' || resolvedProviderType(normalized) === 'edge-tts' || resolvedProviderType(normalized) === 'vieneu-local' || resolvedProviderType(normalized) === 'zerotts-local' || resolvedProviderType(normalized) === 'kokoro-local') {
         try { voices = (await api.listVoices(normalized)).voices; } catch (error) { onNotice(providerErrorMessage(error, 'Không thể lấy voices.'), 'error'); }
       }
       const models = result.warning && !result.models.length ? normalized.models : result.models;
@@ -127,7 +137,7 @@ export function SettingsPage({ providers, onProvidersChange, settings, onSetting
       const normalized = { ...provider, baseUrl: normalizeProviderBaseUrl(provider.baseUrl) };
       const result = await api.listModels(normalized);
       let voices = normalized.voices;
-      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts' || resolvedProviderType(normalized) === 'edge-tts' || resolvedProviderType(normalized) === 'vieneu-local' || resolvedProviderType(normalized) === 'kokoro-local') { try { voices = (await api.listVoices(normalized)).voices; } catch { /* model refresh vẫn dùng được nếu voice endpoint tạm lỗi */ } }
+      if (resolvedProviderType(normalized) === 'elevenlabs' || resolvedProviderType(normalized) === 'capcut-tts' || resolvedProviderType(normalized) === 'edge-tts' || resolvedProviderType(normalized) === 'vieneu-local' || resolvedProviderType(normalized) === 'zerotts-local' || resolvedProviderType(normalized) === 'kokoro-local') { try { voices = (await api.listVoices(normalized)).voices; } catch { /* model refresh vẫn dùng được nếu voice endpoint tạm lỗi */ } }
       const models = result.warning && !result.models.length ? normalized.models : result.models;
       updateProvider({ ...normalized, models, voices });
       onNotice(result.warning || `Đã refresh ${models.length} model.`, 'success');

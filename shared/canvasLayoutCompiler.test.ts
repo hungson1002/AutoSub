@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createCanvasObject,
+  createCanvasProject,
+  createCanvasScene,
   type CanvasStudioProject,
   type CanvasStudioScene,
 } from './canvasAnimationStudio';
@@ -14,6 +16,180 @@ import { evaluateCanvasVisualQuality } from './canvasVisualQuality';
 import {resolveCanvasAuthoredBackground} from './canvasAssetRegistry';
 import {evaluateCanvasObject} from '../src/canvasAnimationStudio/runtime';
 import {applyCanvasChoreographyState} from '../src/canvasAnimationStudio/choreography';
+
+test('story cuts start with a complete stage instead of replaying presentation entrances',()=>{
+  const source=createCanvasScene();source.template='two-shot';source.background='room';source.backgroundRef='bg:room-stilt-house';
+  source.objects=[createCanvasObject('character',{id:'actor',motion:'slide-left',delayMs:300}),
+    createCanvasObject('prop',{id:'box',variant:'box',motion:'pop',delayMs:200})];
+  source.animationBeats=[{id:'intro',action:'reveal',targetIds:['actor','box'],atMs:400,durationMs:2400}];
+  const scene=compileCanvasSceneLayout(source,1280,720);
+  for(const object of scene.objects){
+    const initial=evaluateCanvasObject(object,scene,0);
+    assert.equal(initial.opacity,1);assert.equal(initial.x,object.x);assert.equal(initial.scale,object.scale);
+    assert.deepEqual(evaluateCanvasObject(object,scene,400),initial);
+  }
+});
+
+test('room furnishings retain their world anchors across cuts and reclining actors are grounded',()=>{
+  const project=createCanvasProject();
+  const first=createCanvasScene();first.template='two-shot';first.background='room';first.backgroundRef='bg:room-stilt-house';
+  first.objects=[createCanvasObject('prop',{id:'cabinet-1',label:'Cabinet',variant:'box',slot:'background-left',motion:'none',role:'background'})];
+  const second={...structuredClone(first),id:'sleep',template:'hero-left' as const,objects:[
+    createCanvasObject('prop',{id:'cabinet-2',label:'Dark cabinet',variant:'box',slot:'background-right',motion:'none',role:'background'}),
+    createCanvasObject('prop',{id:'bed',variant:'bed',slot:'background-left',sizeClass:'medium',motion:'none'}),
+    createCanvasObject('character',{id:'sleeper',characterKey:'worker',pose:'lie-down',slot:'hero-left',motion:'none'}),
+  ]};
+  const third={...structuredClone(second),id:'close',template:'close-reaction' as const};
+  third.objects[1]!.slot='hero';third.objects[1]!.sizeClass='hero';
+  project.scenes=[first,second,third];
+  const result=compileCanvasProjectLayout(project),cabinet=result.scenes[0]!.objects[0]!;
+  for(const scene of result.scenes.slice(1)){
+    const prop=scene.objects.find(o=>o.variant==='box')!,bed=scene.objects.find(o=>o.variant==='bed')!,actor=scene.objects.find(o=>o.kind==='character')!;
+    assert.deepEqual([prop.x,prop.y,prop.width,prop.height],[cabinet.x,cabinet.y,cabinet.width,cabinet.height]);
+    assert.ok(bed.y>project.height*.65,'mattress must be on the floor, not on the wall');
+    assert.ok(bed.width>=project.width*.3,'bed must accommodate the recurring actor');
+    assert.equal(actor.x,bed.x);assert.equal(actor.y,bed.y-bed.height*.2);
+  }
+  const a=result.scenes[1]!.objects.find(o=>o.variant==='bed')!,b=result.scenes[2]!.objects.find(o=>o.variant==='bed')!;
+  assert.deepEqual([a.x,a.y,a.width,a.height],[b.x,b.y,b.width,b.height]);
+  assert.deepEqual(compileCanvasProjectLayout(result),result,'export recompilation must not move the set');
+});
+
+test('flat interior depth maps character scale to a believable floor contact plane',()=>{
+  const project=createCanvasProject();
+  const scene=createCanvasScene();
+  scene.template='wide-establishing';scene.background='room';scene.backgroundRef='bg:room-simple-night';
+  scene.objects=[
+    createCanvasObject('character',{id:'near',characterKey:'near',role:'focal',slot:'hero-left',motion:'none'}),
+    createCanvasObject('character',{id:'far',characterKey:'far',role:'support',slot:'background-right',motion:'none'}),
+  ];
+  project.scenes=[scene];
+  const compiled=compileCanvasProjectLayout(project).scenes[0]!;
+  const near=compiled.objects.find(o=>o.id==='near')!,far=compiled.objects.find(o=>o.id==='far')!;
+  const foot=(object:typeof near)=>object.y+Math.min(object.width/68,object.height/100)*46.8;
+  const floorY=project.height*.76;
+  assert.ok(foot(near)>floorY&&foot(far)>floorY,'both actors must stand on the floor plane');
+  assert.ok(foot(far)<foot(near)-10,'smaller background actor must contact the floor closer to the horizon');
+  assert.ok(far.height<near.height,'depth must still be expressed through scale');
+  assert.deepEqual(compileCanvasProjectLayout({...project,scenes:[compiled]}).scenes[0],compiled,'perspective grounding stays idempotent');
+});
+
+test('stage furniture survives intervening clean inserts without adopting insert coordinates',()=>{
+  const project=createCanvasProject();
+  const room=createCanvasScene();
+  room.stageId='room-7';room.template='hero-left';room.background='room';room.backgroundRef='bg:room-simple-night';
+  room.objects=[
+    createCanvasObject('character',{id:'linh-a',characterKey:'linh',slot:'hero-left',motion:'none'}),
+    createCanvasObject('prop',{id:'table-a',label:'Bàn',variant:'table',slot:'mid-center',motion:'none',role:'support'}),
+    createCanvasObject('prop',{id:'door-a',label:'Cửa',variant:'door',slot:'background-right',motion:'none',role:'support'}),
+  ];
+  const hall=createCanvasScene();
+  hall.stageId='hall';hall.template='close-reaction';hall.background='city';hall.backgroundRef='bg:city-hallway';
+  hall.objects=[createCanvasObject('character',{id:'linh-h',characterKey:'linh',slot:'hero-left',motion:'none'})];
+  const insert=createCanvasScene();
+  insert.stageId='room-7';insert.template='prop-focus';insert.background='room';insert.backgroundRef='bg:room-simple-night';
+  insert.camera={shot:'close-up',motion:'none',focusX:640,focusY:390,zoom:1.2};
+  insert.objects=[
+    createCanvasObject('prop',{id:'note',label:'Mảnh giấy',variant:'note',role:'focal',slot:'hero'}),
+    createCanvasObject('prop',{id:'door-insert',label:'Cửa',variant:'door',role:'support',slot:'support-left',motion:'none'}),
+  ];
+  const reaction=createCanvasScene();
+  reaction.stageId='room-7';reaction.template='close-reaction';reaction.background='room';reaction.backgroundRef='bg:room-simple-night';
+  reaction.camera={shot:'close-up',motion:'none',focusX:390,focusY:360,zoom:1.12};
+  reaction.objects=[createCanvasObject('character',{id:'linh-b',characterKey:'linh',slot:'hero-left',motion:'none'})];
+  project.scenes=[room,hall,insert,reaction];
+  const result=compileCanvasProjectLayout(project);
+  const baseDoor=result.scenes[0]!.objects.find(o=>o.variant==='door')!;
+  const returnDoor=result.scenes[3]!.objects.find(o=>o.variant==='door')!;
+  const baseTable=result.scenes[0]!.objects.find(o=>o.variant==='table')!;
+  const returnTable=result.scenes[3]!.objects.find(o=>o.variant==='table')!;
+  assert.deepEqual(
+    [returnDoor.x,returnDoor.y,returnDoor.width,returnDoor.height,returnDoor.slot],
+    [baseDoor.x,baseDoor.y,baseDoor.width,baseDoor.height,baseDoor.slot],
+    'clean insert door cannot redefine the physical room door',
+  );
+  assert.deepEqual(
+    [returnTable.x,returnTable.y,returnTable.width,returnTable.height,returnTable.slot],
+    [baseTable.x,baseTable.y,baseTable.width,baseTable.height,baseTable.slot],
+  );
+  assert.deepEqual(compileCanvasProjectLayout(result),result,'stage registry must remain idempotent after recompilation');
+});
+
+test('prop-focus floor clue stays hero-sized and idempotent across export recompilation',()=>{
+  const project=createCanvasProject();
+  const room=createCanvasScene();
+  room.stageId='room-7';room.template='hero-left';room.background='room';room.backgroundRef='bg:room-simple-night';
+  room.objects=[createCanvasObject('prop',{id:'door',label:'Cửa',variant:'door',slot:'background-right',motion:'none',role:'support'})];
+  const clue=createCanvasScene();
+  clue.stageId='room-7';clue.template='prop-focus';clue.background='room';clue.backgroundRef='bg:room-simple-night';
+  clue.narration='Một mảnh giấy nằm dưới khe cửa.';
+  clue.camera={shot:'close-up',motion:'none',focusX:640,focusY:390,zoom:1.1};
+  clue.objects=[
+    createCanvasObject('prop',{id:'note',label:'Mảnh giấy',variant:'note',role:'focal',slot:'hero',sizeClass:'hero'}),
+    createCanvasObject('prop',{id:'door-close',label:'Cửa',variant:'door',role:'support',slot:'support-left',motion:'none'}),
+  ];
+  project.scenes=[room,clue];
+  const first=compileCanvasProjectLayout(project);
+  const note=first.scenes[1]!.objects.find(o=>o.id==='note')!;
+  assert.ok(note.width>=project.width*.28,'floor grounding must not shrink the focal close insert');
+  const second=compileCanvasProjectLayout(first);
+  const note2=second.scenes[1]!.objects.find(o=>o.id==='note')!;
+  assert.deepEqual([note2.x,note2.y,note2.width,note2.height],[note.x,note.y,note.width,note.height]);
+});
+
+test('quiet narration holds keep recurring actors on their established sides',()=>{
+  const project=createCanvasProject(),first=createCanvasScene();first.template='two-shot';first.background='room';first.backgroundRef='bg:room-stilt-house';
+  first.narration='The two workers wait quietly.';
+  first.objects=[createCanvasObject('character',{id:'a',characterKey:'a',slot:'hero-left',pose:'idle',motion:'none'}),
+    createCanvasObject('character',{id:'b',characterKey:'b',slot:'hero-right',pose:'idle',motion:'none'})];
+  const next=structuredClone(first);next.id='next';next.objects[0]!.slot='hero-right';next.objects[1]!.slot='hero-left';
+  project.scenes=[first,next];const result=compileCanvasProjectLayout(project);
+  for(const [i,actor] of result.scenes[0]!.objects.entries())assert.equal(result.scenes[1]!.objects[i]!.x,actor.x);
+  assert.deepEqual(compileCanvasProjectLayout(result),result);
+});
+
+test('dimming a lamp changes emitted light without fading or shrinking its physical frame',()=>{
+  const scene=createCanvasScene();scene.template='two-shot';scene.background='room';scene.backgroundRef='bg:room-stilt-house';
+  scene.objects=[createCanvasObject('prop',{variant:'lantern',motion:'none',keyframes:[
+    {atMs:0,lightLevel:1,opacity:1,scale:1},{atMs:1500,lightLevel:0,opacity:.3,scale:.96},
+  ]})];
+  const compiled=compileCanvasSceneLayout(scene,1280,720),lamp=compiled.objects[0]!;
+  assert.equal(evaluateCanvasObject(lamp,compiled,1500).opacity,1);
+  assert.equal(evaluateCanvasObject(lamp,compiled,1500).scale,1);
+  assert.equal(applyCanvasChoreographyState(lamp,compiled,1500).lightLevel,0);
+});
+
+test('a narrated sleeping actor rests on the mattress instead of standing behind it',()=>{
+  const scene=createCanvasScene();scene.template='hero-left';scene.background='room';scene.backgroundRef='bg:room-stilt-house';
+  scene.narration='The worker is asleep on the bed.';
+  scene.objects=[createCanvasObject('prop',{variant:'bed',slot:'hero-left',motion:'none'}),
+    createCanvasObject('character',{pose:'idle',slot:'mid-left',motion:'none',keyframes:[{atMs:0,pose:'idle'}]})];
+  const result=compileCanvasSceneLayout(scene,1280,720),actor=result.objects[1]!,bed=result.objects[0]!;
+  assert.equal(actor.pose,'lie-down');assert.equal(actor.keyframes![0]!.pose,'lie-down');
+  assert.equal(actor.x,bed.x);assert.ok(actor.zIndex>bed.zIndex);
+});
+
+test('manual raw stages and ambiguous duplicate furniture never inherit another object anchor',()=>{
+  const project=createCanvasProject(),first=createCanvasScene();first.objects=[createCanvasObject('prop',{variant:'box',motion:'none',x:200})];
+  first.template=undefined;
+  const second=structuredClone(first);second.id='second';second.objects[0]!.x=900;
+  project.scenes=[first,second];const raw=compileCanvasProjectLayout(project);
+  assert.deepEqual(raw.scenes.map(scene=>scene.objects[0]!.x),[200,900]);
+  first.template='two-shot';first.objects=[createCanvasObject('prop',{variant:'box',motion:'none',label:'Box',slot:'background-left'}),
+    createCanvasObject('prop',{variant:'box',motion:'none',label:'Box',slot:'background-right'})];
+  project.scenes=[first];const duplicated=compileCanvasProjectLayout(project).scenes[0]!;
+  assert.ok(duplicated.objects[0]!.x<duplicated.objects[1]!.x);
+});
+
+test('two occupied ferries receive separate hulls and retain their own passengers',()=>{
+  const scene=createCanvasScene();scene.template='two-shot';scene.background='river';
+  scene.objects=[createCanvasObject('ship',{id:'boat-a',assetRef:'ship:wooden-ferry'}),createCanvasObject('ship',{id:'boat-b',assetRef:'ship:wooden-ferry'}),
+    createCanvasObject('character',{id:'an',onBoat:'boat-a'}),createCanvasObject('character',{id:'villager',onBoat:'boat-b'})];
+  const result=compileCanvasSceneLayout(scene,1280,720),[a,b]=result.objects;
+  assert.ok(a!.x+a!.width/2<b!.x-b!.width/2);
+  assert.equal(result.objects[2]!.x,a!.x);assert.equal(result.objects[3]!.x,b!.x);
+  assert.deepEqual(compileCanvasSceneLayout(result,1280,720).objects,result.objects);
+});
 
 test('aid owns staging after reach and assist never stages the patient against itself',()=>{
   for(const facing of ['left','right'] as const){
@@ -293,4 +469,102 @@ test('visual quality rejects background refs that do not match scene family/temp
   assert.equal(report.pass, false);
   assert.ok(report.issues.some((issue) => issue.code === 'unsupported-authored-background'));
   assert.equal(report.stats.backgroundCoverage, 0);
+});
+
+test('five-toed anatomy is compiled from animal descriptions without overriding explicit ordinary pigs',()=>{
+ const p=createCanvasProject(),s=createCanvasScene();p.sourcePrompt='Sự tích heo năm móng';
+ s.objects=[createCanvasObject('prop',{variant:'pig',label:'Năm'}),createCanvasObject('prop',{variant:'pig-hoof',designNotes:'Bàn chân heo có năm móng.'}),createCanvasObject('prop',{variant:'pig',hoofCount:4})];
+ p.scenes=[s];const result=compileCanvasProjectLayout(p);
+ assert.deepEqual(result.scenes[0]!.objects.map(o=>o.hoofCount),[5,5,4]);
+ assert.deepEqual(compileCanvasProjectLayout(result),result);
+});
+
+test('a passive animal is grounded and moved clear of actors without moving a real contact target',()=>{
+ const p=createCanvasProject(),s=createCanvasScene();s.template='two-shot';s.background='field';s.backgroundRef='bg:field-open';
+ s.objects=[createCanvasObject('character',{id:'an',slot:'hero-left',role:'focal'}),createCanvasObject('character',{id:'mai',slot:'mid-center',role:'support'}),createCanvasObject('prop',{id:'pig',variant:'pig',slot:'hero-right',role:'support'})];
+ p.scenes=[s];const result=compileCanvasProjectLayout(p);
+ assert.ok(!evaluateCanvasVisualQuality(result).issues.some(i=>i.code==='large-overlap'));
+ assert.deepEqual(compileCanvasProjectLayout(result),result);
+ s.animationBeats=[{id:'wipe',action:'wipe',targetIds:['an'],focusTargetId:'pig',atMs:0,durationMs:1000}];
+ const contact=compileCanvasProjectLayout(p).scenes[0]!;
+ assert.ok(Math.abs(contact.objects[2]!.x-contact.objects[0]!.x)<150,'contact target remains within arm reach');
+});
+
+test('horror QC rejects standing actors and floor furniture without a physical floor contact',()=>{
+  const project=createCanvasProject();
+  project.sourcePrompt='truyện ma kinh dị trong phòng trọ';
+  const s=createCanvasScene();
+  s.id='missing-ground';s.name='Missing ground';s.stageId='room-a';
+  s.background='room';s.backgroundRef='bg:room-simple-night';s.template='hero-left';
+  s.objects=[
+    createCanvasObject('character',{id:'actor',characterKey:'linh',label:'Linh',visualStyle:'horror',role:'focal',slot:'hero-left',assetRef:'character:villager'}),
+    createCanvasObject('prop',{id:'table',label:'Bàn',variant:'table',role:'support',slot:'mid-center',assetRef:'prop:table'}),
+  ];
+  project.scenes=[s];
+  const report=evaluateCanvasVisualQuality(project);
+  const grounding=report.issues.filter(issue=>issue.code==='missing-ground-contact');
+  assert.ok(grounding.some(issue=>/actor Linh/i.test(issue.message)));
+  assert.ok(grounding.some(issue=>/Floor prop Bàn/i.test(issue.message)));
+});
+
+test('horror QC accepts grounded actors, grounded furniture and valid tabletop attachments',()=>{
+  const project=createCanvasProject();
+  project.sourcePrompt='truyện ma kinh dị trong phòng trọ';
+  const s=createCanvasScene();
+  s.id='grounded-set';s.name='Grounded set';s.stageId='room-a';
+  s.background='room';s.backgroundRef='bg:room-simple-night';s.template='hero-left';
+  s.objects=[
+    createCanvasObject('character',{id:'actor',characterKey:'linh',label:'Linh',visualStyle:'horror',role:'focal',slot:'hero-left',assetRef:'character:villager',groundY:598}),
+    createCanvasObject('prop',{id:'table',label:'Bàn',variant:'table',role:'support',slot:'mid-center',assetRef:'prop:table',groundY:598}),
+    createCanvasObject('prop',{id:'lamp',label:'Đèn',variant:'lantern',role:'support',slot:'support-right',assetRef:'prop:lantern',restingOn:'table'}),
+  ];
+  project.scenes=[s];
+  const report=evaluateCanvasVisualQuality(project);
+  assert.ok(!report.issues.some(issue=>issue.code==='missing-ground-contact'));
+  assert.ok(!report.issues.some(issue=>issue.code==='invalid-physical-attachment'&&/restingOn/.test(issue.message)));
+});
+
+test('reference-style benchmark reaches 9/10 for restrained horror pacing and internal visual events',()=>{
+  const project=createCanvasProject();
+  project.sourcePrompt='truyện ma đô thị';
+  project.scenes=Array.from({length:7},(_,index)=>{
+    const s=createCanvasScene(index);
+    s.durationMs=8000;
+    s.stageId='apartment-room';
+    s.background='room';
+    s.backgroundRef='bg:room-study';
+    s.template=(['hero-left','two-shot','close-reaction','hero-right','prop-focus','two-shot','close-reaction'] as const)[index]!;
+    s.camera={shot:s.template==='prop-focus'||s.template==='close-reaction'?'close-up':'medium',motion:'none',focusX:640,focusY:360,zoom:1,
+      keyframes:[{atMs:0,zoom:1,dx:0,dy:0},{atMs:8000,zoom:1.015,dx:0,dy:-3,easing:'ease-in-out'}]};
+    s.atmosphere={timeOfDay:'night',filmGrain:.2,shadowBreath:.18,dustMotes:.1,lampBreath:.12,wind:.06};
+    const actor=createCanvasObject('character',{id:`actor-${index}`,characterKey:'linh',label:'Linh',role:'focal',slot:'hero-left',motion:'none',assetRef:'character:villager'});
+    const lamp=createCanvasObject('prop',{id:`lamp-${index}`,label:'Đèn',variant:'lantern',role:'support',slot:'support-right',motion:'none',assetRef:'prop:lantern'});
+    s.objects=[actor,lamp];
+    s.visualBeats=[{id:`vb-${index}`,atMs:3200,durationMs:500,action:'expression-change',targetIds:[actor.id],expression:'afraid'}];
+    s.narration='Linh đứng im trong căn phòng tối và nhận ra có điều gì đó không ổn.';
+    return s;
+  });
+  const report=evaluateCanvasVisualQuality(project);
+  assert.ok(report.stats.referenceStyleScore>=90,`score=${report.stats.referenceStyleScore}`);
+  assert.ok(report.stats.majorShotsPerMinute>=7&&report.stats.majorShotsPerMinute<=8.5);
+  assert.ok(report.stats.visualEventsPerMinute>=12);
+});
+
+test('reference-style benchmark rejects busy camera, decorative loops and empty long holds',()=>{
+  const project=createCanvasProject();
+  project.sourcePrompt='truyện ma kinh dị';
+  project.scenes=Array.from({length:3},(_,index)=>{
+    const s=createCanvasScene(index);
+    s.durationMs=15000;
+    s.background='room';s.backgroundRef='bg:room-study';s.template='hero-left';
+    s.camera={shot:'medium',motion:'none',focusX:640,focusY:360,zoom:1,keyframes:[{atMs:0,zoom:1},{atMs:15000,zoom:1.16,dx:80,dy:35}]};
+    s.objects=[createCanvasObject('character',{id:`busy-${index}`,characterKey:`busy-${index}`,role:'focal',slot:'hero-left',motion:'bounce',assetRef:'character:villager'})];
+    s.narration='Nhân vật đứng yên rất lâu trong bóng tối nhưng khung hình lại rung và chuyển động trang trí liên tục.';
+    s.atmosphere=undefined;s.stageId=undefined;s.visualBeats=[];s.animationBeats=[];
+    return s;
+  });
+  const report=evaluateCanvasVisualQuality(project);
+  assert.ok(report.stats.referenceStyleScore<78,`score=${report.stats.referenceStyleScore}`);
+  assert.ok(report.issues.some(issue=>issue.code==='reference-style-gap'));
+  assert.equal(report.pass,false);
 });

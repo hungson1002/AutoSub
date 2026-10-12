@@ -25,7 +25,10 @@ test('Open Peeps is reserved for generic medium/close acting, not historical act
   const narrator = createCanvasObject('character', { archetype: 'narrator', pose: 'talk' });
   const warrior = createCanvasObject('character', { archetype: 'warrior', pose: 'talk' });
   const pointing = createCanvasObject('character', { archetype: 'narrator', pose: 'point' });
+  const horrorUrban = createCanvasObject('character', { archetype: 'narrator', pose: 'talk', visualStyle:'horror' });
+  const urbanScene={...scene,backgroundRef:'bg:city-hallway' as const};
   assert.equal(shouldUseOpenPeeps(scene, narrator), true);
   assert.equal(shouldUseOpenPeeps(scene, warrior), false);
   assert.equal(shouldUseOpenPeeps(scene, pointing), false);
+  assert.equal(shouldUseOpenPeeps(urbanScene,horrorUrban),false,'horror cast must keep one renderer family regardless of location');
 });

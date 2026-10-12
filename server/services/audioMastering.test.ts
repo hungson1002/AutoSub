@@ -19,6 +19,9 @@ test('uses measured two-pass loudness values so mastering stays linear', () => {
   assert.match(filter, /measured_LRA=2\.10/);
   assert.match(filter, /measured_thresh=-31\.80/);
   assert.match(filter, /offset=0\.10/);
+  assert.match(filter, /highpass=f=55/);
+  assert.match(filter, /equalizer=f=3200/);
+  assert.match(filter, /equalizer=f=7200/);
   assert.match(filter, /linear=true/);
   assert.match(filter, /alimiter=limit=0\.794:level=false:latency=true/);
 });

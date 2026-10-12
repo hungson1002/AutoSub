@@ -30,6 +30,19 @@ import type { CanvasStudioProject } from "../../shared/canvasAnimationStudio";
 const MEDIA_BACKEND_ORIGIN = "http://127.0.0.1:8787";
 export const MAX_BROWSER_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 
+export interface BackgroundExportJob {
+  id: string;
+  kind: 'video-export' | 'animation-render';
+  name: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  progress: number;
+  stage: string;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+}
+export const backgroundExportVideoUrl = (job: BackgroundExportJob) => `${MEDIA_BACKEND_ORIGIN}${job.kind === 'video-export' ? `/api/export/result/${encodeURIComponent(job.id)}` : `/api/animation-studio/render-jobs/${encodeURIComponent(job.id)}/video`}`;
+
 export async function animationProjectRenderCacheKey(project: AnimationProject, showSubtitles: boolean) {
   const renderState = { ...project, createdAt: "", updatedAt: "", assets: project.assets.map((asset) => ({ ...asset, createdAt: "" })), showSubtitles, engine: "hybrid-remotion-v2" };
   const encoded = new TextEncoder().encode(JSON.stringify(renderState));
@@ -146,7 +159,7 @@ export function friendlyErrorMessage(
   if (/spawn ffmpeg enoent|không tìm thấy ffmpeg/i.test(raw))
     return "Máy chưa tìm thấy FFmpeg nên không thể render video. Hãy cài hoặc khôi phục FFmpeg rồi chạy lại AutoSub.";
   if (
-    /whisper local|whisper\.cpp|autosub_whisper|edge tts|requirements-edge-tts|vieneu|kaldi-native-fbank|autosub_vieneu/i.test(
+    /whisper local|whisper\.cpp|autosub_whisper|funasr|paraformer|sensevoice|autosub_funasr|qwen3-asr|qwen3 forcedaligner|autosub_qwen3|edge tts|requirements-edge-tts|vieneu|kaldi-native-fbank|autosub_vieneu|zerotts|autosub_zerotts/i.test(
       raw,
     )
   )
@@ -273,14 +286,23 @@ function decodeBase64Json<T>(value: string | null): T | undefined {
 }
 
 export const api = {
+  listBackgroundExports: (signal?: AbortSignal) => request<BackgroundExportJob[]>('/api/export/jobs', {signal}),
+  cancelBackgroundExport: (job: BackgroundExportJob) => request(job.kind === 'video-export'
+    ? `/api/export/cancel/${encodeURIComponent(job.id)}`
+    : `/api/animation-studio/render-jobs/${encodeURIComponent(job.id)}/cancel`, {method:'POST',body:'{}'}),
   generateCanvasAnimationVideo: (input: {
+    project?:CanvasStudioProject;
+    referenceImages?:string[];
+    refineVisuals?:boolean;
     brief: string;
     provider: AIProvider;
     model: string;
     narration: { provider: AIProvider; model: string; voice: string; speed?: number };
     audioProduction?: { enabled?: boolean; autoSound?: boolean };
     targetDurationSeconds?: number;
-    visualMode?: 'procedural' | 'ai-fallback';
+    width?: number;
+    height?: number;
+    visualMode?: 'procedural' | 'code-vector' | 'ai-fallback';
     assetGeneration?: {
       enabled: true;
       quality: 'professional';
@@ -315,9 +337,9 @@ export const api = {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`);
       onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0)));
-      if (job.status === 'completed' || job.status === 'failed') break;
+      if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') break;
     }
-    if (job.status !== 'completed') throw new Error(job.error || 'Render Canvas quá thời gian chờ.');
+    if (job.status !== 'completed') throw new Error(job.status === 'cancelled' ? 'Đã hủy xuất video.' : job.error || 'Render Canvas quá thời gian chờ.');
     onProgress?.(100);
     const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`);
     if (!response.ok) throw new Error('Không tải được Canvas video đã render.');
@@ -361,18 +383,18 @@ export const api = {
     const queued = await fetch(`/api/animation-studio/projects/${encodeURIComponent(projectId)}/render-jobs`, { method: "POST", headers, body: recording });
     if (!queued.ok) { const body = await queued.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Không thể xếp render animation."); }
     const initial = await queued.json() as { id: string }; let job: { status: string; progress?: number; error?: string } = { status: "queued", progress: 0 }; onProgress?.(0);
-    for (let attempt = 0; attempt < 900; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0))); if (job.status === "completed" || job.status === "failed") break; }
-    if (job.status !== "completed") throw new Error(job.error || "Render queue quá thời gian chờ."); onProgress?.(100); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video từ render queue."); return response.blob();
+    for (let attempt = 0; attempt < 900; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0))); if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") break; }
+    if (job.status !== "completed") throw new Error(job.status === "cancelled" ? "Đã hủy xuất video." : job.error || "Render queue quá thời gian chờ."); onProgress?.(100); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video từ render queue."); return response.blob();
   },
   renderAnimationProjectFrameAccurate: async (project: AnimationProject, showSubtitles: boolean, onProgress?: (progress: number) => void) => {
     const cacheKey = await animationProjectRenderCacheKey(project, showSubtitles);
     const queued = await fetch(`/api/animation-studio/projects/${encodeURIComponent(project.id)}/remotion-render-jobs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project, showSubtitles, cacheKey }) });
     if (!queued.ok) { const body = await queued.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Không thể xếp render Remotion."); }
     const initial = await queued.json() as { id: string }; let job: { status: string; progress?: number; error?: string } = { status: "queued", progress: 0 }; onProgress?.(0);
-    for (let attempt = 0; attempt < 1800; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0))); if (job.status === "completed" || job.status === "failed") break; }
-    if (job.status !== "completed") throw new Error(job.error || "Render Remotion quá thời gian chờ."); onProgress?.(100); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video Remotion."); return response.blob();
+    for (let attempt = 0; attempt < 1800; attempt += 1) { await new Promise((resolve) => setTimeout(resolve, 1000)); job = await request<{ status: string; progress?: number; error?: string }>(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}`); onProgress?.(Math.max(0, Math.min(100, Number(job.progress) || 0))); if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") break; }
+    if (job.status !== "completed") throw new Error(job.status === "cancelled" ? "Đã hủy xuất video." : job.error || "Render Remotion quá thời gian chờ."); onProgress?.(100); const response = await fetch(`/api/animation-studio/render-jobs/${encodeURIComponent(initial.id)}/video`); if (!response.ok) throw new Error("Không tải được video Remotion."); return response.blob();
   },
-  listAnimationRenderJobs: () => request<Array<{ id: string; projectId: string; engine?: "browser-recording" | "remotion" | "canvas-remotion"; cacheKey?: string; status: "queued" | "rendering" | "completed" | "failed"; progress: number; cached?: boolean; error?: string; createdAt: string }>>("/api/animation-studio/render-jobs"),
+  listAnimationRenderJobs: () => request<Array<{ id: string; projectId: string; engine?: "browser-recording" | "remotion" | "canvas-remotion"; cacheKey?: string; status: "queued" | "rendering" | "completed" | "failed" | "cancelled"; progress: number; cached?: boolean; error?: string; createdAt: string }>>("/api/animation-studio/render-jobs"),
   listAnimationAssets: (query = "") => request<AnimationAsset[]>(`/api/animation-studio/assets?q=${encodeURIComponent(query)}`),
   registerAnimationAsset: (asset: AnimationAsset) => request<AnimationAsset>("/api/animation-studio/assets", { method: "POST", body: JSON.stringify(asset) }),
   updateAnimationAsset: (id: string, change: Partial<Pick<AnimationAsset, "name" | "tags" | "style" | "animations">>) => request<AnimationAsset>(`/api/animation-studio/assets/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(change) }),
@@ -522,6 +544,76 @@ export const api = {
       },
     );
   },
+  createTranslationJob: async (
+    provider: AIProvider,
+    model: string | undefined,
+    cues: SubtitleCue[],
+    sourceLanguage: string,
+    targetLanguage: string,
+    style: string,
+    customPrompt: string,
+    glossary: GlossaryEntry[],
+    contextCues: SubtitleCue[] = cues,
+    translationMemory: TranslationMemoryItem[] = [],
+    translationGuide = '',
+    signal?: AbortSignal,
+  ) => {
+    const contextIndices = new Map<string, number>();
+    contextCues.forEach((cue, index) => {
+      if (!contextIndices.has(cue.id)) contextIndices.set(cue.id, index);
+    });
+    const jobId = `translation-${crypto.randomUUID()}`;
+    const body = JSON.stringify({
+      jobId,
+      provider,
+      model,
+      items: cues.map((cue) => {
+        const durationMs = Math.max(cue.endMs - cue.startMs, 50);
+        const contextIndex = contextIndices.get(cue.id) ?? -1;
+        const contextBefore = contextIndex < 0 ? [] : contextCues.slice(Math.max(0, contextIndex - 2), contextIndex).map((candidate) => candidate.originalText).filter(Boolean);
+        const contextAfter = contextIndex < 0 ? [] : contextCues.slice(contextIndex + 1, contextIndex + 3).map((candidate) => candidate.originalText).filter(Boolean);
+        return { id: cue.id, text: cue.originalText, durationMs, targetDurationMs: durationMs, contextBefore, contextAfter };
+      }),
+      sourceLanguage,
+      targetLanguage,
+      style,
+      customPrompt,
+      glossary,
+      translationMemory: translationMemory.slice(-24),
+      translationGuide,
+    });
+    while (true) {
+      if (signal?.aborted) throw new DOMException("Cancelled", "AbortError");
+      try {
+        return await request<{ id: string; status: string; stage: string }>(
+          "/api/translate/jobs",
+          { method: "POST", body, signal },
+        );
+      } catch (error) {
+        if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+        if (error && typeof error === "object" && "status" in error && Number((error as { status?: unknown }).status)) throw error;
+        await new Promise<void>((resolve, reject) => {
+          const timer = window.setTimeout(resolve, 700);
+          const onAbort = () => {
+            window.clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            reject(new DOMException("Cancelled", "AbortError"));
+          };
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    }
+  },
+  getTranslationJob: (id: string, signal?: AbortSignal) =>
+    request<{
+      id: string;
+      status: "queued" | "running" | "completed" | "failed" | "cancelled";
+      stage: string;
+      error?: string;
+      result?: { items: Array<{ id: string; translation: string }>; pendingCueIds: string[]; warning?: string };
+    }>(`/api/translate/jobs/${encodeURIComponent(id)}`, { signal }),
+  cancelTranslationJob: (id: string) =>
+    request<{ id: string; status: string; stage: string }>(`/api/translate/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   translationGuide: (
     provider: AIProvider,
     model: string | undefined,
@@ -591,9 +683,11 @@ export const api = {
     model: string,
     language: string,
     signal?: AbortSignal,
-    progressId?: string,
-  ) =>
-    request<{
+    progressId: string = crypto.randomUUID(),
+  ) => {
+    const cancel = () => { void request(`/api/extract/progress/${encodeURIComponent(progressId)}/cancel`, { method: 'POST' }).catch(() => undefined); };
+    signal?.addEventListener('abort', cancel, { once: true });
+    return request<{
       cues: SubtitleCue[];
       audioName: string;
       uploadId: string;
@@ -629,7 +723,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ uploadId, provider, model, language, progressId }),
       signal,
-    }),
+    }).finally(() => signal?.removeEventListener('abort', cancel));
+  },
   extractOcr: async (
     uploadId: string,
     provider: AIProvider,
@@ -914,13 +1009,62 @@ export const api = {
       );
     if (options.logo?.enabled !== false && options.logo?.kind === "text" && options.logoFontFile)
       form.append("logoFontFile", options.logoFontFile, options.logoFontFile.name);
-    const response = await fetch(`${MEDIA_BACKEND_ORIGIN}/api/export/video`, {
-      method: "POST",
-      body: form,
-      signal,
-    });
-    if (!response.ok) await readError(response, "Không thể xuất video.", "export");
-    return response.blob();
+    const waitForDurableExport = async () => {
+      while (true) {
+        if (signal?.aborted) throw new DOMException("Cancelled", "AbortError");
+        let progress: {
+          percent: number;
+          stage: string;
+          status: "running" | "queued" | "completed" | "failed" | "cancelled";
+          error?: string;
+        } | undefined;
+        try {
+          progress = await request<{
+            percent: number;
+            stage: string;
+            status: "running" | "queued" | "completed" | "failed" | "cancelled";
+            error?: string;
+          }>(`/api/export/progress/${encodeURIComponent(options.exportId)}`, { signal });
+        } catch (error) {
+          if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+          // Backend có thể đang khởi động lại; job export vẫn nằm trên disk.
+        }
+        if (progress) {
+          if (progress.status === "completed") {
+            const result = await fetch(`${MEDIA_BACKEND_ORIGIN}/api/export/result/${encodeURIComponent(options.exportId)}`, { signal });
+            if (!result.ok) await readError(result, "Không thể lấy video đã render.", "export");
+            return result.blob();
+          }
+          if (progress.status === "failed") throw new Error(progress.error || "Video export thất bại.");
+          if (progress.status === "cancelled") throw new DOMException("Cancelled", "AbortError");
+        }
+        await new Promise<void>((resolve, reject) => {
+          const timer = window.setTimeout(resolve, 800);
+          const onAbort = () => {
+            window.clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            reject(new DOMException("Cancelled", "AbortError"));
+          };
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    };
+    try {
+      const response = await fetch(`${MEDIA_BACKEND_ORIGIN}/api/export/video`, {
+        method: "POST",
+        body: form,
+        signal,
+      });
+      if (!response.ok) await readError(response, "Không thể xuất video.", "export");
+      return response.blob();
+    } catch (error) {
+      if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+      if ((error as ApiError)?.code === 'EXPORT_CANCELLED') throw new DOMException('Cancelled', 'AbortError');
+      // A definitive backend render error is not a lost connection. Preserve
+      // its diagnostics instead of silently waiting for a failed job again.
+      if ((error as ApiError)?.context === 'export') throw error;
+      return waitForDurableExport();
+    }
   },
   exportAudio: async (
     options: {
@@ -963,9 +1107,11 @@ export const api = {
     request<{
       percent: number;
       stage: string;
-      status: "running" | "completed" | "failed" | "cancelled";
+      status: "queued" | "running" | "completed" | "failed" | "cancelled";
       error?: string;
     }>(`/api/export/progress/${encodeURIComponent(id)}`, { signal }),
+  cancelExport: (id: string) =>
+    request<{ status: string; stage: string }>(`/api/export/cancel/${encodeURIComponent(id)}`, { method: "POST" }),
   createReviewJob: (
     input: {
       uploadId: string;
