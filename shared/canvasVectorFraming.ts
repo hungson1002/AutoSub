@@ -11,7 +11,7 @@ export function vectorShotVisibility(scene:CanvasStudioScene,assets:Record<strin
   const node=part?asset?.nodes.find(n=>n.id===part):instance;
   if(!node)return {target,missing:true as const};
   const width=part?node.width:asset?.width??node.width,height=part?node.height:asset?.height??node.height;
-  const bounds=node.type==='ellipse'?[-(node.rx??0),-(node.ry??0),(node.rx??0)*2,(node.ry??0)*2]:width&&height?[0,0,width,height]:undefined;
+  const bounds=node.bounds?[node.bounds.x,node.bounds.y,node.bounds.width,node.bounds.height]:node.type==='ellipse'?[-(node.rx??0),-(node.ry??0),(node.rx??0)*2,(node.ry??0)*2]:width&&height?[0,0,width,height]:undefined;
   if(!bounds)return {target,unmeasured:true as const};
   let opacity=1,current:VectorNode|undefined=node,inside=Boolean(part);
   while(current){
@@ -82,9 +82,14 @@ export function vectorSubjectCamera(stage:CanvasVectorScene,assets:Record<string
     return [{t:0,x:(left+right)/2,y:(top+bottom)/2,zoom:Math.max(1,Math.min(4,(stage.width-96)/Math.max(1,right-left),stage.height*.55/Math.max(1,bottom-top)))}];
   }
   const subject=stage.nodes.find(n=>n.id===shot.target&&n.type==='instance');
+  if(typeof shot.target!=='string')throw new Error('Vector: vectorScene.shot needs camera format {target:"actor-id",height:0.25-0.7}; screenplay format {size,focus} belongs in the screenplay step, not the drawing');
   if(!subject)throw new Error('Vector: subject shot needs an existing actor instance');
-  const fraction=shot.height??.45;
-  if(typeof fraction!=='number'||!Number.isFinite(fraction)||fraction<.25||fraction>.7)throw new Error('Vector: invalid subject framing height');
+  // Near-miss heights (0.18 instead of 0.25) are composition preferences, not
+  // structural defects: clamp them so one number cannot abort a whole film.
+  // The pixel review still judges whether the subject reads clearly.
+  const asked=shot.height??.45;
+  if(typeof asked!=='number'||!Number.isFinite(asked))throw new Error('Vector: invalid subject framing height');
+  const fraction=Math.min(.7,Math.max(.25,asked));
   const asset=assets[subject.asset!]!;
   if(stage.ground||shot.include!==undefined)return physicalSubjectCamera(stage,assets,shot,subject,fraction,context);
   const width=subject.width??asset.width,height=subject.height??asset.height;
@@ -127,9 +132,9 @@ export function directVectorShot(scene:CanvasStudioScene,assets:Record<string,Ve
     const reveal=direction.beats.find(b=>b.kind==='reveal');
     const target=reveal?.motionTargets.find(id=>world.nodes.some(n=>n.id===id)&&!actor(id))||direction.shot.focus;
     const node=world.nodes.find(n=>n.id===target),asset=node?.type==='instance'?assets[node.asset!]:undefined;
-    const width=asset?.width??node?.width??(node?.groundAnchor?node.groundAnchor.x*2:0),height=asset?.height??node?.height??node?.groundAnchor?.y??0;
+    const width=node?.bounds?.width??asset?.width??node?.width??(node?.groundAnchor?node.groundAnchor.x*2:0),height=node?.bounds?.height??asset?.height??node?.height??node?.groundAnchor?.y??0;
     if(!node||width<=0||height<=0)return scene;
-    frames=vectorSubjectCamera(world,assets,{target,bounds:{x:0,y:0,width,height}},context);
+    frames=vectorSubjectCamera(world,assets,{target,bounds:node.bounds??{x:0,y:0,width,height}},context);
   }else{
     const include=[...new Set([direction.shot.focus,...direction.shot.include])].filter(id=>id!==focus.id&&world.nodes.some(n=>n.id===id&&(n.type==='instance'||n.groundAnchor||n.width&&n.height))).slice(0,4);
     // Story purpose chooses a closer angle; "reaction" alone is not a reason
@@ -155,9 +160,9 @@ function physicalSubjectCamera(stage:CanvasVectorScene,assets:Record<string,Vect
     const human=asset?.nodes.some(n=>n.id==='head-group')&&asset.nodes.some(n=>n.id==='foot-r');
     const puppet=asset?.nodes.some(n=>n.id==='puppet-root');
     const folkChibi=human&&asset?.nodes.some(n=>n.id==='folk-collar');
-    const bounds=asset?(human?(folkChibi?[20,0,220,465]:[40,60,200,465]):[0,0,asset.width,asset.height]):node.groundAnchor?
+    const bounds=node.bounds?[node.bounds.x,node.bounds.y,node.bounds.x+node.bounds.width,node.bounds.y+node.bounds.height]:asset?(human?(folkChibi?[20,0,220,465]:[40,60,200,465]):[0,0,asset.width,asset.height]):node.groundAnchor?
       [0,0,node.groundAnchor.x*2,node.groundAnchor.y]:[0,0,node.width??0,node.height??0];
-    if(bounds[2]!<=bounds[0]!||bounds[3]!<=bounds[1]!)throw new Error('Vector: shot context needs an instance, rectangle or grounded group');
+    if(bounds[2]!<=bounds[0]!||bounds[3]!<=bounds[1]!)throw new Error(`Vector: shot context ${id} needs finite local bounds. Add bounds:{x:LOCAL_LEFT,y:LOCAL_TOP,width:WIDTH,height:HEIGHT} to this group; a groundAnchor is a contact point, not its bounding box. Keep the existing artwork and position unchanged`);
     const matrix=vectorWorldMatrix(id,scene,i/16*scene.durationMs,assets);
     let points=[[bounds[0],bounds[1]],[bounds[2],bounds[1]],[bounds[0],bounds[3]],[bounds[2],bounds[3]]].map(([x,y])=>vectorPoint(matrix,x!,y!));
     // Native acting can extend far outside the resting asset canvas (a raised

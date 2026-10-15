@@ -63,15 +63,15 @@ test('compact reference travel moves steadily both ways, stays rigid and holds i
     assert.equal(evaluateVectorPart('person/upper-body',scene,4000).scaleY,1);
   }
 });
-test('selected horror recipe applies handdrawn to NEW compact actors and settings, not approved clean or comedy',()=>{
+test('selected horror recipe enforces ink on NEW descriptors, while other recipes are unchanged',()=>{
   const raw=JSON.stringify({vectorAssets:{hero:{rig:'simple-puppet',outfit:'tunic'},approved:{rig:'simple-puppet',finish:'clean'},animal:{rig:'simple-pig'}},
     vectorStages:{village:{template:'illustrated-place',place:'village',cast:{person:'hero'}},custom:{width:200,height:200,nodes:[]}}});
   assert.equal(applySelectedHorrorFinish(raw,'[vui-ve] truyện vui'),raw);
   const data=JSON.parse(applySelectedHorrorFinish(raw,'[folk-horror] truyện ma'));
   assert.equal(data.vectorAssets.hero.finish,'handdrawn');
   assert.equal(data.vectorAssets.hero.design,'village','new recipe cast uses the approved drawing factory even if the AI omits design');
-  assert.equal(data.vectorAssets.approved.finish,'clean');
-  assert.equal(data.vectorAssets.approved.design,undefined);
+  assert.equal(data.vectorAssets.approved.finish,'handdrawn','a newly authored clean descriptor cannot override the selected recipe');
+  assert.equal(data.vectorAssets.approved.design,'village');
   assert.equal(data.vectorAssets.animal.finish,undefined);
   assert.equal(data.vectorStages.village.finish,'handdrawn');
   assert.equal(data.vectorStages.village.view,'elevated');
@@ -79,16 +79,20 @@ test('selected horror recipe applies handdrawn to NEW compact actors and setting
   assert.equal(JSON.parse(applySelectedHorrorFinish(raw,'[ma-xo] bí ẩn')).vectorAssets.hero.finish,'handdrawn');
 });
 
-test('new horror village and market default wide while preserving explicit clean, eye-level and custom stages',()=>{
+test('new horror village and market default wide, retain explicit camera view, and ink custom settings',()=>{
   const stages={clean:{template:'illustrated-place',place:'village',finish:'clean'},
     eye:{template:'illustrated-place',place:'village',view:'eye-level'},
     market:{template:'illustrated-place',place:'village',setting:'market'},
     original:{width:720,height:1280,nodes:[{id:'approved',type:'rect',width:720,height:1280,fill:'#abc'}]}};
   const upgraded=JSON.parse(applySelectedHorrorFinish(JSON.stringify({vectorStages:stages}),'[folk-horror]'));
-  assert.equal(upgraded.vectorStages.clean.view,undefined);
+  assert.equal(upgraded.vectorStages.clean.view,'elevated');
+  assert.equal(upgraded.vectorStages.clean.finish,'handdrawn');
   assert.equal(upgraded.vectorStages.eye.view,'eye-level');
   assert.equal(upgraded.vectorStages.market.view,'elevated');
-  assert.deepEqual(upgraded.vectorStages.original,stages.original);
+  assert.equal(upgraded.vectorStages.original.nodes[0].type,'path');
+  assert.equal(upgraded.vectorStages.original.nodes[0].width,720);
+  assert.equal(upgraded.vectorStages.original.nodes[0].height,1280);
+    assert.ok(upgraded.vectorStages.original.nodes.some((n:{id:string})=>n.id==='folk-ink-v3-approved'));
 });
 
 test('linked steps follow a sloped road both ways and keep the actual lantern grip through arrival',()=>{

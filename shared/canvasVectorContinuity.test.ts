@@ -5,6 +5,38 @@ import {compileVectorProject,evaluateVectorPart,normalizeVectorAssets,normalizeV
 import {vectorPoint,vectorWorldMatrix} from './canvasVectorTransform';
 import {continueVectorHandPlan} from './canvasVectorContinuity';
 
+test('small mirrored lantern retains inherited size and orientation when released and across cuts',()=>{
+  const library=normalizeVectorAssets({hero:{rig:'simple-puppet',design:'village'},lamp:{rig:'lantern'}});
+  for(const facing of [-1,1]){
+    const p=createCanvasProject();p.width=720;p.height=720;p.vectorAssets=library;
+    const held={actor:'hero',arm:'r' as const,prop:'lamp',hang:true};
+    p.scenes=['carry','carry-cut','drop','after'].map((id,i)=>({...p.scenes[0]!,id,durationMs:4000,narration:'wait then drop lamp',dialogue:undefined,
+      vectorStageId:'yard',vectorDirection:{purpose:'Keep the same lamp',location:'yard',shot:{size:'wide' as const,focus:'hero',include:['lamp']},beats:[],
+        heldProps:i<2?[held]:[],...(i===2?{propEvents:[{prop:'lamp',action:'release' as const,cue:'drop lamp'}]}:{})},
+      vectorScene:normalizeVectorScene({width:720,height:720,nodes:[
+        {id:'hero',type:'instance',asset:'hero',x:300,y:500,width:180*.285714,height:280*.285714},
+        {id:'lamp',type:'instance',asset:'lamp',width:i?65:70,height:i?108:115},
+      ],ground:{y:600,targets:[{target:'hero'}]},carries:i<2?[held]:undefined,tracks:[
+        {target:'hero/upper-body',start:0,end:1,frames:[{t:0,scaleX:facing}]},
+      ]},library)}));
+    const original=structuredClone(p),fixed=compileVectorProject(p),carry=fixed.scenes[1]!,drop=fixed.scenes[2]!;
+    const at=vectorTrackTiming({target:'lamp',start:0,end:1,cue:'drop lamp',frames:[]},drop).start;
+    const before=vectorWorldMatrix('lamp',carry,4000),lengths=(m:ReturnType<typeof vectorWorldMatrix>)=>[Math.hypot(m.a,m.b),Math.hypot(m.c,m.d)];
+    for(const t of [0,at-1,at,at+100,at+650,4000]){
+      const actual=vectorWorldMatrix('lamp',drop,t);
+      lengths(actual).forEach((value,i)=>assert.ok(Math.abs(value-lengths(before)[i]!)<1e-6,'release cannot inflate the lantern'));
+      assert.equal(Math.sign(actual.a*actual.d-actual.b*actual.c),Math.sign(before.a*before.d-before.b*before.c));
+    }
+    for(const point of [[0,0],[30,6],[60,100]]){
+      const a=vectorPoint(before,point[0]!,point[1]!),b=vectorPoint(vectorWorldMatrix('lamp',drop,0),point[0]!,point[1]!);
+      assert.ok(Math.hypot(a.x-b.x,a.y-b.y)<1e-6,'the entire lamp keeps its pre-release pose');
+    }
+    const landed=vectorWorldMatrix('lamp',drop,4000);
+    assert.ok(Math.abs(Math.max(...[[0,0],[60,0],[0,100],[60,100]].map(([x,y])=>vectorPoint(landed,x!,y!).y))-600)<1e-6);
+    assert.deepEqual(compileVectorProject(fixed),fixed);assert.deepEqual(p,original);
+  }
+});
+
 const assets=normalizeVectorAssets({person:{rig:'simple-human'},light:{rig:'lantern'},tool:{width:30,height:90,grip:{x:15,y:15},nodes:[
   {id:'handle',type:'rect',x:10,y:0,width:10,height:30,fill:'#753'},
   {id:'blade',type:'rect',x:10,y:30,width:10,height:60,fill:'#ccc'},

@@ -2,9 +2,12 @@ import {vectorTrackTiming,type VectorDrawing,type VectorNode,type VectorTrack,ty
 import {vectorFootprintNodes} from './canvasVectorProps';
 import {vectorReachTracks} from './canvasVectorReach';
 import {vectorPigWalkTracks} from './canvasVectorPig';
+import {vectorChickenWalkTracks} from './canvasVectorChicken';
+import {vectorSnakeWalkTracks} from './canvasVectorSnake';
 import {vectorPuppetTravelTracks,vectorPuppetFearTracks} from './canvasVectorPuppet';
 import {vectorWorldMatrix,vectorPoint} from './canvasVectorTransform';
 import type {CanvasStudioScene} from './canvasAnimationStudio';
+import {APPROVED_FOLK_STYLE} from './canvasVectorInk';
 
 type Library=Record<string,VectorDrawing>;
 const numeric=(v:unknown,fallback:number,min=-10000,max=10000)=>{
@@ -102,7 +105,8 @@ export function vectorStrikeTracks(d:VectorDrawing,assets:Library,raw:unknown,co
 }
 function actor(d:VectorDrawing,assets:Library,name:unknown){
   const node=d.nodes.find(n=>n.id===name&&n.type==='instance'),asset=node?assets[node.asset!]:undefined;
-  if(!node||!asset||!asset.nodes.some(n=>n.id==='puppet-root')&&!['leg-l','knee-l','foot-l','leg-r','knee-r','foot-r','upper-body'].every(id=>asset.nodes.some(n=>n.id===id)))throw new Error('Vector: physical action needs the articulated human rig');
+  if(!node)throw new Error(`Vector: physical action actor ${String(name)} is missing from this shot; put recurring cast instances in the reusable vectorStages world, not only the first shot`);
+  if(!asset||!asset.nodes.some(n=>n.id==='puppet-root')&&!['leg-l','knee-l','foot-l','leg-r','knee-r','foot-r','upper-body'].every(id=>asset.nodes.some(n=>n.id===id)))throw new Error('Vector: physical action needs a compact puppet or articulated human rig');
   if(node.attachTo||node.rotation||(node.scaleX??1)<=0||(node.scaleY??1)<=0)throw new Error('Vector: walking actor must be upright');
   return {node,asset};
 }
@@ -113,7 +117,7 @@ function anchorPosition(d:VectorDrawing,assets:Library,name:unknown,implicitPare
   // ground metadata. A walk must still share its destination's world parent.
   const a=n?.groundAnchor??(implicitParent&&n&&!n.attachTo?(asset?{x:asset.width/2,y:asset.nodes.some(p=>p.id==='foot-r')?457:asset.height}:
     n.type==='rect'?{x:(n.width??0)/2,y:n.height??0}:undefined):undefined);
-  if(!n||!a||n.parent!==(implicitParent?implicitParent.id:d.ground?.parent))throw new Error(`Vector: ${String(name)} needs a grounded anchor on the same surface`);
+  if(!n||!a||n.parent!==(implicitParent?implicitParent.id:d.ground?.parent))throw new Error(`Vector: ${String(name)} needs a grounded anchor on the same surface; declare its actual local base anchor in ground.targets (target:'${String(name)}', anchor:{x,y}); surface parent=${implicitParent?implicitParent.id:d.ground?.parent??'root'}, y=${d.ground?.y??'implicit'}; object parent=${n?.parent??'root'}, x=${n?.x??0}, y=${n?.y??0}. Keep its authored depth with groundOffsetY when needed`);
   const x=a.x*(asset?(n.width??asset.width)/asset.width:1),y=a.y*(asset?(n.height??asset.height)/asset.height:1);
   const px=n.pivotX??0,py=n.pivotY??0,r=(n.rotation??0)*Math.PI/180;
   const dx=(x-px)*(n.scaleX??1),dy=(y-py)*(n.scaleY??1);
@@ -139,7 +143,7 @@ export function groundVectorDrawing(d:VectorDrawing,assets:Library,raw:unknown):
     if(item.anchor!==undefined)n.groundAnchor=point(item.anchor);
     else if(n.groundAnchor===undefined){
       const asset=n.type==='instance'?assets[n.asset!]:undefined;
-      n.groundAnchor=asset?{x:asset.width/2,y:asset.nodes.some(p=>p.id==='foot-r')?457:asset.nodes.some(p=>p.id==='hoof-fl')?214:asset.height}:
+      n.groundAnchor=asset?{x:asset.width/2,y:asset.nodes.some(p=>p.id==='foot-r')?457:asset.nodes.some(p=>p.id==='hoof-fl')?214:asset.nodes.some(p=>p.id==='seg-0')?90:asset.nodes.some(p=>p.id==='foot-l')?190:asset.height}:
         n.type==='rect'?{x:(n.width??0)/2,y:n.height??0}:undefined;
     }
     if(!n.groundAnchor)throw new Error(`Vector: group ${n.id} needs an explicit local ground anchor`);
@@ -223,6 +227,18 @@ export function vectorWalkTracks(d:VectorDrawing,assets:Library,raw:unknown):Vec
       const dx=w.backstep===undefined?there.x-here.x-offset-toward*gap:-toward*numeric(w.backstep,40,20,100);
       return vectorPigWalkTracks(pig,pigAsset,dx,w);
     }
+    if(pig&&pigAsset?.nodes.some(n=>n.id==='comb')){
+      const here=anchorPosition(d,assets,pig.id),there=anchorPosition(d,assets,w.to),offset=numeric(w.offsetX,0),gap=numeric(w.gap,40,5,d.width/2);
+      const toward=Math.sign(there.x-here.x-offset)||1;
+      const dx=w.backstep===undefined?there.x-here.x-offset-toward*gap:-toward*numeric(w.backstep,30,15,80);
+      return vectorChickenWalkTracks(pig,pigAsset,dx,w);
+    }
+    if(pig&&pigAsset?.nodes.some(n=>n.id==='seg-0')){
+      const here=anchorPosition(d,assets,pig.id),there=anchorPosition(d,assets,w.to),offset=numeric(w.offsetX,0),gap=numeric(w.gap,40,5,d.width/2);
+      const toward=Math.sign(there.x-here.x-offset)||1;
+      const dx=w.backstep===undefined?there.x-here.x-offset-toward*gap:-toward*numeric(w.backstep,40,20,100);
+      return vectorSnakeWalkTracks(pig,pigAsset,dx,w);
+    }
     if(pig&&pigAsset?.nodes.some(n=>n.id==='puppet-root')){
       actor(d,assets,w.actor);
       const implicit=!d.ground?{id:pig.parent}:undefined;
@@ -232,7 +248,7 @@ export function vectorWalkTracks(d:VectorDrawing,assets:Library,raw:unknown):Vec
       const start=numeric(w.start,0,0,1),end=numeric(w.end,.4,0,1);
       if(w.followDepth!==undefined&&typeof w.followDepth!=='boolean')throw new Error('Vector: followDepth must be boolean');
       const dy=w.followDepth&&w.backstep===undefined?there.y-here.y:0;
-      if(end<=start||Math.abs(dx)<5||w.backstep===undefined&&Math.sign(dx)!==toward||w.hold!==undefined&&typeof w.hold!=='boolean'||w.hold&&w.cue!==undefined)throw new Error('Vector: invalid puppet travel');
+      if(end<=start||Math.abs(dx)<5||w.backstep===undefined&&Math.sign(dx)!==toward||w.hold!==undefined&&typeof w.hold!=='boolean'||w.hold&&w.cue!==undefined)throw new Error(`Vector: invalid puppet travel ${pig.id} to ${String(w.to)}: actor anchor=(${here.x},${here.y}), destination anchor=(${there.x},${there.y}), offsetX=${offset}, gap=${gap}, dx=${dx}, start=${start}, end=${end}, hold=${Boolean(w.hold)}. Forward gap must leave at least 5px of travel toward the destination; a hold must not have a cue`);
       const timing={start,end,...(w.cue!==undefined?{cue:w.cue as string}:{})};
       const handdrawn=pigAsset.nodes.some(n=>n.id==='handdrawn-finish');
       const rootFrames:VectorFrame[]=w.hold?[{t:0,dx:offset+dx,...(w.followDepth?{dy}:{})}]:
@@ -368,6 +384,10 @@ export function vectorReactionTracks(d:VectorDrawing,assets:Library,raw:unknown)
     const direction=Math.sign(there.x-here.x)||1,start=numeric(r.start,0,0,1),end=numeric(r.end,.25,0,1);
     if(end<=start)throw new Error('Vector: invalid reaction timing');
     const cue=r.cue as string|undefined,scared=r.kind==='startle',sign=scared?-direction:direction;
+    // The approved model sheet has its own ink mouth and fixed eye anatomy.
+    // Reuse that expression rather than the legacy enlarged-eye startle pose.
+    if(scared&&asset.nodes.some(n=>n.id===APPROVED_FOLK_STYLE))
+      return vectorPuppetFearTracks(d,assets,[{actor:node.id,start,end,cue,level:'terrified'}]);
     const poses:[string,string,number][]=[['upper-body','rotation',sign*(scared?(inkedPuppet?5.2:puppet?6:10):2)],['head-group','rotation',sign*(scared?(inkedPuppet?6:puppet?4:8):4)],['eyes','dx',direction*(inkedPuppet?5:4)]];
     if(scared){poses.push(['mouth','scaleY',inkedPuppet?3.6:illustrated?2.9:1.8]);
       if(illustrated||inkedPuppet)poses.push(['brow-l','dy',inkedPuppet?-4.5:-6],['brow-r','dy',inkedPuppet?-4.5:-6]);}

@@ -16,4 +16,12 @@ artifacts
 docs
 review_tmp
 skills
+!skills/
+skills/*
+!skills/autosub-debugger/
+skills/autosub-debugger/*
+!skills/autosub-debugger/SKILL.md
+!skills/autosub-debugger/references/
+skills/autosub-debugger/references/*
+!skills/autosub-debugger/references/animation-quality.md
 tmp

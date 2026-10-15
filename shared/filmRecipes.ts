@@ -1,4 +1,4 @@
-export type FilmRecipeId = 'vui-ve' | 'ma-xo' | 'editorial' | 'folk-horror';
+export type FilmRecipeId = 'vui-ve' | 'ma-xo' | 'editorial' | 'folk-horror' | 'tet-village';
 
 export type FilmRecipe = {
   id: FilmRecipeId;
@@ -32,6 +32,15 @@ export const FILM_RECIPES: FilmRecipe[] = [
     briefDirective: 'Phong cách Vui Vẻ: nhân vật chibi đơn giản, đứng yên phần lớn thời gian, chỉ cử động đúng hành động theo beat (nói/chỉ/ngạc nhiên/ăn mừng) rồi giữ pose. Cắt khô hard-cut giữa các scene, không transition. Ảnh tư liệu trình bày khung polaroid viền trắng dán băng dính + caption. Tiêu đề trắng viền đen gạch đỏ. Nhịp kể vui, nhanh.',
   },
   {
+    id: 'tet-village',
+    name: 'Làng quê ngày Tết',
+    description: 'Làng Việt ngày Tết, chợ đông, sân khấu tái dùng, nhịp chậm giữ shot dài.',
+    narrationSpeed: 1,
+    visualMode: 'procedural',
+    vectorBriefDirective: 'Phong cách Làng Tết: dùng simple-puppet finish handdrawn, sân khấu illustrated-place village festival tet tái dùng qua nhiều cuts (cùng chợ, cùng nhà, cùng gốc đa). Mỗi shot giữ 5-10 giây, camera locked, chỉ hành động đúng lời kể rồi giữ pose. Chợ đông dùng extras 5-8 người cùng style, không clone mặt (đổi hair/outfit/headwear). Chợ đông: market scenes MUST declare setting market (auto depth spread; extras then need only id+asset, OMIT x/footY/height), 5-8 người cùng style, không clone mặt (đổi hair/outfit/headwear). Đồ Tết (mai vàng, câu đối đỏ, cột nêu, lồng đèn) là dressing của sân khấu, không vẽ chữ. Không zoom theo từng câu. MANDATORY NATIVE: village/tet scenes MUST use template illustrated-place with festival tet and native rigs (simple-puppet people, simple-chicken, simple-snake); NEVER hand-draw a custom village, custom people, or custom animals for these scenes. Barnyard animals stage small (chicken height 40-60, snake height 25-40) and default to stillness; travel only in a narrow window around 0.2 of the shot. Narrator voice only, no character dialogue. Scene-level animals must declare scene ground targets (ground:{targets:[{target:"hen"},{target:"snake"}]}) so walks share the stage surface. The native Tet stage already supplies stalls, mai pots, couplets, neu pole and lanterns: do NOT add custom static nodes duplicating them (at most 3 small story-specific props per stage, the 160-node budget is hard). For market extras OMIT x/footY/height to use the native depth spread; explicit coordinates must sit on the stage ground.',
+    briefDirective: '[tet-village] Truyện làng quê Việt ngày Tết: tái dùng cùng sân khấu, mỗi cảnh 5-10 giây, camera đứng yên, chợ đông nhiều người riêng biệt, đồ Tết đầy đủ mà không vẽ chữ.',
+  },
+  {
     id: 'ma-xo',
     name: 'Truyện kể bí ẩn',
     description: 'Nền tối, nhịp chậm, ít chuyển động. Hợp truyện ma và truyền thuyết.',
@@ -57,6 +66,14 @@ export function filmRecipeById(id: string | undefined): FilmRecipe {
 export function applyRecipeToBrief(brief: string, recipe: FilmRecipe, visualMode?: 'code-vector'): string {
   const clean = String(brief || '').trim();
   const directive=visualMode==='code-vector' ? recipe.vectorBriefDirective||recipe.briefDirective : recipe.briefDirective;
-  if (clean.includes(directive)) return clean;
+  if (!directive || clean.includes(directive)) return clean;
   return `${clean}\n\n${directive}`;
+}
+
+/** Sample-grade brief builder: any short user idea becomes a fully constrained
+ * Tet-village production brief, so output quality stops depending on how well
+ * the user writes prompts. Idempotent: already-built briefs pass through. */
+export function buildTetVillageBrief(idea: string): string {
+  const recipe = filmRecipeById('tet-village');
+  return applyRecipeToBrief(idea, recipe, 'code-vector');
 }

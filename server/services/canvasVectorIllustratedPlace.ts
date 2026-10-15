@@ -1,11 +1,12 @@
 import type {VectorNode,VectorTrack} from '../../shared/canvasVectorScene';
+import {FOLK_INK_STYLE,handInkDrawing} from '../../shared/canvasVectorInk';
 
 /** Location-driven 2D layout grammar. No story/character is hardcoded.
  * Each site has real near/middle/far depth planes, local detail and actor floor.
  * This is only a reusable optional stage, not a universal movie background. */
 export type IllustratedPlace='village'|'forest'|'waterside'|'street'|'corridor'|'rural-interior';
 export type IllustratedLight='day'|'dusk'|'night';
-type Options={place:IllustratedPlace;light?:IllustratedLight;seed?:number;view?:'eye-level'|'elevated';finish?:'clean'|'handdrawn';setting?:'residential'|'market'};
+type Options={place:IllustratedPlace;light?:IllustratedLight;seed?:number;view?:'eye-level'|'elevated';finish?:'clean'|'handdrawn';setting?:'residential'|'market';festival?:'none'|'tet';artStyle?:typeof FOLK_INK_STYLE};
 
 function palette(light:IllustratedLight){
   if(light==='day')return {sky:'#d9ded1',far:'#a7b5a0',mid:'#7e9880',ground:'#c3b595',earth:'#aa997b',
@@ -30,8 +31,11 @@ function handdrawnPalette(light:IllustratedLight){
     wood:'#79624f',roof:'#906c60',wall:'#b2a18a',water:'#527c87',ink:'#263136'};
 }
 export function illustratedPlace(options:Options,frame?:{width:number;height:number}){
-  const {place,light='night',finish='clean',setting='residential'}=options;
+  if(options.artStyle===FOLK_INK_STYLE)options={...options,finish:'handdrawn'};
+  const {place,light='night',finish='clean',setting='residential',festival='none'}=options;
+  const inkV2=options.artStyle===FOLK_INK_STYLE;
   if(!['residential','market'].includes(setting)||setting==='market'&&place!=='village')throw new Error('Vector: market setting requires village');
+  if(!['none','tet'].includes(festival)||festival==='tet'&&place!=='village')throw new Error('Vector: tet festival requires village');
   if(!['clean','handdrawn'].includes(finish))throw new Error('Vector: invalid illustrated finish');
   if(options.view!==undefined&&!['eye-level','elevated'].includes(options.view)||options.view==='elevated'&&place!=='village')throw new Error('Vector: elevated view requires a village');
   const elevated=options.view==='elevated'||options.view===undefined&&finish==='handdrawn'&&setting==='market';
@@ -41,6 +45,7 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
     throw new Error('Vector: unsupported illustrated place');
   const seed=Number.isInteger(options.seed)&&Math.abs(options.seed!)<100000?options.seed!:17;
   const C=finish==='handdrawn'?handdrawnPalette(light):palette(light),N:VectorNode[]=[],T:VectorTrack[]=[];
+  if(inkV2&&elevated&&place==='village')C.ink='#2c251f';
   if(wideMarket&&light==='day')Object.assign(C,{roof:'#bd995d',earth:'#c5ad7f'});
   // Source-style folk interiors at night use a darker WOOD palette, not a
   // generic blue nighttime overlay on the same beige daylight room.
@@ -119,15 +124,20 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
       if(crown&&kind===2)crown.d=`M ${px(-91)} ${px(-204)} Q ${px(-109)} ${px(-260)} ${px(-55)} ${px(-269)} Q ${px(-46)} ${px(-320)} ${px(4)} ${px(-307)} Q ${px(34)} ${px(-337)} ${px(66)} ${px(-297)} Q ${px(122)} ${px(-296)} ${px(128)} ${px(-244)} Q ${px(142)} ${px(-205)} ${px(94)} ${px(-190)} Q ${px(38)} ${px(-176)} ${px(6)} ${px(-204)} Q ${px(-46)} ${px(-182)} ${px(-91)} ${px(-204)} Z`;
       path(id+'-branch-ink',`M ${px(-1)} ${px(-26)} Q ${px(4)} ${px(-105)} ${px(10)} ${px(-161)} M ${px(4)} ${px(-145)} Q ${px(-4)} ${px(-196)} ${px(-33)} ${px(-220)}`,'none',C.ink,1.1,id);
       path(id+'-crown-ink',`M ${px(-74)} ${px(-252)} Q ${px(-80)} ${px(-276)} ${px(-52)} ${px(-278)} M ${px(-9)} ${px(-303)} Q ${px(19)} ${px(-315)} ${px(37)} ${px(-295)} M ${px(75)} ${px(-274)} Q ${px(103)} ${px(-271)} ${px(103)} ${px(-241)}`,'none',C.ink,1,id);
+      if(inkV2){
+        const trunk=N.find(n=>n.id===id+'-trunk')!;
+        trunk.d=`M ${px(-25)} 0 Q ${px(-12)} ${px(-28)} ${px(-15)} ${px(-81)} Q ${px(-25)} ${px(-148)} ${px(-48)} ${px(-202)} L ${px(-34)} ${px(-211)} Q ${px(-9)} ${px(-183)} ${px(2)} ${px(-157)} Q ${px(14)} ${px(-220)} ${px(49)} ${px(-268)} L ${px(62)} ${px(-257)} Q ${px(29)} ${px(-194)} ${px(22)} ${px(-135)} Q ${px(16)} ${px(-66)} ${px(35)} 0 Q ${px(8)} ${px(7)} ${px(-25)} 0 Z`;
+        path(id+'-bark',`M ${px(-5)} ${px(-18)} Q ${px(1)} ${px(-49)} ${px(-6)} ${px(-74)} M ${px(12)} ${px(-91)} Q ${px(7)} ${px(-108)} ${px(14)} ${px(-124)}`,'none',C.earth,1.7,id);
+      }
     }
   };
   const house=(id:string,x:number,y:number,w:number,h:number)=>{
     // Stable variations across one location: thatch, pitched tile, low eave.
     // Distinct silhouette/material is more valuable than random decoration.
-    const variety=finish==='handdrawn'?[...id].reduce((v,c)=>(v*33+c.charCodeAt(0))%3,0):-1;
+    const variety=finish==='handdrawn'?([...id].reduce((v,c)=>(v*33+c.charCodeAt(0))%3,0)+(inkV2?seed:0))%3:-1;
     group(id,x,y);
     if(elevated)Object.assign(N[N.length-1]!,{width:w,height:h,groundAnchor:{x:w/2,y:h},groundOffsetY:y+h-actorFloor});
-    if(elevated)path(id+'-yard',`M -28 ${h-6} L ${w+30} ${h-6} L ${w+62} ${h+49} Q ${w/2} ${h+65} -55 ${h+43} Z`,C.ground,'none',0,id);
+    if(elevated)path(id+'-yard',inkV2?`M -20 ${h-3} Q ${w*.5} ${h-11} ${w+25} ${h-2} L ${w+40} ${h+28} Q ${w*.55} ${h+40} -36 ${h+20} Z`:`M -28 ${h-6} L ${w+30} ${h-6} L ${w+62} ${h+49} Q ${w/2} ${h+65} -55 ${h+43} Z`,inkV2?C.earth:C.ground,'none',0,id);
     if(finish==='handdrawn'){
       ellipse(id+'-contact-shadow',w*.55,h+13,w*.68,14,C.plantShade,id);
       N[N.length-1]!.opacity=.3;
@@ -135,22 +145,25 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
     const wall=finish==='handdrawn'
       ?`M 0 0 Q ${-2-variety} ${(h*.45).toFixed(1)} 1 ${h} L ${w+2} ${h} Q ${w+3} ${(h*.51).toFixed(1)} ${w-1} 0 Z`
       :`M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
-    path(id+'-wall',wall,variety===2?C.earth:C.wall,C.ink,2,id);
+    path(id+'-wall',wall,inkV2&&elevated?(variety===2?C.wood:variety===1?C.wall:C.earth):variety===2?C.earth:C.wall,C.ink,inkV2&&elevated?3.6:2,id);
     if(finish==='handdrawn'){
       path(id+'-side-plane',`M ${w*.81} 5 L ${w-1} 0 L ${w+2} ${h} L ${w*.81} ${h} Z M 1 16 Q ${w*.48} 11 ${w-1} 16 L ${w} 31 Q ${w*.5} 25 0 32 Z`,C.wood,'none',0,id);
     }
     path(id+'-base',`M -6 ${h} Q ${w/2} ${h+5} ${w+6} ${h} L ${w+6} ${h+14} L -6 ${h+14} Z`,C.earth,C.ink,1.7,id);
-    const roof=elevated?`M -24 8 L 14 ${-h*.58} L ${w-14} ${-h*.58} L ${w+24} 8 L ${w+10} 21 L -10 21 Z`:
+    const roof=elevated&&inkV2?(variety%2===0
+      ?`M -26 8 Q -3 ${-h*.22} 14 ${-h*.58} Q ${w*.48} ${-h*.62} ${w-14} ${-h*.58} Q ${w+2} ${-h*.24} ${w+26} 8 L ${w+12} 22 Q ${w*.49} 16 -12 22 Z`
+      :`M -26 8 Q ${w*.19} ${-h*.35} ${w*.48} ${-h*.69} Q ${w*.5} ${-h*.73} ${w*.54} ${-h*.67} Q ${w*.81} ${-h*.29} ${w+26} 8 Q ${w*.72} 22 ${w*.5} 17 Q ${w*.23} 23 -26 8 Z`)
+      :elevated?`M -24 8 L 14 ${-h*.58} L ${w-14} ${-h*.58} L ${w+24} 8 L ${w+10} 21 L -10 21 Z`:
       variety===0?`M -26 5 Q ${w*.15} -59 ${w*.48} -57 Q ${w*.73} -63 ${w+26} 5 L ${w+24} 18 Q ${w*.83} 11 ${w*.64} 19 L ${w*.42} 12 Q ${w*.2} 22 -22 17 Z`:
       variety===1?`M -26 9 L ${w*.47} -75 Q ${w*.5} -79 ${w*.54} -74 L ${w+27} 9 Q ${w*.84} 21 ${w*.51} 15 Q ${w*.17} 20 -24 17 Z`:
       variety===2?`M -25 6 Q ${w*.16} -35 ${w*.37} -31 Q ${w*.5} -50 ${w*.66} -40 Q ${w*.85} -40 ${w+23} 7 L ${w+15} 19 Q ${w*.5} 12 -16 18 Z`:
       `M -25 5 Q ${w*.17} -52 ${w*.53} -46 Q ${w*.82} -60 ${w+27} 6 L ${w+15} 21 Q ${w/2} 6 -13 20 Z`;
-    path(id+'-roof',roof,variety===0?C.earth:variety===1?(light==='night'?C.roof:'#976e5c'):C.roof,C.ink,2.7,id);
-    if(finish==='handdrawn'&&elevated)
+    path(id+'-roof',roof,variety===0?C.earth:variety===1?(light==='night'?C.roof:'#976e5c'):C.roof,C.ink,inkV2&&elevated?4.2:2.7,id);
+    if(finish==='handdrawn'&&elevated&&!(inkV2&&variety%2!==0))
       path(id+'-roof-side',`M ${w-14} ${-h*.58} L ${w+24} 8 L ${w+10} 21 L ${w*.81} 8 Z`,C.wood,C.ink,1.4,id);
-    path(id+'-roof-stripes',elevated?`M -12 5 L 20 ${-h*.5} L ${w-20} ${-h*.5} L ${w+12} 5 M -6 15 L ${w+6} 15 M ${w*.3} ${-h*.5} L ${w*.22} 7 M ${w*.65} ${-h*.5} L ${w*.74} 7`:`M -10 10 Q ${w*.3} -30 ${w/2} -21 Q ${w*.8} -30 ${w+13} 9 M -4 17 Q ${w*.4} 5 ${w*.64} 8`,'none',C.earth,1.6,id);
+    path(id+'-roof-stripes',elevated&&inkV2&&variety%2!==0?`M -9 5 Q ${w*.2} ${-h*.28} ${w*.49} ${-h*.58} M ${w*.57} ${-h*.52} Q ${w*.8} ${-h*.23} ${w+7} 5 M -3 12 Q ${w*.5} 20 ${w+5} 12`:elevated?`M -12 5 L 20 ${-h*.5} L ${w-20} ${-h*.5} L ${w+12} 5 M -6 15 L ${w+6} 15 M ${w*.3} ${-h*.5} L ${w*.22} 7 M ${w*.65} ${-h*.5} L ${w*.74} 7`:`M -10 10 Q ${w*.3} -30 ${w/2} -21 Q ${w*.8} -30 ${w+13} 9 M -4 17 Q ${w*.4} 5 ${w*.64} 8`,'none',C.earth,1.6,id);
     if(elevated){
-      path(id+'-thatch',Array.from({length:8},(_,i)=>{const x=20+(w-40)*i/7;return `M ${x} ${-h*.46} L ${x+(i-3.5)*3} 5`;}).join(' '),'none',C.earth,.9,id);
+      path(id+'-thatch',Array.from({length:8},(_,i)=>{const x=20+(w-40)*i/7,top=inkV2&&variety%2!==0?-h*.56*(1-Math.abs(x-w*.51)/(w*.51)):-h*.46;return `M ${x} ${top} L ${x+(i-3.5)*3} 5`;}).join(' '),'none',inkV2?C.wood:C.earth,inkV2?1.5:.9,id);
       path(id+(finish==='handdrawn'?'-handdrawn-planks':'-wall-planks'),Array.from({length:6},(_,i)=>`M ${12+i*(w-24)/5} 26 L ${12+i*(w-24)/5} ${h-4}`).join(' '),'none',C.earth,1,id);
     }
     const dw=Math.max(36,w*.24),doorL=w*.52-dw/2,doorR=w*.52+dw/2;
@@ -175,6 +188,11 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
       path(id+'-window',`M ${w*.075} ${h*.39} Q ${w*.17} ${h*.376} ${w*.275} ${h*.395} L ${w*.27} ${h*.66} Q ${w*.17} ${h*.668} ${w*.073} ${h*.653} Z`,light==='night'?C.lit:C.far,C.ink,1.1,id);
     else rect(id+'-window',w*.075,h*.39,w*.2,h*.27,light==='night'?C.lit:C.far,id);
     path(id+'-window-slat',`M ${w*.175} ${h*.39} L ${w*.175} ${h*.66} M ${w*.075} ${h*.52} L ${w*.275} ${h*.52}`,'none',C.wood,2,id);
+    if(inkV2&&elevated&&['house-mid','house-left'].includes(id)){
+      const x=w+19,y=h-24;
+      path(id+'-yard-jar',`M ${x-8} ${y+6} Q ${x-17} ${y+16} ${x-12} ${y+29} Q ${x} ${y+36} ${x+12} ${y+29} Q ${x+17} ${y+16} ${x+8} ${y+6} Z`,C.wood,C.ink,2.1,id);
+      path(id+'-jar-rim',`M ${x-8} ${y+6} Q ${x} ${y+11} ${x+8} ${y+6} Q ${x} ${y+1} ${x-8} ${y+6} Z`,C.ink,C.ink,1,id);
+    }
     if(finish==='handdrawn'&&!elevated){
       path(id+'-handdrawn-planks',Array.from({length:6},(_,i)=>{const sx=9+i*(w-16)/6;return `M ${sx.toFixed(2)} 24 Q ${(sx-2.8).toFixed(2)} ${Math.round(h*.32)} ${sx.toFixed(2)} ${Math.round(h*.53)} M ${(sx+1).toFixed(2)} ${Math.round(h*.77)} L ${(sx-1).toFixed(2)} ${h-9}`;}).join(' '),'none',C.wood,1.05,id);
       path(id+'-roof-hatch',variety===0?
@@ -190,10 +208,19 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
     const scale=frame&&frame.width>frame.height?frame.height/1080:1;
     const left=frame&&frame.width>frame.height?-(frame.width-720*scale)/2/scale:0,right=720-left;
     rect('paint-sky',0,0,720,1280,C.sky);
+    if(inkV2&&light==='night'){
+      ellipse('moon',580,175,29,29,'#f1e2bc');N[N.length-1]!.light={kind:'moon',radius:85};
+      for(let i=0;i<12;i++)ellipse('star-'+i,left+(right-left)*hash(i),90+hash(i+14)*160,1.2,1.2,'#ddd9c7');
+    }
     path('mountains-back',wideMarket?'M 0 780 L 0 620 Q 120 410 240 585 Q 330 425 440 590 Q 580 430 720 620 L 720 780 Z':'M 0 420 L 0 335 Q 120 240 240 330 Q 330 260 440 330 Q 580 245 720 335 L 720 430 Z',C.far,C.ink,1);
     path('mountains-shade',wideMarket?'M 0 810 L 0 706 Q 180 642 360 710 Q 550 635 720 706 L 720 835 Z':'M 0 450 L 0 390 Q 180 320 360 390 Q 550 319 720 390 L 720 470 Z',C.mid);
+    if(inkV2&&!wideMarket){
+      N.find(n=>n.id==='mountains-back')!.d='M 0 430 L 0 330 Q 42 322 85 349 L 168 222 Q 177 204 187 227 L 247 315 Q 283 341 319 307 L 398 204 Q 411 184 424 211 L 482 324 Q 537 291 579 306 L 626 245 Q 638 224 650 250 L 699 309 L 720 320 L 720 430 Z';
+      path('ink-distant-pines',[[88,421,47],[274,420,40],[564,424,52]].map(([x,y,h])=>`M ${x!-3} ${y} L ${x!-3} ${y!-10} L ${x!-16} ${y!-10} L ${x!-8} ${y!-23} L ${x!-13} ${y!-23} L ${x} ${y!-h!} L ${x!+13} ${y!-23} L ${x!+8} ${y!-23} L ${x!+16} ${y!-10} L ${x!+3} ${y!-10} L ${x!+3} ${y} Z`).join(' '),C.plantShade,C.ink,1.4);
+    }
     path('middle-ground',wideMarket?'M 0 732 Q 350 710 720 737 L 720 1600 L 0 1600 Z':'M 0 421 Q 350 404 720 425 L 720 1600 L 0 1600 Z',C.plant);
     rect('physical-ground-plane',left,900,right-left,1000,C.plant);
+    if(inkV2){N.find(n=>n.id==='middle-ground')!.fill=C.ground;N.find(n=>n.id==='physical-ground-plane')!.fill=C.ground;}
     path('village-street',wideMarket?`M ${left} 815 Q 80 780 440 900 Q 690 980 ${right} 895 L ${right} 990 Q 660 1090 380 1015 Q 80 880 ${left} 910 Z`:`M ${left} 712 Q 80 626 440 795 Q 690 912 ${right} 870 L ${right} 986 Q 670 1028 378 893 Q 80 728 ${left} 807 Z`,C.earth,C.ink,2);
     if(wideMarket)path('market-square',`M ${left+220} 900 Q 190 850 630 900 Q ${right-260} 920 ${right-90} 1030 L ${right} 1600 L ${left} 1600 Z`,C.earth,C.ink,1.5);
     else path('village-path-branch','M 378 864 Q 350 1050 227 1410 L 474 1410 Q 513 1100 466 895 Z',C.earth,C.ink,2);
@@ -201,12 +228,25 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
       ['house-left',left+100,720,230,130],['house-back',40,666,155,110],
       ['house-mid',535,710,174,125],['house-right',right-290,750,210,145],
     ]:[
-      ['house-back',30,526,135,110],['house-mid',535,610,174,125],
+      ['house-back',30,526,135,110],['house-mid',inkV2?475:535,inkV2?585:610,inkV2?270:174,inkV2?160:125],
       ['house-left',left+90,612,190,130],['house-right',right-240,654,180,140],
-      ['house-near-left',left+200,1080,270,155],['house-near-right',right-365,1170,285,160],
+      ['house-near-left',left+(inkV2?150:200),1080,inkV2?320:270,inkV2?185:155],['house-near-right',right-365,inkV2?1090:1170,inkV2?305:285,inkV2?170:160],
     ];
     for(const [id,x,y,w,h]of houses)house(id,x,y,w,h);
     foliage('village-tree',250,665,.55);foliage('village-tree-left',left+410,720,.7);foliage('village-tree-right',right-420,796,.65);
+    if(inkV2){
+      foliage('ink-frame-tree-left',left+45,1210,1.18);foliage('ink-frame-tree-right',right-28,1245,1.12);
+      path('ink-lane-stones',`M ${left+280} 1030 q 13 -5 25 -1 m 12 18 q 11 -4 19 1 M 600 1200 q 14 -6 28 -1 M 464 954 q 8 -5 16 -1`,'none',C.ink,1.3);
+      path('ink-garden-fence',Array.from({length:5},(_,i)=>{const x=left+28+i*17;return `M ${x} 1178 L ${x-1} 1090 L ${x+5} 1082 L ${x+12} 1090 L ${x+13} 1178 Z`;}).join(' '),C.roof,C.ink,2.5);
+      path('ink-garden-fence-rails',`M ${left+24} 1104 Q ${left+68} 1099 ${left+112} 1104 M ${left+24} 1144 Q ${left+68} 1140 ${left+112} 1144`,'none',C.wood,4);
+    }
+    if(inkV2){
+      // A semantic scene target wraps the existing tree without moving it.
+      // The writer may safely frame "tree" while native IDs stay available.
+      const at=N.findIndex(n=>n.id==='village-tree'),native=N[at]!;
+      N.splice(at,0,{id:'tree',type:'group',x:0,y:0,bounds:{x:250-78,y:665-187,width:160,height:187}});
+      native.parent='tree';
+    }
     if(wideMarket){
       // A public square has its own projected ground and side stalls. It is
       // not a street-level portrait background with a row of enlarged heads.
@@ -237,7 +277,7 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
       const x=left+90+i*(right-left-180)/8;
       path('field-detail-'+i,`M ${x} 1020 q 10 -22 20 -12 m -14 10 q -3 -16 -10 -20`,'none',C.plantShade,2);
     }
-    if(!wideMarket)for(let i=0;i<5;i++)path('roof-thatch-'+i,`M ${55+i*20} 475 l -6 43 M ${557+i*26} 550 l 8 60`,'none',C.earth,1);
+    if(!wideMarket&&!inkV2)for(let i=0;i<5;i++)path('roof-thatch-'+i,`M ${55+i*20} 475 l -6 43 M ${557+i*26} 550 l 8 60`,'none',C.earth,1);
   }else if(place==='village'||place==='waterside'){
     if(place==='waterside'){
       rect('water-plane',0,710,720,251,C.water);
@@ -465,6 +505,54 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
       path('market-dry-leaves','M -118 969 q 14 -14 30 -2 m -22 4 q 0 -16 9 -24 M 708 974 q -5 -22 10 -32 m -10 32 q 12 -16 26 -13','none',C.plantShade,2.1);
     }
   }
+  if(festival==='tet'){
+    // Tet dressing shares the location palette/ink so new props never drift
+    // style. Deterministic geometry: same stage survives cuts and rerenders.
+    // Elevated market is a different projection: dress the plaza, not the
+    // eye-level lane coordinates.
+    if(elevated){
+      for(const side of [0,1] as const){
+        const bx=side===0?180:540,by=1060;
+        group('tet-mai-'+side,bx,by);
+        path('tet-mai-pot-'+side,'M -26 0 L 26 0 L 19 36 L -19 36 Z',C.wood,C.ink,2.2,'tet-mai-'+side);
+        path('tet-mai-branches-'+side,'M 0 0 Q -6 -40 -28 -62 M 0 0 Q 2 -48 16 -68 M 0 0 Q 12 -36 30 -48','none',C.wood,2.6,'tet-mai-'+side);
+        path('tet-mai-blooms-'+side,'M -38 -62 q 7 -9 14 -2 q 7 -7 13 0 q 7 -6 12 2 M 4 -74 q 7 -9 14 -2 q 7 -6 12 1 M 22 -52 q 7 -8 13 -1 q 6 -6 11 1','none',C.lit,4,'tet-mai-'+side);
+      }
+      // Couplets flank the mid house door (house-mid at 535,710 174x125).
+      path('tet-couplet-l','M 560 736 L 574 736 L 574 820 L 560 820 Z','#a63d32',C.ink,1.6);
+      path('tet-couplet-r','M 660 736 L 674 736 L 674 820 L 660 820 Z','#a63d32',C.ink,1.6);
+      path('tet-neu-pole','M 90 700 L 90 980','none',C.wood,4);
+      path('tet-neu-flag','M 90 700 L 126 712 L 90 726 Z','#a63d32',C.ink,1.4);
+      path('tet-lantern-string','M 120 780 Q 360 806 600 778','none',C.wood,1.8);
+      for(let i=0;i<3;i++){
+        const x=180+i*150;
+        ellipse('tet-lantern-'+i,x,796,10,14,light==='night'?C.lit:'#b65e49');
+      }
+      // Live barnyard rigs (simple-chicken/simple-snake) play these roles;
+      // static copies were removed to leave budget for cast and story props.
+    }else{
+      // Eye-level lane dressing.
+      for(const side of [0,1] as const){
+        const bx=side===0?150:545,by=1010;
+        group('tet-mai-'+side,bx,by);
+        path('tet-mai-pot-'+side,'M -26 0 L 26 0 L 19 36 L -19 36 Z',C.wood,C.ink,2.2,'tet-mai-'+side);
+        path('tet-mai-branches-'+side,'M 0 0 Q -6 -40 -28 -62 M 0 0 Q 2 -48 16 -68 M 0 0 Q 12 -36 30 -48','none',C.wood,2.6,'tet-mai-'+side);
+        path('tet-mai-blooms-'+side,'M -38 -62 q 7 -9 14 -2 q 7 -7 13 0 q 7 -6 12 2 M 4 -74 q 7 -9 14 -2 q 7 -6 12 1 M 22 -52 q 7 -8 13 -1 q 6 -6 11 1','none',C.lit,4,'tet-mai-'+side);
+      }
+      // Red couplets on the mid house + one neu pole + lantern string.
+      // No text glyphs: red bands read as couplets at mobile size.
+      path('tet-couplet-l','M 44 726 L 62 726 L 62 830 L 44 830 Z','#a63d32',C.ink,1.6);
+      path('tet-couplet-r','M 202 726 L 220 726 L 220 830 L 202 830 Z','#a63d32',C.ink,1.6);
+      path('tet-neu-pole','M 648 700 L 648 980','none',C.wood,4);
+      path('tet-neu-flag','M 648 700 L 684 712 L 648 726 Z','#a63d32',C.ink,1.4);
+      ellipse('tet-neu-bell',666,734,5,7,C.lit);
+      path('tet-lantern-string','M 90 690 Q 360 716 630 688','none',C.wood,1.8);
+      for(let i=0;i<3;i++){
+        const x=150+i*170;
+        ellipse('tet-lantern-'+i,x,706,10,14,light==='night'?C.lit:'#b65e49');
+      }
+    }
+  }
   if(finish==='handdrawn'&&place==='corridor'){
     path('interior-board-ink','M 24 242 q 3 55 1 109 M 230 226 q -2 69 2 119 M 500 230 q 2 67 -2 124','none',C.earth,1.35);
     path('interior-floor-ink','M 30 1096 q 80 -5 146 0 M 426 1151 q 85 -4 154 2','none',C.ink,.9);
@@ -529,7 +617,7 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
       foliage('landscape-tree-right',right-52,1100,1.65);
       N.splice(at,0,...N.splice(from));
     }
-    N.splice(1,0,{id:'illustrated-world',type:'group',x:offset,y:elevated?frame.height*.92-1280*scale:frame.height*.86-980*scale,scaleX:scale,scaleY:scale});
+    N.splice(1,0,{id:'illustrated-world',type:'group',x:offset,y:elevated?frame.height*.92-(inkV2&&!wideMarket?1080:1280)*scale:frame.height*.86-980*scale,scaleX:scale,scaleY:scale});
     for(const n of N){
       if(n.id==='paint-sky'){n.width=frame.width;n.height=frame.height;continue;}
       if(n.id!=='illustrated-world'&&!n.parent)n.parent='illustrated-world';
@@ -549,6 +637,7 @@ export function illustratedPlace(options:Options,frame?:{width:number;height:num
       N.splice(0,N.length,...retained);
     }
   }
-  return {assets:{'illustrated-place-person':{rig:'simple-puppet',hair:'short',outfit:'tunic',
-    palette:{skin:'#e7d1b8',shirt:'#718376',hair:'#393334',trim:'#ceb997',accent:'#a28c73',inner:'#e6dcc9'}}},stage:world};
+  const finished=inkV2?{...world,nodes:handInkDrawing(world).nodes}:world;
+  return {assets:{'illustrated-place-person':{rig:'simple-puppet',hair:'short',outfit:'tunic',...(inkV2?{artStyle:FOLK_INK_STYLE}:{}),
+    palette:{skin:'#e7d1b8',shirt:'#718376',hair:'#393334',trim:'#ceb997',accent:'#a28c73',inner:'#e6dcc9'}}},stage:finished};
 }

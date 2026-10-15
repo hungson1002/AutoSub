@@ -5,7 +5,7 @@ import type {VectorNode} from '../../shared/canvasVectorScene';
  * The near soil is a physical support; moving river and distant hills are
  * separate depth planes, not a single flat brown background. */
 export function vectorRiverbank(frame?:{width:number;height:number}){
-  const ink='#202e31',nodes:VectorNode[]=[];
+  const ink='#25241f',nodes:VectorNode[]=[];
   const rect=(id:string,x:number,y:number,width:number,height:number,fill:string,parent?:string)=>{
     nodes.push({id,type:'rect',x,y,width,height,fill,...(parent?{parent}:{} )});
   };
@@ -16,7 +16,7 @@ export function vectorRiverbank(frame?:{width:number;height:number}){
   rect('sky-haze',0,360,720,420,'#314a59');
   path('high-cloud','M 48 260 Q 154 210 272 262 Q 340 296 410 262 Q 514 223 653 258','none','#718087',3);
   nodes.push({id:'moon',type:'ellipse',x:570,y:240,rx:37,ry:37,fill:'#f5e7bd',light:{kind:'moon',radius:116}});
-  path('mountain-back','M 0 616 L 0 463 Q 93 410 168 499 Q 271 385 347 494 Q 471 398 559 489 Q 645 426 720 459 L 720 682 Z','#496172','#354957',2);
+  path('mountain-back','M 0 616 L 0 472 Q 47 447 85 471 L 153 369 Q 163 350 173 374 L 236 476 Q 278 489 307 460 L 356 368 Q 368 346 379 374 L 437 475 Q 488 441 525 464 L 585 386 Q 596 370 607 392 L 661 459 Q 695 444 720 459 L 720 682 Z','#496172','#354957',2);
   path('mountain-mid','M 0 664 L 0 553 Q 110 483 198 561 Q 302 495 413 580 Q 545 510 720 555 L 720 734 Z','#506762','#344e50',2);
   path('distant-tree-line','M 0 692 L 0 644 Q 32 625 45 599 L 57 633 Q 78 590 95 641 Q 134 599 149 652 Q 191 604 204 652 Q 238 608 255 661 Q 302 601 327 658 Q 375 604 393 667 Q 439 611 460 648 Q 499 601 530 657 Q 578 604 611 648 Q 655 590 682 650 L 720 635 L 720 702 Z','#334b47',ink,1.5);
   path('far-bank','M 0 686 Q 166 651 320 690 Q 530 661 720 688 L 720 772 L 0 770 Z','#465c53',ink,3);
@@ -29,8 +29,8 @@ export function vectorRiverbank(frame?:{width:number;height:number}){
     path('water-ripple-'+i,`M ${x} ${y} q 17 -5 36 -1 m 10 0 q 13 3 27 -1`,'none',i%3===0?'#6a8984':'#506e70',i%3===0?2.5:1.5);
   }
   // Earthen near bank occupies a real surface; the scene actor stands on it.
-  rect('physical-ground-plane',0,980,720,1300,'#716a5e');
-  path('foreground-earth','M 0 947 Q 118 940 236 965 Q 364 971 504 976 Q 628 968 720 973 L 720 1280 L 0 1280 Z','#827663',ink,4);
+  rect('physical-ground-plane',0,980,720,1300,'#8f7b61');
+  path('foreground-earth','M 0 947 Q 118 940 236 965 Q 364 971 504 976 Q 628 968 720 973 L 720 1280 L 0 1280 Z','#8f7b61',ink,4);
   path('bank-edge','M 0 947 Q 118 940 236 965 Q 364 971 504 976 Q 628 968 720 973','none','#334b47',8);
   path('bank-edge-light','M 0 943 Q 118 935 236 960 Q 364 966 504 971 Q 628 962 720 968','none','#b7b397',3);
   path('soil-cliffs','M 230 1020 Q 269 1044 292 1090 M 433 1009 Q 479 1047 499 1112 M 153 1062 L 182 1097 M 615 1107 L 641 1160','none','#5a5549',2.1);
@@ -45,7 +45,7 @@ export function vectorRiverbank(frame?:{width:number;height:number}){
   path('tree-trunk','M 73 504 Q 97 370 91 222 L 50 178 L 72 165 L 118 210 Q 139 121 174 100 L 187 113 Q 157 176 135 232 Q 143 365 155 504 Z','#665b47',ink,4,'tree');
   path('tree-bark','M 99 281 Q 113 391 99 474 M 132 289 L 143 457 M 85 230 Q 102 260 105 286','none','#433f37',2,'tree');
   path('tree-crown','M 5 151 Q -7 111 28 100 Q 17 69 48 50 Q 61 21 98 29 Q 124 -3 155 17 Q 190 -7 214 29 Q 252 26 261 61 Q 298 78 279 112 Q 297 148 264 160 Q 249 192 208 181 Q 173 208 143 181 Q 105 206 79 178 Q 37 197 5 151 Z','#58755c',ink,3,'tree');
-  path('tree-canopy-shade','M 10 151 Q 72 173 109 153 Q 149 180 197 152 Q 243 164 279 112 Q 297 148 264 160 Q 249 192 208 181 Q 173 208 143 181 Q 105 206 79 178 Q 37 197 10 151 Z','#405e4c');
+  path('tree-canopy-shade','M 10 151 Q 72 173 109 153 Q 149 180 197 152 Q 243 164 279 112 Q 297 148 264 160 Q 249 192 208 181 Q 173 208 143 181 Q 105 206 79 178 Q 37 197 10 151 Z','#405e4c','none',0,'tree');
   path('tree-leaf-marks','M 43 76 Q 68 55 95 74 M 136 48 Q 162 30 183 58 M 214 91 Q 244 86 251 116 M 78 128 Q 93 113 115 127','none','#789172',3,'tree');
   for(let i=0;i<7;i++){
     const x=[27,85,137,312,507,610,686][i]!,y=[922,975,1039,991,1122,1161,1211][i]!;
@@ -61,6 +61,12 @@ export function vectorRiverbank(frame?:{width:number;height:number}){
   path('stake','M 12 215 L 9 24 L 25 2 L 43 24 L 45 215 Z','#655543',ink,4,'mooring-stake');
   path('stake-grain','M 23 44 L 22 191 M 36 48 Q 31 88 36 112','none','#a08a68',2,'mooring-stake');
   path('stake-rope','M 8 118 Q 26 129 47 117 M 9 128 Q 28 140 46 126','none','#c3af81',4,'mooring-stake');
+  // The landing is one supported object in world coordinates, not a loose
+  // screen-space plank. Its near posts meet the same y=980 shore surface.
+  nodes.push({id:'jetty',type:'group',x:480,y:865,width:205,height:115,groundAnchor:{x:100,y:115}});
+  path('jetty-posts','M 14 24 L 14 101 M 49 4 L 49 87 M 148 68 L 148 115 M 187 43 L 187 112','none','#473d30',6,'jetty');
+  path('jetty-planks','M -8 22 L 34 -3 L 201 43 L 162 72 Z','#7c674d',ink,3.5,'jetty');
+  path('jetty-joints','M 28 11 L 188 55 M 9 23 L 167 66 M 66 6 L 48 34 M 105 17 L 87 45 M 145 28 L 127 56','none','#b29a72',1.7,'jetty');
   // Art-directed set dressing: one coherent shoreline rather than several
   // broad flat SVG regions. These are independent reusable depth planes.
   path('moon-water-reflection','M 525 736 Q 558 740 610 735 L 635 938 Q 581 930 520 944 Q 546 845 525 736 Z','#c5b993','none',0);
@@ -104,10 +110,19 @@ export function vectorRiverbank(frame?:{width:number;height:number}){
   if(frame&&frame.width>frame.height){
     const scale=frame.height/960,offset=(frame.width-720*scale)/2;
     const world:VectorNode={id:'riverbank-world',type:'group',x:offset,y:frame.height*.86-980*scale,scaleX:scale,scaleY:scale};
+    const left=-offset/scale,right=(frame.width-offset)/scale,by=(id:string)=>nodes.find(n=>n.id===id)!;
+    // Every near-earth paint layer must span 16:9, not only the invisible
+    // physical support. Keep the authored contact surface/actor scale intact.
+    const shore=`M ${left} 944 Q -60 922 236 965 Q 364 971 504 976 Q 628 968 720 973 Q 970 959 ${right} 982`;
+    by('foreground-earth').d=shore+` L ${right} 1280 L ${left} 1280 Z`;
+    by('bank-edge').d=shore;by('bank-edge-light').d=shore;by('bank-edge-light').strokeWidth=2;
+    by('earth-light-wash').d=`M ${left} 984 Q 190 970 375 993 Q 560 987 720 998 Q 970 981 ${right} 995 L ${right} 1041 Q 490 1033 310 1039 Q 141 1027 ${left} 1059 Z`;
+    Object.assign(by('sky-haze'),{type:'path',d:`M ${left} 320 Q 360 290 ${right} 335 L ${right} 700 L ${left} 700 Z`,opacity:.4});
+    by('moon').y=(frame.height*.26-world.y!)/scale;
     for(const n of nodes){
       if(n.id==='sky'){n.width=frame.width;n.height=frame.height;continue;}
       if(!n.parent)n.parent=world.id;
-      if(['sky-haze','river-water','physical-ground-plane'].includes(n.id)){n.x=-offset/scale;n.width=frame.width/scale;}
+      if(['river-water','physical-ground-plane'].includes(n.id)){n.x=-offset/scale;n.width=frame.width/scale;}
       if(['mountain-back','mountain-mid','distant-tree-line','far-bank','far-grass','river-shadow-band','river-middle-band'].includes(n.id)){
         n.x=-offset/scale;n.scaleX=frame.width/(720*scale);
       }

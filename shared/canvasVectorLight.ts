@@ -1,4 +1,5 @@
 import type {VectorDrawing,VectorNode,CanvasVectorScene} from './canvasVectorScene';
+import {APPROVED_FOLK_STYLE} from './canvasVectorInk';
 
 /** Declarative emitters shared by Canvas preview and native SVG export. */
 export type VectorLight={kind:'moon'|'flame';radius:number;color?:string;x?:number;y?:number;intensity?:number};
@@ -42,6 +43,9 @@ function readableNightPaint(n:VectorNode,minimum:number){
 export function readableVectorNightAssets(assets:Record<string,VectorDrawing>,brief:string){
   if(!isNightBrief(brief))return assets;
   return Object.fromEntries(Object.entries(assets).map(([id,drawing])=>{
+    // This model sheet already has its approved palette and filled black ink
+    // contours. Treating those contours as dark solids turns the ink gray.
+    if(drawing.nodes.some(n=>n.id===APPROVED_FOLK_STYLE))return [id,drawing];
     const actor=drawing.nodes.some(n=>n.id==='head-group')&&drawing.nodes.some(n=>n.id==='body'||n.id==='torso');
     // Wet sole silhouettes are dark marks on a support, not illuminated solids.
     if(!actor&&drawing.nodes.some(n=>/(?:^|[-_])sole$/.test(n.id)))return [id,drawing];
@@ -54,9 +58,15 @@ export function readableVectorNightAssets(assets:Record<string,VectorDrawing>,br
  * decorative black wash must not undo the readable foreground palette. */
 export function readableVectorNightScene(drawing:CanvasVectorScene,brief:string):CanvasVectorScene{
   if(!isNightBrief(brief))return drawing;
+  const approvedScenery=drawing.nodes.some(n=>n.id==='approved-courtyard-svg-v1');
+  const natureScenery=drawing.nodes.some(n=>n.id==='folk-nature-grammar-v1'||n.id==='folk-setting-grammar-v1');
   const supported=new Set(drawing.nodes.filter(n=>n.groundAnchor&&!n.groundMark).map(n=>n.id));
   const parents=new Map(drawing.nodes.map(n=>[n.id,n.parent]));
   return {...drawing,nodes:drawing.nodes.map((node,i)=>{
+    // Native scenery has explicit day/dusk/night paints and filled ink, just
+    // like the approved cast. Lifting its ink turns every contour gray.
+    if(approvedScenery&&node.id.startsWith('approved-'))return node;
+    if(natureScenery&&node.id.startsWith('scenery-'))return node;
     if(i===drawing.nodes.length-1&&node.type==='rect'&&(node.x??0)<=0&&(node.y??0)<=0&&(node.width??0)>=drawing.width&&(node.height??0)>=drawing.height
       &&/^#(?:000|000000)$/i.test(node.fill||'')&&(node.opacity??1)>.12&&(node.opacity??1)<1&&!drawing.tracks.some(t=>t.target===node.id&&t.frames.some(f=>f.opacity!==undefined)))return {...node,opacity:.12};
     let owner:string|undefined=node.id;

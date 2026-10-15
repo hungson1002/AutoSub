@@ -47,7 +47,7 @@ else{
     provider:{id:'qa-router',name:'9Router',baseUrl:'http://127.0.0.1:20128/v1',enabled:true,models:[],providerType:'openai-compatible',authType:'bearer',apiKey:credential.key},
     model:arg('--model','ag/gemini-3.8-flash-high'),
     narration:{provider:{id:'edge-tts-local',name:'Edge TTS',baseUrl:'local://edge-tts',enabled:true,models:[],providerType:'edge-tts',authType:'none'},model:'edge-tts',voice:'vi-VN-NamMinhNeural',speed:1},
-    audioProduction:{enabled:true,autoSound:true},
+    audioProduction:{enabled:!process.argv.includes('--silent-preview'),autoSound:!process.argv.includes('--silent-preview')},
   });
   await writeFile(path.join(output,'project.json'),JSON.stringify(project,null,2));
   console.log(JSON.stringify({scenes:project.scenes.length,durationMs:project.scenes.reduce((n,s)=>n+s.durationMs,0),review:project.vectorReview}));

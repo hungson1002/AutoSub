@@ -1,11 +1,14 @@
 import {evaluateVectorPart,vectorTrackTiming,type VectorDrawing,type VectorNode,type VectorTrack,type VectorFrame} from './canvasVectorScene';
 import type {CanvasStudioScene} from './canvasAnimationStudio';
 import {villagePuppetArt} from './canvasVectorVillageArt';
+import {FOLK_INK_STYLE} from './canvasVectorInk';
+import {approvedFolkPuppet} from './canvasVectorApprovedArt';
 import {isCanvasActorSpeaking,canvasActorSpeechLevel} from './canvasDialogue';
 
 /** Model A: swept layered hair and decorated continuous robes, never sleeves
  * or articulated limbs. Keep native pivots/contacts stable across costumes. */
 export function vectorPuppetRig(raw:Record<string,unknown>):VectorDrawing{
+  if(raw.artStyle===FOLK_INK_STYLE)return withPuppetFearEffects(approvedFolkPuppet(raw));
   const design=raw.design??'legacy';
   if(!['legacy','village'].includes(String(design)))throw new Error('Vector: invalid puppet design');
   const palette=(raw.palette||{}) as Record<string,unknown>;
@@ -229,7 +232,8 @@ export function vectorPuppetRig(raw:Record<string,unknown>):VectorDrawing{
     nodes.splice(hatIndex<0?nodes.findIndex(n=>n.id==='hand-l'):hatIndex,0,...rear);
   }
   const rig={width:180,height:280,nodes};
-  return withPuppetFearEffects(design==='village'?villagePuppetArt(rig,raw):rig);
+  const art=withPuppetFearEffects(design==='village'?villagePuppetArt(rig,raw):rig);
+  return art;
 }
 
 /** Opt-in upgrade for retained puppets: add invisible effects, preserve all art.
@@ -281,11 +285,12 @@ export function vectorPuppetFearTracks(d:VectorDrawing,assets:Record<string,Vect
       {t:0,...rest,easing:'smooth'},{t:.1,...pose,easing:'smooth'},{t:.76,...pose,easing:'smooth'},{t:1,...rest,easing:'smooth'},
     ]);
     const mouth=rig.nodes.find(n=>n.id==='mouth'),pathMouth=mouth?.type==='path';
+    const approvedFear=rig.nodes.find(n=>n.id==='approved-fear-mouth');
     const tracks=[track('upper-body',shake),
-      face('eyes',{scaleX:village?(strong?1.08:1.03):(strong?1.12:1.05),scaleY:village?(strong?1.16:1.08):(strong?1.3:1.12)},{scaleX:1,scaleY:1}),
+      face('eyes',{scaleX:village?1:(strong?1.12:1.05),scaleY:village?1:(strong?1.3:1.12)},{scaleX:1,scaleY:1}),
       face('brow-l',{dy:-3,rotation:-14},{dy:0,rotation:0}),face('brow-r',{dy:-3,rotation:14},{dy:0,rotation:0}),
       face('mouth',{scaleX:village?1:(strong?2.1:1.4),scaleY:village?1:(strong?4:2),
-        ...(pathMouth?{d:village?'M -8 1 Q -5 -3 -2 0 Q 1 3 4 0 Q 7 -3 10 1':'M 0 -1.4 A 3.4 1.4 0 1 0 0 1.4 A 3.4 1.4 0 1 0 0 -1.4 Z',fill:village?'none':mouth.stroke||'#141313'}:{})},
+        ...(pathMouth?{d:approvedFear?.d||(village?'M -8 1 Q -5 -3 -2 0 Q 1 3 4 0 Q 7 -3 10 1':'M 0 -1.4 A 3.4 1.4 0 1 0 0 1.4 A 3.4 1.4 0 1 0 0 -1.4 Z'),fill:approvedFear?mouth.fill:village?'none':mouth.stroke||'#141313'}:{})},
         {scaleX:1,scaleY:1,...(pathMouth?{d:mouth.d,fill:mouth.fill}:{})}),
       track('mouth',shake.map(f=>({t:f.t,dx:f.dx!*.2,easing:f.easing}))),
     ];
@@ -307,7 +312,7 @@ export function vectorPuppetFearTracks(d:VectorDrawing,assets:Record<string,Vect
 
 /** Short 2D pose changes about the planted body's center. Facing changes never
  * translate the actor or change which anatomical hand owns a carried prop. */
-export const puppetTurnOpacityParts=['rear-head','rear-costume','costume','blink','brow-l','brow-r','mouth','cheek-l','cheek-r','beard','beard-strands','moustache','handdrawn-hem','village-nose','age-lines','glasses'] as const;
+export const puppetTurnOpacityParts=['rear-head','rear-costume','costume','front-head','blink','brow-l','brow-r','mouth','cheek-l','cheek-r','beard','beard-strands','moustache','handdrawn-hem','village-nose','age-lines','glasses'] as const;
 /** Paint occupied hands AND their attachments behind the opaque body when
  * facing away. Geometry/contact stays unchanged; exposed portions remain visible. */
 export function puppetPaintOrder(children:VectorNode[],rig:VectorDrawing,prefix:string,scene:CanvasStudioScene,timeMs:number):VectorNode[]{
@@ -346,7 +351,12 @@ export function vectorPuppetTurnTracks(d:VectorDrawing,assets:Record<string,Vect
       {t:.5,opacity:back?rear(to):frontOpacity*(1-rear(to)),easing:'hold'},
       {t:1,opacity:back?rear(to):frontOpacity*(1-rear(to)),easing:'hold'},
     ]);
-    for(const part of puppetTurnOpacityParts){
+    // New approved sheets separate front paint from their complete rear view.
+    // One layer avoids dangling fringes/ears and excessive crowd track counts.
+    // Saved sheets without this group retain their established turn behavior.
+    const parts=rig.nodes.some(n=>n.id==='front-head')
+      ?['rear-head','rear-costume','costume','front-head']:puppetTurnOpacityParts;
+    for(const part of parts){
       const p=rig.nodes.find(n=>n.id===part);if(p)tracks.push(pose(part,part.startsWith('rear-'),p.opacity??1));
     }
     return tracks;
@@ -394,7 +404,7 @@ export function puppetMouthState(target:string,rig:VectorDrawing,scene:CanvasStu
   const level=measured??(.5+.5*Math.sin(timeMs/1000*Math.PI*8));
   if(level<.2)return {opacity:state.opacity};
   const ry=Number((1+Math.min(1,Math.max(0,level))*3).toFixed(2));
-  return {opacity:state.opacity,d:`M 0 ${-ry} A 3.8 ${ry} 0 1 0 0 ${ry} A 3.8 ${ry} 0 1 0 0 ${-ry} Z`,fill:mouth.stroke||'#141313'};
+  return {opacity:state.opacity,d:`M 0 ${-ry} A 3.8 ${ry} 0 1 0 0 ${ry} A 3.8 ${ry} 0 1 0 0 ${-ry} Z`,fill:mouth.stroke&&mouth.stroke!=='none'?mouth.stroke:mouth.fill||'#141313'};
 }
 
 /** Compact cutout travel. The route advances independently of the linked

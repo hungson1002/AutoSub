@@ -104,6 +104,17 @@ const uploadError = (error: unknown) =>
     (error as { code?: string }).code === "FST_REQ_FILE_TOO_LARGE");
 const ffmpegPath = (file: string) =>
   file.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+export function subtitleBurnFilter(assFile: string, ass: string, fontDirectory?: string) {
+  const width = Number(/^PlayResX:\s*(\d+)\s*$/im.exec(ass)?.[1]);
+  const height = Number(/^PlayResY:\s*(\d+)\s*$/im.exec(ass)?.[1]);
+  // libass otherwise scales glyphs by the video's aspect ratio, while ASS
+  // vector boxes follow PlayRes. A 4:3 source then has text 4/3 wider than
+  // its box when resized to 16:9. Use the script's canvas for both layers.
+  const originalSize = Number.isSafeInteger(width) && width > 0
+    && Number.isSafeInteger(height) && height > 0
+    ? `:original_size=${width}x${height}` : "";
+  return `subtitles='${ffmpegPath(assFile)}'${fontDirectory ? `:fontsdir='${ffmpegPath(fontDirectory)}'` : ""}${originalSize}`;
+}
 const exportFilterThreads = () =>
   String(Math.max(2, Math.min(8, Math.floor(os.cpus().length / 2) || 2)));
 const stemCacheFile = (uploadId: string | undefined, stem: "vocals" | "background") => {
@@ -1255,10 +1266,6 @@ export async function exportRoutes(app: FastifyInstance) {
         : process.platform === "win32"
           ? path.join(process.env.WINDIR || "C:\\Windows", "Fonts")
           : "";
-      const fontDir = preferredFontDir
-        .replace(/\\/g, "/")
-        .replace(/:/g, "\\:")
-        .replace(/'/g, "\\'");
       const scaledOutput = outputSize(
         options.resolution,
         options.videoEdit?.aspectRatio,
@@ -1272,7 +1279,7 @@ export async function exportRoutes(app: FastifyInstance) {
         filters.push(
           options.burnSubtitles === false
             ? `[${current}]settb=AVTB[videoout]`
-            : `[${current}]subtitles='${ffmpegPath(assFile)}'${fontDir ? `:fontsdir='${fontDir}'` : ""},settb=AVTB[videoout]`,
+            : `[${current}]${subtitleBurnFilter(assFile, renderedAss, preferredFontDir)},settb=AVTB[videoout]`,
         );
 
       const durationProbe = await run(

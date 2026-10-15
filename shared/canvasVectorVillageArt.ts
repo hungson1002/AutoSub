@@ -1,9 +1,10 @@
 import type {VectorDrawing,VectorNode} from './canvasVectorScene';
+import {FOLK_INK_STYLE} from './canvasVectorInk';
 
 /** Approved village cast: flat art on the existing cutout/contact skeleton.
  * Expanded saved drawings never pass through this factory again. */
 export function villagePuppetArt(rig:VectorDrawing,raw:Record<string,unknown>):VectorDrawing{
-  const age=raw.age??'adult',gender=raw.gender??'neutral';
+  const age=raw.age??'adult',gender=raw.gender??'neutral',inkV2=raw.artStyle===FOLK_INK_STYLE;
   if(!['child','adult','elder'].includes(String(age)))throw new Error('Vector: invalid village age');
   if(!['male','female','neutral'].includes(String(gender)))throw new Error('Vector: invalid village gender');
   if(raw.glasses!==undefined&&typeof raw.glasses!=='boolean')throw new Error('Vector: invalid village glasses');
@@ -35,6 +36,10 @@ export function villagePuppetArt(rig:VectorDrawing,raw:Record<string,unknown>):V
   Object.assign(body,{x:-9,y:child?95.2:56,scaleX:1.1,scaleY:child?.66:.8});
   Object.assign(get('costume'),{x:body.x,y:body.y,scaleX:body.scaleX,scaleY:body.scaleY});
   Object.assign(get('head-group'),{y:child?118:96,scaleX:child?.88:1.13,scaleY:child?.88:1.13});
+  if(inkV2&&!child){
+    Object.assign(body,{y:44,scaleY:.84});Object.assign(get('costume'),{y:44,scaleY:.84});
+    Object.assign(get('head-group'),{y:91,scaleX:1.06,scaleY:1.06,rotation:-2});
+  }
   const neck=get('neck');Object.assign(neck,{type:'path',d:child?'M 81 168 L 81 184 Q 90 188 99 184 L 99 168 Z':'M 81 143 L 81 164 Q 90 168 99 164 L 99 143 Z',x:undefined,y:undefined,width:undefined,height:undefined,fill:skin,stroke:ink,strokeWidth:2.8});
   const face=get('face'),rx=raw.faceShape==='broad'?59:raw.faceShape==='oval'?51:56,ry=raw.faceShape==='oval'?61:56;
   // Native front/right is a three-quarter drawing, not a frontal face on a
@@ -85,6 +90,16 @@ export function villagePuppetArt(rig:VectorDrawing,raw:Record<string,unknown>):V
   if(outfit==='shawl')wardrobe.push(path('shawl','costume','M 72 128 L 85 135 L 106 126 L 118 145 L 121 176 Q 92 169 61 146 Z',accent));
   if(outfit==='robe')wardrobe.push(path('wrap-edge','costume','M 80 135 Q 96 150 117 158 L 119 216','none',inner,2.5));
   if(outfit==='ao-dai')wardrobe.push(path('panel-edge','costume','M 68 226 L 65 269','none',ink,1));
+  if(inkV2){
+    // Cloth has a readable placket and soft folds, without decorating every
+    // adult with the same bulky belt/knot. Preserve distinct costume colors.
+    if(outfit==='tunic'||outfit==='robe'){
+      for(let i=wardrobe.length-1;i>=0;i--)if(/^sash/.test(wardrobe[i]!.id))wardrobe.splice(i,1);
+      wardrobe.push(path('cloth-hem','costume','M 54 269 Q 85 278 120 269','none',inner,1.5),
+        path('cloth-folds','costume','M 65 191 Q 61 215 64 245 M 111 207 Q 115 240 113 260','none',clothShade,1.8));
+    }
+    const seam=wardrobe.find(n=>n.id==='front-seam');if(seam)seam.d='M 80 130 Q 97 139 113 151';
+  }
   // Costume must paint before the head; appended nodes are ordered by parent.
   nodes.push(...wardrobe);
   const hairNode=nodes.find(n=>n.id==='hair');

@@ -154,13 +154,21 @@ test('locked action framing ignores illustrator copies of screenplay shot metada
     s.vectorScene.shot={...script.shots[i]!.shot};
     delete s.vectorScene.camera;
   });
-  assert.throws(()=>parseVectorPlan(JSON.stringify(plan),'test',{width:720,height:1280},14),/subject shot needs an existing actor instance/);
+  assert.throws(()=>parseVectorPlan(JSON.stringify(plan),'test',{width:720,height:1280},14),/vectorScene.shot needs camera format/);
   const p=parseVectorPlan(JSON.stringify(plan),'test',{width:720,height:1280},14,script);
   p.scenes.forEach((s,i)=>{
     assert.deepEqual(s.vectorDirection!.shot,script.shots[i]!.shot);
     assert.equal(s.narration,script.shots[i]!.narration);
     assert.equal(s.vectorScene!.tracks.find(t=>t.target==='camera-world')!.frames.length,1);
   });
+  assert.deepEqual(compileVectorProject(p),p);
+});
+
+test('locked screenplay performance uses the assembled scene budget without deleting artwork',()=>{
+  const plan=drawing() as Record<string,any>;
+  for(const s of plan.scenes)s.vectorScene.nodes=[...(s.vectorScene.nodes||[]),...Array.from({length:170},(_,i)=>({id:`detail-${i}`,type:'ellipse',x:i,y:300,rx:1,ry:1,fill:'#567'}))];
+  const p=parseVectorPlan(JSON.stringify(plan),'test',{width:720,height:1280},14,normalizeVectorStory(screenplay(),14));
+  for(const s of p.scenes)assert.equal(s.vectorScene!.nodes.filter(n=>n.id.startsWith('detail-')).length,170);
   assert.deepEqual(compileVectorProject(p),p);
 });
 
@@ -175,6 +183,39 @@ test('selected compact cast rejects invented feet before drawing and resolves su
   assert.throws(()=>normalizeVectorStory(raw,14,{nativePerson:true}),/actor ID person/);
   Object.assign(beat,{motionTargets:['pig/leg-fl','pig/knee-fr']});
   assert.doesNotThrow(()=>normalizeVectorStory(raw,14,{compactCast:true}),'animal anatomy is not a human leg alias');
+});
+
+test('registered barnyard animals keep their real legs and segments under compact cast',()=>{
+  const raw=screenplay() as any;
+  raw.cast.push({id:'chicken',role:'Con gà',design:'simple-chicken'},{id:'snake',role:'Con rắn',design:'simple-snake'});
+  const beat=raw.shots[0].beats[0];
+  Object.assign(beat,{cue:'khua mái chèo',kind:'travel',targets:['chicken'],motionTargets:['chicken/leg-l','chicken/knee-r']});
+  raw.shots[0].narration='Ông lái đò khua mái chèo qua làn nước lạnh, còn con gà bước đi.';
+  assert.doesNotThrow(()=>normalizeVectorStory(raw,14,{compactCast:true}),'registered chicken keeps leg-l/leg-r');
+  Object.assign(beat,{targets:['snake'],motionTargets:['snake/seg-1','snake/head-group']});
+  assert.doesNotThrow(()=>normalizeVectorStory(raw,14,{compactCast:true}),'registered snake keeps segments');
+  raw.cast.pop();raw.cast.pop();
+  Object.assign(beat,{targets:['old'],motionTargets:['old/leg-l']});
+  assert.throws(()=>normalizeVectorStory(raw,14,{compactCast:true}),/no visible legs or feet/,'puppet people stay legless');
+});
+
+test('crossed animal anatomies fail at screenplay with the correct part names',()=>{
+  const raw=screenplay() as any;
+  raw.cast.push({id:'chicken',role:'Con gà',design:'simple-chicken'},{id:'snake',role:'Con rắn',design:'simple-snake'},{id:'pig',role:'Con heo',design:'simple-pig'});
+  const beat=raw.shots[0].beats[0];
+  Object.assign(beat,{cue:'khua mái chèo',kind:'travel',targets:['chicken'],motionTargets:['chicken','chicken/leg-fl']});
+  raw.shots[0].narration='Ông lái đò khua mái chèo, còn con gà bước đi.';
+  assert.throws(()=>normalizeVectorStory(raw,14,{compactCast:true}),/leg-l\/leg-r/,'pig-style legs rejected on a chicken');
+  Object.assign(beat,{targets:['snake'],motionTargets:['snake','snake/leg-l']});
+  assert.throws(()=>normalizeVectorStory(raw,14,{compactCast:true}),/seg-0\.\.seg-4/,'legs rejected on a snake');
+  Object.assign(beat,{targets:['pig'],motionTargets:['pig','pig/leg-l']});
+  assert.throws(()=>normalizeVectorStory(raw,14,{compactCast:true}),/leg-fl\/fr\/hl\/hr/,'human-style legs rejected on a pig');
+  Object.assign(beat,{targets:['chicken'],motionTargets:['chicken','chicken/leg-l']});
+  assert.doesNotThrow(()=>normalizeVectorStory(raw,14,{compactCast:true}),'correct chicken anatomy passes');
+  Object.assign(beat,{targets:['chicken'],motionTargets:['chicken','chicken/upper-body']});
+  assert.throws(()=>normalizeVectorStory(raw,14,{compactCast:true}),/has no upper-body/,'puppet torso rejected on a chicken');
+  Object.assign(beat,{targets:['snake'],motionTargets:['snake','snake/mouth']});
+  assert.throws(()=>normalizeVectorStory(raw,14,{compactCast:true}),/has no mouth/,'mouth rejected on a snake');
 });
 
 test('new screenplays declare view cast, keep an empty exterior and retain old checkpoints',()=>{
@@ -424,6 +465,17 @@ test('screenplay hand ownership drives actual grips even when the illustrator le
   assert.ok(!vectorDirectionIssues(p).some(i=>i.problem.includes('Held prop')));
   s.vectorScene!.nodes.find(n=>n.id==='carried-lamp')!.attachTo='old/forearm-l';
   assert.ok(vectorDirectionIssues(p).some(i=>i.problem.includes('not attached')));
+});
+
+test('a deliberately empty still scenery study does not require an invented dramatic ending',()=>{
+ const raw=screenplay() as any;
+ for(const shot of raw.shots){shot.visibleCast=[];shot.heldProps=[];shot.propEvents=[];shot.shot={size:'wide',framing:'context',focus:'terrain',include:[]};
+  shot.beats=shot.beats.map((b:any)=>({cue:b.cue,kind:'hold',targets:['terrain'],motionTargets:[],before:'The set is visible.',after:'The set stays visible.'}));}
+ assert.doesNotThrow(()=>normalizeVectorStory(raw,14));
+ const empty=structuredClone(raw);empty.cast=[];
+ assert.doesNotThrow(()=>normalizeVectorStory(empty,14),'an explicitly empty scenery study does not need an invented invisible person');
+ raw.shots[0].visibleCast=['old'];
+ assert.throws(()=>normalizeVectorStory(raw,14),/observable event/,'a narrative film with visible cast retains its ending requirement');
 });
 
 test('screenplay rejects double-booked hands, repeated narration and an ending made only of reflection',()=>{

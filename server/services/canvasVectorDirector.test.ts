@@ -2,7 +2,86 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {vectorPoint,vectorWorldMatrix} from '../../shared/canvasVectorTransform';
 import {compileVectorProject} from '../../shared/canvasVectorScene';
-import {vectorContinuityEvidence,selectVectorRepairScenes} from './canvasVectorDirector';
+import {vectorShotVisibility} from '../../shared/canvasVectorFraming';
+import {vectorContinuityEvidence,selectVectorRepairScenes,vectorPlanCorrection} from './canvasVectorDirector';
+
+test('drawing recovery requests only missing support metadata and preserves the locked art',()=>{
+  const correction=vectorPlanCorrection(new Error('Vector: well needs a grounded anchor on the same surface; surface parent=illustrated-world, y=900'));
+  assert.match(correction,/target:"well",anchor/);
+  assert.match(correction,/all vectorAssets, existing scenery geometry and IDs/);
+  assert.match(correction,/groundOffsetY/);
+  assert.match(correction,/y=900/);
+  assert.doesNotMatch(vectorPlanCorrection(new Error('Vector: invalid paint')),/LOCAL_BASE/);
+  const travel=vectorPlanCorrection(new Error('Vector: invalid puppet travel person to well: gap=80, dx=-55'));
+  assert.match(travel,/changing vectorScene.walks.gap will be ignored/);
+  assert.match(travel,/ONLY the initial x\/y placement of the destination well/);
+  assert.match(travel,/Keep the destination outline, scale, asset and identity unchanged/);
+});
+
+test('native stage retains story-object support metadata without changing assets or authored geometry',()=>{
+  const raw={vectorAssets:{hero:{rig:'simple-puppet',finish:'handdrawn'}},
+    vectorStages:{village:{template:'illustrated-place',place:'village',view:'elevated',finish:'handdrawn',cast:{person:'hero'},
+      nodes:[{id:'well',type:'group',x:650,y:820,groundOffsetY:-32,children:[{id:'well-base',type:'ellipse',y:30,rx:70,ry:18,fill:'#654'}]}],
+      ground:{targets:[{target:'well',anchor:{x:0,y:48}}]}}},
+    scenes:[{durationMs:4000,narration:'He approaches the well.',vectorScene:{stage:'village',walks:[{actor:'person',to:'well',gap:80,followDepth:true}]}}]};
+  const before=structuredClone(raw),p=parseVectorPlan(JSON.stringify(raw),'village',{width:1280,height:720});
+  const well=p.vectorStages!.village!.nodes.find(n=>n.id==='well')!;
+  assert.equal(well.x,650);assert.equal(well.y,820);
+  assert.deepEqual(well.groundAnchor,{x:0,y:48});
+  assert.equal(p.scenes[0]!.vectorScene!.ground!.parent,'illustrated-world');
+  assert.ok(p.scenes[0]!.vectorScene!.tracks.some(t=>t.target==='person'&&t.frames.some(f=>f.dx)));
+  assert.deepEqual(raw,before);
+  const baseline=structuredClone(raw);delete (baseline.vectorStages.village as {ground?:unknown}).ground;
+  delete (baseline.vectorStages.village.nodes[0] as {groundOffsetY?:number}).groundOffsetY;
+  baseline.scenes[0]!.vectorScene.walks=[];
+  const untouched=parseVectorPlan(JSON.stringify(baseline),'village',{width:1280,height:720});
+  assert.deepEqual(p.vectorAssets,untouched.vectorAssets,'ground metadata cannot redesign cast or props');
+  assert.throws(()=>parseVectorPlan(JSON.stringify({...raw,vectorStages:{village:{...raw.vectorStages.village,ground:{y:300,targets:[]}}}}),'village',{width:1280,height:720}),/existing surface/);
+});
+
+test('shot ground targets inherit the reusable surface parent rather than losing the world transform',()=>{
+  const p=parseVectorPlan(JSON.stringify({vectorAssets:{hero:{rig:'simple-puppet'}},vectorStages:{room:{width:1280,height:720,
+    nodes:[{id:'world',type:'group'},{id:'person',type:'instance',asset:'hero',parent:'world',x:50,width:100,height:200},
+      {id:'door',type:'rect',parent:'world',x:400,y:300,width:60,height:300}],ground:{y:600,parent:'world',targets:[{target:'person'}]}}},
+    scenes:[{durationMs:4000,narration:'He walks to the door.',vectorScene:{stage:'room',ground:{targets:[{target:'door'}]},walks:[{actor:'person',to:'door',gap:80}]}}]}),'walk',{width:1280,height:720});
+  assert.equal(p.scenes[0]!.vectorScene!.ground!.parent,'world');
+  assert.deepEqual(p.scenes[0]!.vectorScene!.nodes.find(n=>n.id==='door')!.groundAnchor,{x:30,y:300});
+});
+
+test('center-origin story objects frame from explicit bounds instead of treating their base anchor as zero width',()=>{
+  const raw={vectorAssets:{hero:{rig:'simple-puppet',finish:'handdrawn'}},vectorStages:{village:{template:'illustrated-place',place:'village',view:'elevated',finish:'handdrawn',cast:{person:'hero'},
+    nodes:[{id:'well',type:'group',x:540,y:820,groundAnchor:{x:0,y:48},groundOffsetY:-32,bounds:{x:-90,y:-90,width:180,height:138},
+      children:[{id:'well-base',type:'ellipse',x:0,y:30,rx:70,ry:18,fill:'#654'}]}]}},
+    scenes:[{durationMs:4000,narration:'He looks into the well.',vectorScene:{stage:'village',shot:{target:'person',height:.3,include:['well']}}}]};
+  const before=structuredClone(raw),p=parseVectorPlan(JSON.stringify(raw),'village',{width:1280,height:720}),s=p.scenes[0]!;
+  const well=s.vectorScene!.nodes.find(n=>n.id==='well')!;
+  assert.equal(well.x,540);assert.equal(well.y,820);
+  assert.deepEqual(well.bounds,raw.vectorStages.village.nodes[0]!.bounds);
+  assert.deepEqual(well.groundAnchor,{x:0,y:48});
+  const coverage=vectorShotVisibility(s,p.vectorAssets!,'well',0);
+  assert.ok('widthFraction' in coverage&&coverage.widthFraction!>0);
+  assert.deepEqual(compileVectorProject(p),p);
+  assert.deepEqual(raw,before);
+  const broken=structuredClone(raw);delete (broken.vectorStages.village.nodes[0] as {bounds?:unknown}).bounds;
+  assert.throws(()=>parseVectorPlan(JSON.stringify(broken),'village',{width:1280,height:720}),/shot context well needs finite local bounds/);
+});
+
+test('partial instance-part paint repair keeps source assets and unrelated shots immutable and replays idempotently',()=>{
+  const p=parseVectorPlan(JSON.stringify({vectorAssets:{lamp:{rig:'lantern'},hero:{rig:'simple-puppet'}},scenes:[1,2].map(()=>({durationMs:3000,narration:'The lamp glows.',vectorScene:{width:1280,height:720,nodes:[
+    {id:'lamp',type:'instance',asset:'lamp',x:400,y:300,width:60,height:100},{id:'person',type:'instance',asset:'hero',x:500,y:300,width:100,height:200}],tracks:[]}}))}),'lamp',{width:1280,height:720});
+  const before=structuredClone(p),s=p.scenes[0]!,allowed=new Set([s.id]);
+  const patch=JSON.stringify({scenes:[{id:s.id,vectorScenePatch:{nodes:[{id:'lamp/case',fill:'#5a6155',stroke:'#b89d68'},{id:'lamp/glass',fill:'#ffb943'}]}}]});
+  const repaired=applyVectorRepairs(p,patch,allowed),view=repaired.scenes[0]!.vectorScene!.nodes.find(n=>n.id==='lamp')!.asset!;
+  assert.notEqual(view,'lamp');assert.equal(repaired.vectorAssets![view]!.nodes.find(n=>n.id==='case')!.fill,'#5a6155');
+  assert.deepEqual(repaired.vectorAssets!.lamp,before.vectorAssets!.lamp);
+  assert.deepEqual(repaired.vectorAssets!.hero,before.vectorAssets!.hero);
+  const {vectorAssetLibrary:beforeLibrary,...untouched}=before.scenes[1]!;
+  const {vectorAssetLibrary:afterLibrary,...after}=repaired.scenes[1]!;
+  assert.deepEqual(after,untouched);assert.deepEqual(afterLibrary!.lamp,beforeLibrary!.lamp);assert.deepEqual(p,before);
+  assert.deepEqual(applyVectorRepairs(repaired,patch,allowed),repaired);
+  assert.throws(()=>applyVectorRepairs(p,JSON.stringify({scenes:[{id:s.id,vectorScenePatch:{nodes:[{id:'person/face',fill:'#fff'}]}}]}),allowed),/preserve cast/);
+  assert.throws(()=>applyVectorRepairs(p,JSON.stringify({scenes:[{id:s.id,vectorScenePatch:{nodes:[{id:'lamp/missing',fill:'#fff'}]}}]}),allowed),/unknown instance part/);
+});
 
 test('a cached multi-shot repair can replay only the remaining failed shot',()=>{
   const patch={newAssets:{},scenes:[{id:'approved',vectorScenePatch:{removeNodes:['tree']}},{id:'failed',vectorScenePatch:{shot:{target:'person',height:.38}}}]};
@@ -64,6 +143,17 @@ test('a cached repair with one premature root brace recovers without inventing t
   assert.equal(repaired.scenes[0]!.narration,s.narration);
   assert.equal(repaired.scenes[0]!.durationMs,s.durationMs);
   assert.throws(()=>applyVectorRepairs(p,observed.slice(0,-3),new Set([s.id])),/omitted|JSON|complete/);
+});
+
+test('a repair that both updates and removes one node lands with removal winning',()=>{
+  const p=parseVectorPlan(JSON.stringify({scenes:[{durationMs:4000,narration:'The sky changes.',vectorScene:{width:720,height:1280,nodes:[{id:'sky',type:'rect',width:720,height:1280,fill:'#333333'},{id:'glow',type:'ellipse',x:100,y:100,rx:20,ry:20,fill:'#ffcc00'}]}}]}),'test',{width:720,height:1280});
+  const s=p.scenes[0]!;
+  const patch=JSON.stringify({newAssets:{},scenes:[{id:s.id,vectorScenePatch:{nodes:[{id:'glow',opacity:0.5}],removeNodes:['glow']}}]});
+  const repaired=applyVectorRepairs(p,patch,new Set([s.id]));
+  assert.equal(repaired.scenes[0]!.vectorScene!.nodes.some(n=>n.id==='glow'),false,'removal wins over the stale update');
+  assert.ok(repaired.scenes[0]!.vectorScene!.nodes.some(n=>n.id==='sky'),'unrelated geometry survives');
+  const dup=JSON.stringify({newAssets:{},scenes:[{id:s.id,vectorScenePatch:{nodes:[{id:'sky',fill:'#111111'},{id:'sky',fill:'#222222'}]}}]});
+  assert.throws(()=>applyVectorRepairs(p,dup,new Set([s.id])),/duplicate patched node/,'true duplicates still fail');
 });
 
 test('an exact static support copy keeps its context ID without painting over the cast',()=>{
@@ -191,7 +281,7 @@ test('native courtyard keeps a readable complete set and exact dot-hand knocker 
   const ring=vectorPoint(vectorWorldMatrix('ring',s,at,p.vectorAssets),20,31);
   assert.ok(Math.hypot(hand.x-ring.x,hand.y-ring.y)<1e-7);
   assert.equal(evaluateVectorPart('person',s,at).dx,79);
-  assert.equal(p.scenes[0]!.vectorScene!.nodes.find(n=>n.id==='physical-ground-plane')!.fill,'#777c67');
+  assert.equal(p.scenes[0]!.vectorScene!.nodes.find(n=>n.id==='physical-ground-plane')!.fill,'#9b896c');
 });
 
 test('a native tap preserves the later self-moving ring beat through normalization and repair replay',()=>{
@@ -582,6 +672,32 @@ test('native door binds the primary home leaf and an attempted redraw reports it
   assert.deepEqual(vectorWorldMatrix('door-opening',s,0),vectorWorldMatrix('door-opening',s,1000));
   const duplicate={...input,scenes:[{...input.scenes[0],vectorScene:{stage:'village',nodes:[{id:'house-mid',type:'group'}]}}]};
   assert.throws(()=>parseVectorPlan(JSON.stringify(duplicate),'night',{width:1280,height:720}),/existing geometry: house-mid/);
+});
+
+test('narration accepts a verified scene-group path without replacing scenery or accepting wrong ancestry',()=>{
+  const input={vectorAssets:{},vectorStages:{yard:{width:1280,height:720,nodes:[
+    {id:'old-well',type:'group'},{id:'cover',type:'rect',parent:'old-well',width:80,height:20,fill:'#765432'}]}},
+    scenes:[{durationMs:2000,narration:'The cover trembles.',vectorScene:{stage:'yard'},vectorBeats:[{cue:'cover trembles',targets:['old-well/cover']}]}]};
+  const before=JSON.stringify(input),p=parseVectorPlan(before,'ordinary',{width:1280,height:720});
+  assert.deepEqual(p.scenes[0]!.vectorBeats,[{cue:'cover trembles',targets:['cover']}]);
+  assert.equal(JSON.stringify(input),before);
+  input.scenes[0]!.vectorBeats[0]!.targets=['wrong/cover'];
+  assert.throws(()=>parseVectorPlan(JSON.stringify(input),'ordinary',{width:1280,height:720}),/existing targets/);
+});
+
+test('repair context keeps approved ink read-only and compact while retaining editable prop paths and contact metadata',async()=>{
+  const {lockFolkInkAsset}=await import('../../shared/canvasVectorStyleLock');
+  const p=parseVectorPlan(JSON.stringify({vectorAssets:{hero:lockFolkInkAsset({rig:'simple-puppet'}),prop:{width:20,height:20,nodes:[{id:'body',type:'path',d:'M 0 0 L 20 0 L 20 20 Z',fill:'#765432'}]}},
+    scenes:[{durationMs:2000,narration:'He waits.',vectorScene:{width:1280,height:720,nodes:[{id:'hero',type:'instance',asset:'hero'}]}}]}),'ordinary',{width:1280,height:720});
+  const {buildVectorRepairContent}=await import('./canvasVectorDirector'),before=JSON.stringify(p),s=p.scenes[0]!;
+  const text=buildVectorRepairContent(p,[{sceneId:s.id,problem:'framing',fix:'show actor'}],[])[0]!.text as string;
+  const sent=JSON.parse(text);
+  assert.equal(sent.vectorAssets.hero.readOnly,true);
+  assert.ok(sent.vectorAssets.hero.nodes.every((n:{d?:string})=>n.d===undefined));
+  assert.equal(sent.vectorAssets.hero.nodes.find((n:{id:string})=>n.id==='hand-r').x,133);
+  assert.equal(sent.vectorAssets.prop.nodes[0].d,p.vectorAssets!.prop!.nodes[0]!.d);
+  assert.ok(JSON.stringify(sent.vectorAssets.hero).length<JSON.stringify(p.vectorAssets!.hero).length/3);
+  assert.equal(JSON.stringify(p),before,'prompt compaction cannot modify saved or rendered artwork');
 });
 
 test('redesign and repair resolve shared stage references while retaining every voice asset',()=>{

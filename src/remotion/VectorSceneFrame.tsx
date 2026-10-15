@@ -7,6 +7,7 @@ import {evaluateVectorPart} from '../../shared/canvasVectorScene';
 import {canvasCaptionAt} from '../canvasAnimationStudio/captions';
 import {vectorWorldMatrix,hangingRotation} from '../../shared/canvasVectorTransform';
 import {puppetHandOpacity,puppetPaintOrder,puppetMouthState} from '../../shared/canvasVectorPuppet';
+import {VectorAtmosphere} from './VectorAtmosphere';
 
 export function RemotionVectorSceneFrame(props:{scene:CanvasStudioScene;width:number;height:number;playbackRate?:number}){
   const frame=useCurrentFrame(),{fps}=useVideoConfig();
@@ -49,6 +50,7 @@ export function VectorSceneFrame({scene,timeMs,width,height}:{scene:CanvasStudio
         <g clipPath={node.clip?`url(#${clipId})`:undefined}>
           {light?.rings.map((ring,i)=><circle key={i} cx={light.x} cy={light.y} r={ring.radius} fill={light.color} opacity={ring.opacity}/>)}
           <g transform={node.light?.kind==='flame'?`translate(${node.pivotX??light!.x} ${node.pivotY??light!.y}) scale(${light!.scaleX} ${light!.scaleY}) translate(${-(node.pivotX??light!.x)} ${-(node.pivotY??light!.y)})`:undefined}>
+            {node.atmosphere&&node.bounds?<VectorAtmosphere effect={node.atmosphere} bounds={node.bounds} timeMs={timeMs+(scene.atmosphere?.timeOffsetMs??0)} id={clipId+'-atmosphere'}/>:null}
             {puppetHand?null:shape}{node.type==='instance'?null:puppetPaintOrder(children.get(node.id)||[],d,prefix,scene,timeMs).map(nodeElement)}
             {(attachments.get(prefix+node.id)||[]).map(n=>renderSceneNode(n))}
             {puppetHand?shape:null}

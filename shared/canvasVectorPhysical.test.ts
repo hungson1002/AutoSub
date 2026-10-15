@@ -5,6 +5,9 @@ import {createCanvasProject} from './canvasAnimationStudio';
 import {vectorWorldMatrix,vectorPoint} from './canvasVectorTransform';
 
 const assets=normalizeVectorAssets({human:{rig:'simple-human'},lamp:{rig:'lantern'}});
+test('a missing actor reports its identity and shared-stage ownership instead of blaming compact anatomy',()=>{
+  assert.throws(()=>normalizeVectorScene({width:720,height:1280,nodes:[{id:'floor',type:'rect',width:720,height:1280,fill:'#888'}],walks:[{actor:'lan',to:'door',start:0,end:1}]},assets),/actor lan is missing.*reusable vectorStages/);
+});
 function world(){return {width:720,height:1280,nodes:[
   {id:'sky',type:'rect',width:720,height:1280,fill:'#101a24'},
   {id:'hut',type:'group',x:30,y:400},

@@ -5,6 +5,36 @@ import type {VectorDrawing} from './canvasVectorScene';
 import {compileCanvasProjectLayout} from './canvasLayoutCompiler';
 import {createCanvasProject} from './canvasAnimationStudio';
 
+test('unsupported animated asset swaps cannot silently show the wrong character',()=>{
+  const assets=normalizeVectorAssets({nam:{rig:'simple-puppet'},lan:{rig:'simple-puppet',gender:'female'}});
+  const raw={width:1280,height:720,nodes:[{id:'person',type:'instance',asset:'nam'}]};
+  const before=structuredClone(assets);
+  for(const frame of [{t:0,type:'asset-swap',asset:'lan'},{t:0,asset:'lan'},{t:0,type:'asset-swap'}])
+    assert.throws(()=>normalizeVectorScene({...raw,tracks:[{target:'person',start:.01,end:.02,frames:[frame]}]},assets),/cannot swap character assets/);
+  const bound=normalizeVectorScene({...raw,nodes:[{id:'person',type:'instance',asset:'lan'}],tracks:[{target:'person/upper-body',frames:[{t:0,dy:0},{t:1,dy:-1}]}]},assets);
+  assert.equal(bound.nodes[0]!.asset,'lan');assert.deepEqual(assets,before);
+});
+
+test('village acting keeps approved eye sizes while preserving blinks, gaze, and non-village art',()=>{
+  const assets=normalizeVectorAssets({hero:{rig:'simple-puppet',design:'village'},legacy:{rig:'simple-puppet'}});
+  const before=structuredClone(assets);
+  const stage=normalizeVectorScene({width:720,height:720,nodes:[{id:'hero',type:'instance',asset:'hero'},{id:'legacy',type:'instance',asset:'legacy'}],tracks:[
+    {target:'hero/eyes',frames:[{t:0,scaleY:1.11,dx:1.75},{t:1,scaleY:1.7,scaleX:1.6,dx:4}]},
+    {target:'hero/eye-white-l',frames:[{t:0,scaleX:1.7,scaleY:1.6}]},
+    {target:'hero/eye-r',frames:[{t:0,scaleY:1.65}]},
+    {target:'hero/blink',frames:[{t:0,scaleY:1},{t:.5,scaleY:.08},{t:1,scaleY:1}]},
+    {target:'legacy/eyes',frames:[{t:0,scaleY:1.3}]},
+  ]},assets);
+  const scene={...createCanvasProject().scenes[0]!,durationMs:4000,vectorScene:stage,vectorAssetLibrary:assets};
+  for(let ms=0;ms<=4000;ms+=100)for(const part of ['eyes','eye-white-l','eye-r']){
+    const state=evaluateVectorPart('hero/'+part,scene,ms);assert.equal(state.scaleX,1);assert.equal(state.scaleY,1);
+  }
+  assert.equal(evaluateVectorPart('hero/blink',scene,2000).scaleY,.08);
+  assert.equal(evaluateVectorPart('hero/eyes',scene,4000).dx,4);
+  assert.equal(evaluateVectorPart('legacy/eyes',scene,2000).scaleY,1.3);
+  assert.deepEqual(normalizeVectorScene(stage,assets),stage);assert.deepEqual(assets,before);
+});
+
 const assets:Record<string,VectorDrawing>={dog:{width:100,height:100,nodes:[{id:'head',type:'group',x:50,y:20},{id:'jaw',type:'ellipse',parent:'head',rx:20,ry:4,fill:'#fff'}]}};
 const drawing={width:720,height:1280,nodes:[{id:'sky',type:'rect',width:720,height:1280,fill:'#111'},{id:'dog',type:'instance',asset:'dog',x:100,y:600,width:300,height:300}],
   tracks:[{target:'dog/head',start:.2,end:.6,frames:[{t:0,rotation:0},{t:1,rotation:-30}]},{target:'dog/jaw',start:.3,end:.6,frames:[{t:0,scaleY:1},{t:1,scaleY:4}]}]};
@@ -52,6 +82,20 @@ test('nested SVG groups retain face parts and resolve verified joint paths',()=>
   assert.equal(normalizeVectorScene({...nested.dog,tracks:[{...shot.tracks[0],target:'head/jaw'}]},{}).tracks[0]!.target,'jaw');
   assert.throws(()=>normalizeVectorScene({...shot,tracks:[{...shot.tracks[0],target:'dog/teeth/jaw'}]},nested),/unknown animated part/);
   assert.throws(()=>normalizeVectorAssets({dog:{width:100,height:100,nodes:[{id:'head',type:'group',nodes:[{id:'eye',type:'ellipse',parent:'other',rx:1,ry:1}]}]}}),/conflicting nested parent/);
+});
+test('assembled scenes retain native detail above the asset budget through camera and checkpoint normalization',()=>{
+  const nodes=Array.from({length:170},(_,i)=>({id:`detail-${i}`,type:'ellipse',x:i,y:400,rx:2,ry:2,fill:'#567'}));
+  const raw={width:1280,height:720,nodes:[{id:'world',type:'group',children:nodes}],tracks:[]};
+  const before=structuredClone(raw),scene=normalizeVectorScene(raw,{});
+  assert.equal(scene.nodes.length,171);
+  const framed=frameVectorScene(scene,[{t:0,x:640,y:360,zoom:1}]);
+  assert.equal(framed.nodes.length,172);
+  assert.deepEqual(normalizeVectorScene(JSON.parse(JSON.stringify(framed)),{}),framed);
+  assert.deepEqual(framed.nodes.filter(n=>n.type==='ellipse'),scene.nodes.filter(n=>n.type==='ellipse'));
+  assert.deepEqual(raw,before);
+  assert.throws(()=>normalizeVectorAssets({tooLarge:raw}),/1-160 nodes/,'asset authoring remains bounded');
+  const oversized={...raw,nodes:[{id:'world',type:'group',children:Array.from({length:512},(_,i)=>({...nodes[0],id:`node-${i}`}))}]};
+  assert.throws(()=>normalizeVectorScene(oversized,{}),/1-512 nodes.*nested/,'nested nodes still have a hard scene limit');
 });
 test('initially hidden eyes can reveal, and a delayed reveal never flashes before its start',()=>{
   const scene=project().scenes[0]!;

@@ -88,6 +88,11 @@ export function continueVectorProps(input:CanvasStudioScene,states:Map<string,Ve
     const old=states.get(held.prop);
     if(!drawing.nodes.some(n=>n.id===held.prop)&&old)drawing.nodes.push({...old.node,parent:actor.parent});
     const prop=drawing.nodes.find(n=>n.id===held.prop);if(!prop)continue;
+    // A framing cut does not resize the object in the same occupied hand.
+    if(old?.held&&old.held.actor===held.actor&&old.held.arm===held.arm)
+      for(const key of ['width','height','scaleX','scaleY'] as const){
+        if(old.node[key]===undefined)delete prop[key];else prop[key]=old.node[key];
+      }
     const grip=prop.attachTo?vectorPropGrip(assets[prop.asset!],prop):old?.grip??vectorPropGrip(assets[prop.asset!]);
     drawing={...drawing,...vectorCarryDrawing(drawing,assets,[{...held,grip}])};
     drawing.tracks=drawing.tracks.flatMap(t=>t.target===held.prop?[stripChannels(t,['dx','dy'])].filter(Boolean) as VectorTrack[]:[t]);
@@ -175,7 +180,9 @@ export function releaseVectorProps(input:CanvasStudioScene,states:Map<string,Vec
   for(const event of scene.vectorDirection.propEvents||[]){
     const prior=states.get(event.prop);if(event.action!=='release'||!prior?.held)continue;
     const {actor,arm}=prior.held,owner=scene.vectorScene!.nodes.find(n=>n.id===actor&&n.type==='instance');if(!owner)continue;
-    const source=scene.vectorScene!.nodes.find(n=>n.id===event.prop)||prior.node,asset=assets[source.asset!]!,grip=prior.grip??vectorPropGrip(asset,prior.node);if(!grip)continue;
+    const current=scene.vectorScene!.nodes.find(n=>n.id===event.prop)||prior.node;
+    const source={...current,width:prior.node.width,height:prior.node.height,scaleX:prior.node.scaleX,scaleY:prior.node.scaleY};
+    const asset=assets[source.asset!]!,grip=prior.grip??vectorPropGrip(asset,prior.node);if(!grip)continue;
     const at=Math.min(scene.durationMs-1,vectorTrackTiming({target:'',start:0,end:1,cue:event.cue,frames:[]},scene).start);
     const parent=owner.parent,stageMatrix=(ms:number)=>parent?vectorWorldMatrix(parent,scene,ms,assets):{a:1,b:0,c:0,d:1,e:0,f:0};
     const w=source.width??asset.width,h=source.height??asset.height,px=grip.x*w/asset.width,py=grip.y*h/asset.height;
@@ -183,21 +190,36 @@ export function releaseVectorProps(input:CanvasStudioScene,states:Map<string,Vec
     const attached={...scene,vectorScene:{...carried,tracks:scene.vectorScene!.tracks.filter(t=>t.target!==event.prop)}};
     const sample=(ms:number)=>{
       const world=vectorWorldMatrix(event.prop,attached,ms,assets),stage=stageMatrix(ms),p=inversePoint(stage,vectorPoint(world,grip.x,grip.y));
-      return {dx:p.x,dy:p.y,rotation:(Math.atan2(world.b,world.a)-Math.atan2(stage.b,stage.a))*180/Math.PI};
+      // Detaching changes coordinate systems. Retain the actor's inherited
+      // scale/reflection as well as grip position; otherwise a small lantern
+      // instantly becomes its full world-sized asset when it leaves the hand.
+      const det=stage.a*stage.d-stage.b*stage.c;
+      const a=(stage.d*world.a-stage.c*world.b)/det,b=(-stage.b*world.a+stage.a*world.b)/det;
+      const c=(stage.d*world.c-stage.c*world.d)/det,d=(-stage.b*world.c+stage.a*world.d)/det;
+      const sign=a*d-b*c<0?-1:1,length=Math.hypot(a,b);
+      return {dx:p.x,dy:p.y,rotation:Math.atan2(b*sign,a*sign)*180/Math.PI,
+        scaleX:sign*length*asset.width/w,scaleY:(a*d-b*c)/(sign*length)*asset.height/h};
     };
     const first=sample(at),oldTracks=scene.vectorScene!.tracks.filter(t=>t.target===event.prop),endState=evaluateVectorPart(event.prop,scene,scene.durationMs);
     const stored=/treo|đặt|put down|hang /iu.test(event.cue);
     const angle=stored||oldTracks.some(t=>t.frames.some(f=>f.rotation!==undefined))?endState.rotation:65;
-    const r=angle*Math.PI/180,bottom=Math.max(...[[0,0],[w,0],[0,h],[w,h]].map(([x,y])=>(x!-px)*Math.sin(r)+(y!-py)*Math.cos(r)));
+    const r=angle*Math.PI/180,bottom=Math.max(...[[0,0],[w,0],[0,h],[w,h]].map(([x,y])=>(x!-px)*first.scaleX*Math.sin(r)+(y!-py)*first.scaleY*Math.cos(r)));
     const authored=scene.vectorScene!.nodes.some(n=>n.id===event.prop)?inversePoint(stageMatrix(scene.durationMs),vectorPoint(vectorWorldMatrix(event.prop,scene,scene.durationMs,assets),grip.x,grip.y)):{x:first.dx,y:first.dy};
     const goalY=stored?authored.y:(scene.vectorScene!.ground?.y??first.dy+100)-bottom,goalX=stored?authored.x:Math.max(30,Math.min(scene.vectorScene!.width-30,first.dx+(arm==='l'?-30:30)));
     const finish=Math.min(scene.durationMs,at+650),frames:VectorFrame[]=[];
-    for(let i=0;i<=12;i++){const ms=at*i/12;frames.push({t:ms/scene.durationMs,...sample(ms),easing:'linear'});if(at===0)break;}
-    for(const f of [.25,.5,.75,1])frames.push({t:(at+(finish-at)*f)/scene.durationMs,dx:first.dx+(goalX-first.dx)*f,dy:first.dy+(goalY-first.dy)*f*f,rotation:first.rotation+(angle-first.rotation)*f,easing:'linear'});
-    if(finish<scene.durationMs)frames.push({t:1,dx:goalX,dy:goalY,rotation:angle,easing:'hold'});
+    for(let i=0;i<=12;i++){
+      const ms=at*i/12,pose=sample(ms),previous=frames.at(-1)?.rotation;
+      if(previous!==undefined)pose.rotation+=360*Math.round((previous-pose.rotation)/360);
+      frames.push({t:ms/scene.durationMs,...pose,easing:'linear'});if(at===0)break;
+    }
+    first.rotation=frames.at(-1)!.rotation!;
+    const landingAngle=angle+360*Math.round((first.rotation-angle)/360);
+    for(const f of [.25,.5,.75,1])frames.push({t:(at+(finish-at)*f)/scene.durationMs,dx:first.dx+(goalX-first.dx)*f,dy:first.dy+(goalY-first.dy)*f*f,rotation:first.rotation+(landingAngle-first.rotation)*f,scaleX:first.scaleX,scaleY:first.scaleY,easing:'linear'});
+    if(finish<scene.durationMs)frames.push({t:1,dx:goalX,dy:goalY,rotation:landingAngle,scaleX:first.scaleX,scaleY:first.scaleY,easing:'hold'});
     const node:VectorNode={...source,parent,x:-px,y:-py,pivotX:px,pivotY:py,pivotSpace:'local',rotation:0,scaleX:1,scaleY:1};delete node.attachTo;delete node.hang;delete node.groundAnchor;
-    const tracks=scene.vectorScene!.tracks.flatMap(t=>t.target===event.prop?[stripChannels(t,['dx','dy','rotation','scaleX','scaleY'])].filter(Boolean) as VectorTrack[]:[t]);
-    scene={...scene,vectorScene:{...scene.vectorScene!,nodes:[...scene.vectorScene!.nodes.filter(n=>n.id!==event.prop),node],tracks:[...tracks,{target:event.prop,start:0,end:1,frames:frames.map(f=>({...f,dx:rounded(f.dx!),dy:rounded(f.dy!),rotation:rounded(f.rotation!)}))}]}};
+    const replacement:VectorTrack={target:event.prop,start:0,end:1,frames:frames.map(f=>({...f,dx:rounded(f.dx!),dy:rounded(f.dy!),rotation:rounded(f.rotation!)}))};
+    const tracks=replaceChannels(scene.vectorScene!.tracks,event.prop,['dx','dy','rotation','scaleX','scaleY'],replacement);
+    scene={...scene,vectorScene:{...scene.vectorScene!,nodes:[...scene.vectorScene!.nodes.filter(n=>n.id!==event.prop),node],tracks}};
   }
   return scene;
 }

@@ -191,7 +191,12 @@ const roundedRectDrawing = (width: number, height: number, radius: number) => {
 const subtitleBlockBounds = (content: string, effective: SubtitleStyle, xPercent: number, yPercent: number, freeText: boolean) => {
   const lines = content.split(/\r?\n/);
   const textWidth = Math.max(1, ...lines.map((line) => measureSubtitleLine(line, effective)));
-  const textHeight = Math.max(1, lines.length * effective.fontSize * 1.18);
+  // Calibrated faces such as Bangers have a larger ASS line advance than
+  // CSS's 1.18 line-height. Reserve that advance between boxed lines so
+  // multi-line captions do not grow outside the vector background.
+  const cssLineHeight = effective.fontSize * 1.18;
+  const lineAdvance = effective.background === 'box' ? Math.max(cssLineHeight, assPixels(effective.fontSize, effective.fontFamily)) : cssLineHeight;
+  const textHeight = Math.max(1, cssLineHeight + Math.max(0, lines.length - 1) * lineAdvance);
   const paddingX = effective.background === 'box' ? Math.max(0, effective.boxPaddingX ?? 10) : 0;
   const paddingY = effective.background === 'box' ? Math.max(0, effective.boxPaddingY ?? 4) : 0;
   const borderWidth = effective.background === 'box' ? Math.max(0, effective.boxBorderWidth ?? 0) : 0;
@@ -249,7 +254,10 @@ export function cuesToAss(cues: SubtitleCue[], style: SubtitleStyle) {
     // libass owns its glyph/line metrics. Native edge alignment keeps an
     // unboxed caption fixed even when its actual line advance differs from CSS.
     const nativeEdge = cue.sourceKind !== 'onscreen-text' && effective.background !== 'box' && edgeAnchor !== .5;
-    const textY = Math.round(nativeEdge ? yPercent / 100 * 1080 : bounds.top + bounds.height / 2 - assTextOffsetY(effective.fontFamily, effective.fontSize));
+    // Boxed text must share the box's center; the unboxed Bangers baseline
+    // correction would lift Vietnamese accents outside the background.
+    const textOffsetY = effective.background === 'box' ? 0 : assTextOffsetY(effective.fontFamily, effective.fontSize);
+    const textY = Math.round(nativeEdge ? yPercent / 100 * 1080 : bounds.top + bounds.height / 2 - textOffsetY);
     const positionTag = `{\\an${nativeEdge ? edgeAnchor === 1 ? 2 : 8 : 5}\\pos(${Math.round(bounds.left + bounds.width / 2)},${textY})}`;
     const styleName = effective.background === 'box' ? 'Box' : effective.background === 'none' ? 'None' : 'Outline';
     const renderLayer = (layers.get(cue.id) ?? 0) * 4;

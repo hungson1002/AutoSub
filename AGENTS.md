@@ -8,6 +8,14 @@ For debugging, fixing, optimizing, or validating AutoSub, read and follow:
 
 This project values **root-cause fixes, checkpoint safety, idempotency, live verification, and minimal changes** over broad refactors.
 
+## Animation Studio visual and motion changes
+
+Before changing Animation Studio generation, characters, movement, cameras, or scene composition, also read:
+
+`skills/autosub-debugger/references/animation-quality.md`
+
+Preserve the latest user-accepted appearance and behavior. Validate changes through the actual tool generation path and inspect rendered motion; passing tests or a successful export alone cannot establish visual quality. This also applies when reviewing user edits or creating a test video.
+
 ## Non-negotiable workflow
 
 1. Inspect the current workspace and runtime before editing.

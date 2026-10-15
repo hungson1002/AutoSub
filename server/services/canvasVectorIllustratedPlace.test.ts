@@ -60,6 +60,23 @@ test('wide market auto placement does not replace explicit actor coordinates or 
   assert.throws(()=>parseVectorPlan(make('forest'),'community',{width:1280,height:720}),/market setting/);
 });
 
+test('elevated village spreads coordinate-free extras even without setting market',()=>{
+  const raw=JSON.stringify({vectorAssets:{hero:{rig:'simple-puppet',design:'village'}},
+    vectorStages:{square:{template:'illustrated-place',place:'village',finish:'handdrawn',view:'elevated',cast:{person:'hero'},
+      extras:[{id:'a',asset:'hero'},{id:'b',asset:'hero'}]}},
+    scenes:[{durationMs:3000,narration:'Villagers gather.',vectorScene:{stage:'square'}}]});
+  const p=parseVectorPlan(raw,'community',{width:1280,height:720});
+  const a=p.scenes[0]!.vectorScene!.nodes.find(n=>n.id==='a')!;
+  const b=p.scenes[0]!.vectorScene!.nodes.find(n=>n.id==='b')!;
+  assert.ok(a.x!!==b.x!&&a.groundOffsetY!==b.groundOffsetY,'spread assigns distinct depths');
+  assert.ok(a.height!>=60&&a.height!<=330);
+  const eye=JSON.stringify({vectorAssets:{hero:{rig:'simple-puppet',design:'village'}},
+    vectorStages:{lane:{template:'illustrated-place',place:'village',finish:'handdrawn',cast:{person:'hero'},
+      extras:[{id:'a',asset:'hero'}]}},
+    scenes:[{durationMs:3000,narration:'A villager waits.',vectorScene:{stage:'lane'}}]});
+  assert.throws(()=>parseVectorPlan(eye,'community',{width:1280,height:720}),/OMIT coordinates|local x, footY/,'eye-level still needs explicit placement');
+});
+
 test('handdrawn elevated cast fits native architecture instead of standing taller than the eaves',()=>{
   const handdrawn=illustratedPlace({place:'village',view:'elevated',finish:'handdrawn'});
   const person=handdrawn.stage.nodes.find(n=>n.id==='person')!,house=handdrawn.stage.nodes.find(n=>n.id==='house-mid')!;
@@ -172,4 +189,30 @@ test('place grammar does not assume a particular village, monster or actor outfi
  }
  assert.throws(()=>parseVectorPlan(JSON.stringify({vectorStages:{x:{template:'illustrated-place',place:'forest'}},
   scenes:[{durationMs:1000,narration:'A',vectorScene:{stage:'x'}}]}),'forest',{width:720,height:1280}),/cast binding/);
+});
+test('tet festival adds same-style dressing without breaking layout or budget',()=>{
+ const base=illustratedPlace({place:'village',light:'day',finish:'handdrawn'});
+ const tet=illustratedPlace({place:'village',light:'day',finish:'handdrawn',festival:'tet'});
+ for(const id of ['tet-mai-0','tet-mai-1','tet-couplet-l','tet-couplet-r','tet-neu-pole','tet-lantern-string','tet-lantern-0']){
+  assert.ok(tet.stage.nodes.some(n=>n.id===id),id);
+ }
+ // Ground animals play live through rigs now; static copies were removed
+ // to leave node budget for cast and story props.
+ const market=illustratedPlace({place:'village',setting:'market',finish:'handdrawn',light:'day',festival:'tet'});
+ for(const id of ['tet-mai-0','tet-lantern-string','tet-neu-pole']){
+  assert.ok(market.stage.nodes.some(n=>n.id===id),id);
+ }
+ assert.ok(!market.stage.nodes.some(n=>n.id==='tet-chicken'),'static chicken removed in favor of the live rig');
+ assert.ok(!base.stage.nodes.some(n=>n.id.startsWith('tet-')),'default village stays clean');
+ assert.ok(tet.stage.nodes.length-base.stage.nodes.length<=36,'tet dressing stays within node budget');
+ assert.ok(tet.stage.nodes.length<160);
+ const one=illustratedPlace({place:'village',light:'day',finish:'handdrawn',festival:'tet',seed:7});
+ const two=illustratedPlace({place:'village',light:'day',finish:'handdrawn',festival:'tet',seed:7});
+ assert.deepEqual(one,two,'tet stage must survive cuts without flicker');
+ assert.throws(()=>illustratedPlace({place:'forest',festival:'tet'} as never),/tet festival/);
+ const film=parseVectorPlan(JSON.stringify({vectorAssets:{hero:{rig:'simple-puppet',design:'village'}},
+  vectorStages:{tet:{template:'illustrated-place',place:'village',finish:'handdrawn',light:'day',festival:'tet',cast:{person:'hero'}}},
+  scenes:[{durationMs:4000,narration:'Chợ Tết đông vui.',vectorScene:{stage:'tet'}},
+   {durationMs:4000,narration:'Vẫn phiên chợ ấy lúc sau.',vectorScene:{stage:'tet'}}]}),'tet',{width:720,height:1280});
+ assert.deepEqual(film.scenes[0]!.vectorScene!.nodes,film.scenes[1]!.vectorScene!.nodes,'tet stage reuses across long-form cuts');
 });

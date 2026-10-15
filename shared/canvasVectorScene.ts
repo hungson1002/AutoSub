@@ -1,7 +1,10 @@
 import {vectorHumanRig,readableVectorHuman} from './canvasVectorHuman';
 import {vectorPuppetRig,puppetBlinkTracks,vectorPuppetTurnTracks,puppetTurnOpacityParts,vectorPuppetFearTracks,withPuppetFearEffects} from './canvasVectorPuppet';
+import {FOLK_INK_STYLE,handInkDrawing} from './canvasVectorInk';
 import {vectorReachTracks} from './canvasVectorReach';
 import {vectorPigRig,readableVectorPig} from './canvasVectorPig';
+import {vectorChickenRig} from './canvasVectorChicken';
+import {vectorSnakeRig} from './canvasVectorSnake';
 import {vectorSubjectCamera,balanceGroundedActingFrame,directVectorShot} from './canvasVectorFraming';
 import {groundVectorDrawing,vectorFootsteps,vectorWalkTracks,vectorReactionTracks,vectorLightTracks,vectorHingeTracks,vectorRowTracks,vectorStrikeTracks} from './canvasVectorPhysical';
 import {VectorEnsembleDirector} from './canvasVectorEnsemble';
@@ -10,6 +13,7 @@ import {normalizeVectorLight,readableVectorNightAssets,readableVectorNightScene,
 import {groundDirectedActing} from './canvasVectorActing';
 import {continueVectorProps,continueCarriedJointPose,naturalVectorCarryPose,releaseVectorProps,rememberVectorProps,type VectorPropState} from './canvasVectorContinuity';
 import type {CanvasStudioProject, CanvasStudioScene} from './canvasAnimationStudio';
+import {normalizeVectorAtmosphere,type VectorAtmosphere} from './canvasVectorAtmosphere';
 
 export type VectorFrame = {
   t:number; dx?:number; dy?:number; rotation?:number; scaleX?:number; scaleY?:number;
@@ -21,9 +25,12 @@ export type VectorNode = {
   pivotSpace?:'local'|'parent';
   opacity?:number; fill?:string; stroke?:string; strokeWidth?:number;
   light?:VectorLight;
+  atmosphere?:VectorAtmosphere;
   d?:string; rx?:number; ry?:number; width?:number; height?:number; x2?:number; y2?:number; asset?:string;
   /** Local rectangular clip, inherited by children (SVG clipPath equivalent). */
   clip?:{x:number;y:number;width:number;height:number};
+  /** Explicit local framing extent; metadata only, never clips/scales artwork. */
+  bounds?:{x:number;y:number;width:number;height:number};
   /** Scene object welded to an actual articulated asset part, in part-local units. */
   attachTo?:string;
   /** A suspended prop keeps its vertical axis while following the hand. */
@@ -42,12 +49,17 @@ export type VectorTrack = {target:string; start:number; end:number; cue?:string;
 export type CanvasVectorScene = VectorDrawing & {tracks:VectorTrack[]};
 export type VectorCameraFrame = {t:number;x:number;y:number;zoom:number;easing?:VectorFrame['easing']};
 
+// Scenes include expanded native scenery, extras, physical effects and camera
+// groups. Assets keep the smaller authoring limit; do not simplify their art
+// merely because the assembled world needs more room.
+export const MAX_SCENE_NODES=512;
+
 /** Frame the whole existing stage, including supports, attached props and water.
  * Compiles to ordinary group tracks understood by both Canvas and native SVG.
  * Captions remain outside the stage in the renderer. */
 export function frameVectorScene(stage:CanvasVectorScene,camera:VectorCameraFrame[]):CanvasVectorScene {
   if(!Array.isArray(camera)||!camera.length||camera.length>32)throw new Error('Vector: camera needs 1-32 frames');
-  if(stage.nodes.length>=160||stage.tracks.length>=80)throw new Error('Vector: no room for camera group/track');
+  if(stage.nodes.length>=MAX_SCENE_NODES||stage.tracks.length>=80)throw new Error('Vector: no room for camera group/track');
   let target='camera-world',suffix=0;
   while(stage.nodes.some(n=>n.id===target))target=`camera-world-${++suffix}`;
   const frames=camera.map(f=>{
@@ -61,7 +73,7 @@ export function frameVectorScene(stage:CanvasVectorScene,camera:VectorCameraFram
   }).sort((a,b)=>a.t-b.t);
   if(frames.some((f,i)=>i>0&&f.t===frames[i-1]!.t))throw new Error('Vector: duplicate camera time');
   return {...normalizeVectorDrawing({...stage,ground:stage.ground?{...stage.ground,parent:stage.ground.parent??target}:undefined,
-    nodes:[{id:target,type:'group'},...stage.nodes.map(n=>n.parent||n.attachTo?n:{...n,parent:target})]}),
+    nodes:[{id:target,type:'group'},...stage.nodes.map(n=>n.parent||n.attachTo?n:{...n,parent:target})]},MAX_SCENE_NODES),
     tracks:[...stage.tracks,{target,start:0,end:1,frames}]};
 }
 
@@ -86,10 +98,10 @@ function path(value:unknown){
   if(typeof value!=='string'||!value||value.length>8000||!/^[MmLlHhVvCcSsQqTtAaZz0-9eE+.,\s-]+$/.test(value)||!/^\s*[Mm]/.test(value))throw new Error('Vector: invalid SVG path');
   return value;
 }
-export function normalizeVectorDrawing(raw:unknown):VectorDrawing {
+export function normalizeVectorDrawing(raw:unknown,maxNodes=160):VectorDrawing {
   if(!raw||typeof raw!=='object')throw new Error('Vector: missing drawing');
   const data=raw as Record<string,unknown>;
-  if(!Array.isArray(data.nodes)||!data.nodes.length||data.nodes.length>160)throw new Error('Vector: drawing needs 1-160 nodes');
+  if(!Array.isArray(data.nodes)||!data.nodes.length||data.nodes.length>maxNodes)throw new Error(`Vector: drawing needs 1-${maxNodes} nodes, got ${Array.isArray(data.nodes)?data.nodes.length:'none'}; remove custom static nodes until it fits (native stages already supply architecture and Tet dressing)`);
   const flattened:Record<string,unknown>[]=[];
   const flatten=(entries:unknown[],parent?:string,depth=0)=>{
     if(depth>32)throw new Error('Vector: excessive group nesting');
@@ -97,7 +109,7 @@ export function normalizeVectorDrawing(raw:unknown):VectorDrawing {
       if(!raw||typeof raw!=='object')throw new Error('Vector: invalid node');
       const entry=raw as Record<string,unknown>;
       if(parent&&entry.parent!==undefined&&entry.parent!==parent)throw new Error('Vector: conflicting nested parent');
-      if(flattened.length>=160)throw new Error('Vector: drawing needs 1-160 nodes');
+      if(flattened.length>=maxNodes)throw new Error(`Vector: drawing needs 1-${maxNodes} nodes, over budget while expanding nested groups; remove custom static nodes until it fits (native stages already supply architecture and Tet dressing)`);
       flattened.push({...entry,...(parent?{parent}:{})});
       const children=entry.nodes??entry.children;
       if(entry.nodes!==undefined&&entry.children!==undefined)throw new Error('Vector: conflicting nested children');
@@ -126,8 +138,11 @@ export function normalizeVectorDrawing(raw:unknown):VectorDrawing {
       node.joint={min:number(j.min,0,-180,180),max:number(j.max,0,-180,180)};
       if(node.joint.min>=node.joint.max)throw new Error('Vector: invalid joint limits');
     }
-    if(n.groundAnchor!==undefined){
-      const p=n.groundAnchor as Record<string,unknown>;
+    const groundTargets=(data.ground as {targets?:unknown[]}|undefined)?.targets;
+    const declaredAnchor=Array.isArray(groundTargets)?(groundTargets.find(t=>t&&typeof t==='object'&&(t as {target?:unknown}).target===node.id) as {anchor?:unknown}|undefined)?.anchor:undefined;
+    const rawAnchor=n.groundAnchor??declaredAnchor;
+    if(rawAnchor!==undefined){
+      const p=rawAnchor as Record<string,unknown>;
       if(!p||typeof p!=='object'||p.x===undefined||p.y===undefined)throw new Error('Vector: ground anchor needs x/y');
       node.groundAnchor={x:number(p.x,0),y:number(p.y,0)};
     }
@@ -157,10 +172,20 @@ export function normalizeVectorDrawing(raw:unknown):VectorDrawing {
       node.clip={x:number(clip.x,0),y:number(clip.y,0),width:number(clip.width,0,1,10000),height:number(clip.height,0,1,10000)};
       if(node.clip.width<=0||node.clip.height<=0)throw new Error('Vector: clip needs positive dimensions');
     }
+    if(n.bounds!==undefined){
+      if(!n.bounds||typeof n.bounds!=='object'||Array.isArray(n.bounds))throw new Error('Vector: invalid local bounds');
+      const b=n.bounds as Record<string,unknown>;
+      if(['x','y','width','height'].some(k=>b[k]===undefined))throw new Error('Vector: local bounds need x/y/width/height');
+      node.bounds={x:number(b.x,0),y:number(b.y,0),width:number(b.width,0,1,10000),height:number(b.height,0,1,10000)};
+    }
     node.fill=paint(n.fill);node.stroke=paint(n.stroke);
     if(n.light!==undefined){
       if(!['group','ellipse','path'].includes(node.type))throw new Error('Vector: light must belong to its emitter');
       node.light=normalizeVectorLight(n.light);
+    }
+    if(n.atmosphere!==undefined){
+      if(node.type!=='group'||!node.bounds)throw new Error('Vector: atmosphere needs a bounded group');
+      node.atmosphere=normalizeVectorAtmosphere(n.atmosphere);
     }
     if(node.type==='path')node.d=path(n.d);
     if(node.type==='instance'){
@@ -196,10 +221,11 @@ export function normalizeVectorAssets(raw:unknown):Record<string,VectorDrawing>{
   if(entries.length>40)throw new Error('Vector: too many reusable assets');
   const assets=Object.fromEntries(entries.map(([key,value])=>{
     const config=value as Record<string,unknown>;
-    if(config?.rig!==undefined&&!['simple-human','simple-puppet','simple-pig','lantern','wet-footprint'].includes(String(config.rig)))throw new Error('Vector: unknown anatomy rig');
-    const drawing=config?.rig==='simple-human'?vectorHumanRig(config):config?.rig==='simple-puppet'?vectorPuppetRig(config):config?.rig==='simple-pig'?vectorPigRig(config):config?.rig==='lantern'?vectorLantern():
+    if(config?.rig!==undefined&&!['simple-human','simple-puppet','simple-pig','simple-chicken','simple-snake','lantern','wet-footprint'].includes(String(config.rig)))throw new Error('Vector: unknown anatomy rig');
+    const drawing=config?.rig==='simple-human'?vectorHumanRig(config):config?.rig==='simple-puppet'?vectorPuppetRig(config):config?.rig==='simple-pig'?vectorPigRig(config):config?.rig==='simple-chicken'?vectorChickenRig(config):config?.rig==='simple-snake'?vectorSnakeRig(config):config?.rig==='lantern'?vectorLantern():
       config?.rig==='wet-footprint'?{width:20,height:36,nodes:vectorFootprintNodes('foot').map(n=>({...n,x:(n.x??0)+10,y:(n.y??0)+16}))}:value;
-    const normalized=normalizeVectorDrawing(alignVectorEmitters(readableVectorHuman(readableVectorPig(normalizeVectorDrawing(drawing)))));
+    const inked=config?.artStyle===FOLK_INK_STYLE?handInkDrawing(drawing as VectorDrawing):drawing;
+    const normalized=normalizeVectorDrawing(alignVectorEmitters(readableVectorHuman(readableVectorPig(normalizeVectorDrawing(inked)))));
     // Legacy authored tools often already have a precise rectangular handle.
     // Reuse its center rather than guessing a grip from the object's bounds.
     const grip=vectorPropGrip(normalized);
@@ -234,9 +260,9 @@ export function vectorTargets(drawing:VectorDrawing,assets:Record<string,VectorD
 }
 export function normalizeVectorScene(raw:unknown,assets:Record<string,VectorDrawing>,spoken=''):CanvasVectorScene{
   const data=raw as Record<string,unknown>;
-  const grounded=groundVectorDrawing(normalizeVectorDrawing(raw),assets,data.ground);
+  const grounded=groundVectorDrawing(normalizeVectorDrawing(raw,MAX_SCENE_NODES),assets,data.ground);
   const footprints=vectorFootsteps(grounded,assets,data.footsteps);
-  let drawing=normalizeVectorDrawing(vectorCarryDrawing(footprints.drawing,assets,data.carries));
+  let drawing=normalizeVectorDrawing(vectorCarryDrawing(footprints.drawing,assets,data.carries),MAX_SCENE_NODES);
   const targets=vectorTargets(drawing,assets);
   for(const n of drawing.nodes.filter(n=>n.groundMark))if(!drawing.ground||Math.abs((n.y??0)-drawing.ground.y)>24)throw new Error(`Vector: ground mark ${n.id} y=${n.y??0} must stay on its surface y=${drawing.ground?.y}`);
   // Native land clues need readable soles/toes at phone size, including after
@@ -251,7 +277,7 @@ export function normalizeVectorScene(raw:unknown,assets:Record<string,VectorDraw
       for(const n of vectorFootprintNodes(mark.id,sole.fill))replacements.set(n.id,{...n,parent:mark.id});
     }
   }
-  if(replacements.size)drawing=normalizeVectorDrawing({...drawing,nodes:drawing.nodes.map(n=>replacements.get(n.id)||n)});
+  if(replacements.size)drawing=normalizeVectorDrawing({...drawing,nodes:drawing.nodes.map(n=>replacements.get(n.id)||n)},MAX_SCENE_NODES);
   for(const n of drawing.nodes.filter(n=>n.attachTo)){
     const [instance,part]=n.attachTo!.split('/'),owner=drawing.nodes.find(n=>n.id===instance&&n.type==='instance');
     if(!owner||owner.attachTo||!assets[owner.asset!]?.nodes.some(n=>n.id===part))throw new Error('Vector: attachment target must be an existing independent instance part');
@@ -322,6 +348,7 @@ export function normalizeVectorScene(raw:unknown,assets:Record<string,VectorDraw
     const frames=t.frames.map((raw):VectorFrame=>{
       if(!raw||typeof raw!=='object')throw new Error('Vector: invalid animation frame');
       const f=raw as Record<string,unknown>,frame:VectorFrame={t:number(f.t,0,0,1)};
+      if(f.asset!==undefined||f.type==='asset-swap')throw new Error('Vector: animation frames cannot swap character assets. Bind each character to its own native stage cast, or set the instance asset at the scene boundary; asset-swap is not an animation channel');
       for(const key of ['dx','dy','rotation'] as const)if(f[key]!==undefined)frame[key]=number(f[key],0);
       // A native puppet's head follows its torso. Root travel must never be
       // duplicated as a local head translation by an AI repair.
@@ -336,6 +363,11 @@ export function normalizeVectorScene(raw:unknown,assets:Record<string,VectorDraw
       }
       if(frame.rotation===0)frame.rotation=0; // canonicalise negative zero across checkpoint reloads
       for(const key of ['scaleX','scaleY'] as const)if(f[key]!==undefined)frame[key]=number(f[key],1,-20,20);
+      // Approved village eyes keep their drawn proportions. Fear acts through
+      // brows, mouth and sweat; AI tracks must not stretch the whites/pupils.
+      // Closing/blinking and gaze translations remain available.
+      if(partId&&/^(?:eyes|eye-(?:white-)?[lr])$/.test(partId)&&assets[owner?.asset||'']?.nodes.some(n=>n.id==='village-cast-v1'))
+        for(const key of ['scaleX','scaleY'] as const)if(frame[key]!==undefined&&frame[key]!>1)frame[key]=1;
       if(f.opacity!==undefined)frame.opacity=number(f.opacity,1,0,1);
       if(f.fill!==undefined)frame.fill=paint(f.fill);
       if(f.d!==undefined)frame.d=path(f.d);
@@ -484,6 +516,7 @@ export function compileVectorProject(project:CanvasStudioProject):CanvasStudioPr
       }
       return track.frames.map(f=>relative&&f[key]!==undefined?{...f,[key]:f[key]!+delta}:f===first?{...f,[key]:value}:f);
     };
+    if(drawing.nodes.some(n=>n.atmosphere))compiled={...compiled,atmosphere:{...compiled.atmosphere,timeOffsetMs:elapsedMs}};
     const blinks=puppetBlinkTracks(compiled,assets,elapsedMs);
     elapsedMs+=scene.durationMs;
     if(blinks.length)compiled={...compiled,vectorScene:{...drawing,tracks:[...drawing.tracks,...blinks]}};

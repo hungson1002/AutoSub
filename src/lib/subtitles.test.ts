@@ -33,6 +33,25 @@ test('ASS boxed subtitles preserve configurable horizontal and vertical padding'
   assert.match(ass, /m 0 0 l 168 0 l 168 50 l 0 50/);
 });
 
+test('boxed Bangers captions center their Vietnamese accents inside the background', () => {
+  const ass = cuesToAss([{ ...cue, translatedText: 'Dụ nó haha, thế hóa ra nãy giờ tôi nói bằng thừa à' }], {
+    ...defaultStyle, fontFamily: 'Bangers', fontSize: 52, background: 'box',
+    boxPaddingX: 30, boxPaddingY: 16, position: 'custom', customY: 97.5,
+  });
+  assert.match(ass, /\\fs90\.5/);
+  assert.match(ass, /\\an5\\pos\(960,1006\)/);
+});
+
+test('multi-line Bangers boxes reserve the exported font line advance', () => {
+  const ass = cuesToAss([{ ...cue, translatedText: 'Nhử nè\nChữ tiếng Việt có dấu' }], {
+    ...defaultStyle, fontFamily: 'Bangers', fontSize: 52, background: 'box',
+    boxPaddingX: 30, boxPaddingY: 16,
+  });
+  const drawing = /\\p1[^}]*}m 0 0 l \d+ 0 l \d+ (\d+)/.exec(ass);
+  assert.ok(drawing);
+  assert.ok(Number(drawing[1]) >= 184, 'the box must cover the larger second-line advance');
+});
+
 test('ASS boxed subtitles export their background color, opacity, and border', () => {
   const ass = cuesToAss([cue], {
     ...defaultStyle,

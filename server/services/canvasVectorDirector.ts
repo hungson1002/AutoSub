@@ -1,22 +1,29 @@
 import {createHash,randomUUID} from 'node:crypto';
-import {mkdir,readFile,writeFile,rename} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,rename,readdir} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
 import {puppetHandOpacity} from '../../shared/canvasVectorPuppet';
+import {APPROVED_FOLK_STYLE,FOLK_INK_STYLE,FOLK_INK_RULES,handInkDrawing} from '../../shared/canvasVectorInk';
+import {approvedFolkSourceHash} from '../../shared/canvasVectorApprovedArt';
+import {lockFolkInkAsset,lockFolkInkCast} from '../../shared/canvasVectorStyleLock';
 import {chat} from '../adapters/openaiCompatible';
 import {workdir} from './ffmpeg';
 import {prepareCanvasProjectAudio} from './canvasAudioProduction';
 import {shortenCanvasScript} from './canvasDurationPlanning';
 import {renderCanvasPreviewFrames} from './canvasFastRender';
+import {buildVectorCastReview,type VectorCastDetail} from './canvasVectorCastReview';
 import {resolveBrowserExecutable} from './animationBrowser';
 import {animationRenderSourceSignature} from './animationRenderSource';
 import {defaultVectorStyleReferences,vectorStyleReferenceContent} from './canvasVectorStyle';
 import {expandVectorStageLibrary,vectorStageLibrarySignature} from './canvasVectorStageLibrary';
+import {NATURE_SCENERY_VERSION} from './canvasSceneryNature';
+import {SETTING_SCENERY_VERSION} from './canvasScenerySetting';
+import {REFERENCE_SETTING_CONTRACT} from './canvasSceneryReference';
 import {normalizeCanvasSoundCues} from '../../shared/canvasSoundDesign';
 import type {CanvasAnimationGenerateInput} from './canvasAnimationDirector';
 import type {CanvasStudioProject,CanvasStudioScene} from '../../shared/canvasAnimationStudio';
-import {compileVectorProject,normalizeVectorAssets,normalizeVectorDrawing,normalizeVectorScene,evaluateVectorPart,vectorTrackTiming,vectorTargets,frameVectorScene,type VectorTrack,type CanvasVectorScene} from '../../shared/canvasVectorScene';
+import {MAX_SCENE_NODES,compileVectorProject,normalizeVectorAssets,normalizeVectorDrawing,normalizeVectorScene,evaluateVectorPart,vectorTrackTiming,vectorTargets,frameVectorScene,type VectorTrack,type CanvasVectorScene,type VectorDrawing,type VectorNode} from '../../shared/canvasVectorScene';
 import {vectorEnsembleCoverage} from '../../shared/canvasVectorEnsemble';
 import {vectorPropGrip,vectorLightActionTargets,vectorIsReleaseAction} from '../../shared/canvasVectorProps';
 import {vectorWorldMatrix,vectorPoint} from '../../shared/canvasVectorTransform';
@@ -25,8 +32,8 @@ import {VECTOR_STORY_CONTRACT,normalizeVectorStory,assertVectorStoryFilm,vectorD
 
 const PHYSICAL_ACTIONS=`NATIVE PHYSICAL ACTIONS (required for new ground-based locations): author your own setting, then use these exact JSON fields. Each example is a JSON object; merge its keys into the appropriate stage/scene. Never put multiple keys or numbers inside a quoted key. Never invent narrated actions.
 LOCKED TURN PLAN: when a screenplay beat has turn:{actor,from,to}, the compiler performs that exact whole-body pose change at its cue in 300ms and retains the result. Do not reinterpret it as a head look, left/right mirror, or handwritten face-opacity patch. Preserve these planned poses through camera cuts and repairs. You still author the setting and other motivated actions.
-COMPACT ASSET ENUMS: simple-puppet hair is short/side-part/bun/long/tied/none/braid/double-bun/cropped/wavy/bob; outfit is robe/tunic/ao-dai/vest/shawl; headwear is none/headscarf/conical/headwrap; facialHair is none/moustache/beard. design:village also supports glasses:true. Do not invent topknot or other enum values. Custom SVG artwork remains supported for a different design.
-APPROVED VILLAGE CAST: NEW compact village/horror people use design:"village", finish:"handdrawn", age:"child"|"adult"|"elder" and gender:"male"|"female"|"neutral". Set age and gender explicitly from each screenplay role, never infer them from hairstyle. This native design supplies a rounded THREE-QUARTER face, small outlined white eyes with TINY centered black dot pupils, bold near-black outer contours, shaped two-tone hair and tailored adult clothing silhouettes. Native expression is neutral by default; expression may be neutral, soft, worried or surprised. Use soft for a relaxed friendly moment, worried for concern and surprised for discovery; never force a smile through horror. Native fear/startle opens the mouth and fear restores the selected resting expression. Native front/right faces RIGHT: face, visible ear, hair and clothing share that direction; native turns to left mirror the whole cutout. Face partners and action targets instead of making everyone stare at the viewer; never redraw a symmetric frontal face or shift pupils off-center to fake the three-quarter view. Adults have a clothed body about as tall as their head; children have shorter bodies and a smaller visible silhouette on the SAME ground anchor. Only adult/elder women have a modest outward upper-chest contour and inward waist; children always have straight child bodies. No visible arms, legs or idle hands. The same round dot hand appears only for an actual action/held prop. Use palette.skirt for a woman's lower garment. Distinguish cast through age, faceShape, hairstyle, headwear and clothing, not merely colors. Never replace this approved design with a squat baby body, oversized glossy pupils or elaborate ornamental hair. Existing expanded cast artwork is immutable during resume/refinement.
+COMPACT ASSET ENUMS: simple-puppet faceShape is round/oval/broad; hair is short/side-part/bun/long/tied/none/tuft/braid/double-bun/cropped/wavy/bob/fringe; eyeShape is round/half-lidded; outfit is robe/tunic/ao-dai/vest/shawl/work-shirt/cross-collar/apron; headwear is none/headscarf/conical/headwrap; facialHair is none/moustache/beard. design:village also supports glasses:true, castRole:lead/support, costumeDetail:plain/patch/roundel/piping/sash. Match castRole to the screenplay role. Give the lead a recognizable hair silhouette and garment cut plus a signature costume detail; vary supporting hair and garments by age/occupation. Never make a lead distinct by oversized eyes, head, props or bright glow. Do not invent topknot or other enum values. Custom SVG artwork remains supported for a different design.
+APPROVED VILLAGE CAST: NEW compact village/horror people use design:"village", finish:"handdrawn", age:"child"|"adult"|"elder" and gender:"male"|"female"|"neutral". Set age and gender explicitly from each screenplay role, never infer them from hairstyle. This native design supplies a rounded THREE-QUARTER face, small outlined white eyes with TINY centered black dot pupils, bold near-black outer contours, shaped two-tone hair and tailored adult clothing silhouettes. Native expression is neutral by default; expression may be neutral, soft, worried or surprised. Use soft for a relaxed friendly moment, worried for concern and surprised for discovery; never force a smile through horror. Native fear/startle opens the mouth and fear restores the selected resting expression. Native front/right faces RIGHT: face, visible ear, hair and clothing share that direction; native turns to left mirror the whole cutout. Face partners and action targets instead of making everyone stare at the viewer; never redraw a symmetric frontal face or shift pupils off-center to fake the three-quarter view. Adults have a clothed body about as tall as their head; children have shorter bodies and a smaller visible silhouette on the SAME ground anchor. Only adult/elder women have a modest outward upper-chest contour and inward waist; children always have straight child bodies. No visible arms, legs or idle hands. The same round dot hand appears only for an actual action/held prop. Use palette.skirt for a woman's lower garment. Distinguish cast through age, faceShape, hairstyle, headwear and clothing, not merely colors. Select genuinely different garments by role: work-shirt has a short button shirt/trousers; cross-collar has a wrapped blouse/dark skirt; apron has a bib/pocket. Do not dress all supporting cast in the same tunic. Default direction changes use right/left whole-cutout mirroring; use a rear view ONLY when the user explicitly requests one. Never replace this approved design with a squat baby body, oversized glossy pupils or elaborate ornamental hair. Existing expanded cast artwork is immutable during resume/refinement.
 VILLAGE MOUTH PERFORMANCE: new native village people omit the mouth while idle or silently listening. The renderer shows it for their own timed dialogue, respects measured speech pauses, and retains intentional worried/surprised/fear expressions. Bind dialogue.characterKey to the actor instance ID, or set that instance's characterKey to the same stable key. Offscreen narration must not be assigned to on-screen listeners or crowds. Do not add perpetual mouth animation to everyone; choose an expression for the actual dramatic moment.
 ELEVATED VILLAGE PRODUCTION: when the locked screenplay uses person in a village requested from above, prefer the complete illustrated-place village scaffold with view:"elevated", finish:"handdrawn" and the user's custom cast binding. Keep supporting people in extras with their screenplay IDs. Add only story-specific objects to that shared world. A sparse side-on house and flat brown floor cannot meet an elevated-village brief. Use a custom world when the user's actual setting requires one.
 PUPPET REACTIONS: on a screenplay motion beat, root dx/dy keys starting at zero are reaction displacements relative to the held root position; the engine preserves that delta when joining poses. Absolute destination movement belongs to a travel beat. Do not turn a short recoil into a walk across another actor. NATIVE DOOR HARDWARE: folk-courtyard ring is a child of its moving door and stays on the leaf. Both native doors reveal a dark aperture when opened. folk-room latch starts retracted at dx=0; lock with dx=48, unlock with dx=0. Its guide brackets stay fixed to the door. Explicitly hold the retracted state in earlier interior cuts until the narrated lock event. Keep a newly entered room's door ajar until its closing event, and show actual threshold crossing before cutting inside. Do not replace an entrance with a fade in front of a closed door.
@@ -35,6 +42,8 @@ SCENERY SELECTION AND COMPOSITION: prefer the native illustrated-place scaffold 
 RAISED VILLAGE LAMP: a native village cutout holds a hanging lantern with the hand near shoulder height and the flame in front of the upper torso by default. Do not leave the lantern dangling at the hem while walking or reacting. A narrated downward inspection can temporarily lower it using reaches; it returns to the raised carry afterward. Only hold:true or an explicit withdraw:false should keep a deliberately lowered pose. Keep one occupied dot hand and the handle attached throughout; do not add an arm or a second hand.
 JOINTS AND FLUIDITY: simple-human projected elbows allow -145..145; both knees 0..145. Use native reaches to choose the physically natural branch with the elbow below its shoulder, rather than hard-coding a left/right angle sign. Ordinary carrying uses at most 120 degrees of elbow flexion; never fold the elbow up into the neck to keep a lamp near the face. Lift at the shoulder/hip and bend at the existing elbow/knee; never mirror a joint just because the character backs away. Use native reaches/walks instead of guessed angles. Smooth interpolation continues through intermediate keys; do not put ease-in-out on every key, reset to zero between gestures, or use hold easing for a moving body. Explicit holds are for intentional pauses only. Fixed camera cuts may be immediate while hand/prop poses remain continuous. An empty inventory never releases existing props: preserve the same hand and stage geometry through a detail cut. Keep each holding arm on its own side of the torso with connected shoulder/elbow joints; only a deliberately narrated reach may cross the body. Never reset an unmentioned arm to a default angle at a cut.
 PIG ANATOMY: vectorAssets:{"pig-body":{"rig":"simple-pig","toes":5,"facing":"right","palette":{"skin":"#9c8977"}}}. Reuse it as a scene instance pig; width 360, height 240, ground contact at local (180,214). It has profile, body, head-group, eyes, ear, snout, tail, leg/knee/hoof-fl/fr/hl/hr and toe-fl-1..toe-fl-5 (five digits on each hoof when toes:5). Keep black contours, a body fill visibly brighter than the night background, and simple black dot eyes like the human characters. Use open outer limb contours with no crossbars at elbows/knees. Keep the head-neck and ear outlines visible; leave out the decorative smiling mouth; do not use an unoutlined neck patch to cover the torso contour. Hoof tips need contrasting fill and separated digits, not dark sock-like bands; Keep its horizontal torso, short neck and recognisable snout; do not substitute an upright humanoid. facing may be left or right, fixed per reusable view. Native walks also support this rig: {"walks":[{"actor":"pig","to":"gate","gap":70,"start":0,"end":0.6,"cue":"exact walking phrase"}]}; both pig and destination need ground targets. It plants four hooves using joint IK and keeps head/ears/tail following the stride; do not write duplicate root/leg/knee/hoof channels. A short walk is at most 220 ASSET pixels; split longer travel into cuts. A detail shot of five toes must use a tight FIXED camera on the same physical hoof, with readable digit separation; do not draw another animal or invent extra paws. For a fixed part detail use shot:{"target":"pig/hoof-fl","bounds":{"x":-15,"y":-12,"width":30,"height":12}}. The engine finds this actual animated part and frames its local bounds without moving or replacing the animal. Keep the five toe fills contrasting with the support. Do not hide the actual fifth digit in a wide composition. Use sound preset pig-grunt only with a visible grunt/sniff action; describe it as stylised Foley, not a real animal recording.
+ CHICKEN ANATOMY: vectorAssets:{"hen":{"rig":"simple-chicken","facing":"right","palette":{"skin":"#d9c4a3"}}}. Reuse it as a scene instance hen; width 240, height 200, ground contact at local (120,190). It has profile, body, wing, tail, head-group, head, comb, beak, wattle, eyes and two leg/knee/foot chains with three toes each. Keep the same black contours and dot eye as the human cast. STAGE IT SMALL like the reference: instance height 40-60, about 0.15 of a person, never person-sized. Native walks support this rig with short barnyard distances (at most 300 asset pixels, about 65 world pixels at stage size, per shot); keep gap 10-30; legs alternate, head counter-bobs, tail wags; do not write duplicate limb channels. Default barnyard animals to stillness; travel only on an explicit narrated move with a narrow window then hold.
+ SNAKE ANATOMY: vectorAssets:{"snake":{"rig":"simple-snake","facing":"right","palette":{"skin":"#4a4438"}}}. Reuse it as a scene instance snake; width 360, height 120, belly contact at local y=90. It has profile, seg-0..seg-4 coils with belly marks, tail-tip, head-group, head, snout, tongue and dot eyes. Native walks slither it: segments oscillate phase-shifted while the root advances (at most 320 asset pixels, about 80 world pixels at stage size, per shot); keep gap 10-40; never slide it without body waves. STAGE IT THIN AND LOW like the reference worms: instance height 25-40 and width 120-200. Prefer several still worms over one giant travelling snake. Use a NARROW time window around 0.2 of the shot. Do not substitute an upright humanoid or a straight stick.
 ROWING: {"rows":[{"actor":"old","arm":"r","prop":"old/oar","cycles":2,"start":0,"end":0.9,"cue":"exact rowing phrase"}]}. Engine drives continuous shoulder/elbow strokes with torso effort and delayed head/cloth follow-through, keeping oar on its hand chain and feet planted. Do not duplicate controlled arm, forearm, upper-body, head-group or tunic-hem channels. Use only while narration calls for rowing; choose a shot that includes the oar blade and water. Omit cue for an action already in progress at shot opening, so narration cannot truncate its final stroke.
 STRIKING: {"strikes":[{"actor":"old","arm":"l","target":"bell","start":0,"end":0.5,"cue":"exact striking phrase"}]}. Engine prepares the strike, solves actual hand-to-object contact, withdraws the hand and settles the struck object with delayed torso/head/cloth response. Optional point is LOCAL to the target asset. Actor and fixed prop must be within arm reach. Do not duplicate controlled arm/forearm, upper-body, head-group, tunic-hem or bell rotation tracks. The struck object and hand need to remain in frame. For boat interaction shots use shot:{target:"old",height:0.45,include:["lam","bell"]}; include now fits required partners and props too.
 DECK RETREAT: on an existing boat, {"walks":[{"actor":"lam","to":"old","backstep":35,"start":0,"end":0.35,"cue":"exact retreat phrase"}]} supports a short planted retreat away from another human on the SAME deck parent. It reuses existing support geometry; do not add a land ground or erase the boat. A retreat includes defensive chest-level hand acting, backward torso lean and head/cloth follow-through; do not add walking arm swings or overwrite these channels. Declare carry:"l" or "r" for an occupied hand. In a later cut retain the COMPLETE end pose using the same native walk with hold:true and no cue, not only a root translation. The boat actors must remain on their existing deck; do not slide their upper-body without articulating the legs.
@@ -53,6 +62,15 @@ COMPACT FEAR: reactions:[{actor:"person",kind:"fear",level:"terrified",start:0.2
 ANIMAL DEPTH: every animal must have an opaque torso that occludes hidden hip/shoulder roots and far limbs. Paint far limbs behind the trunk; use darker opaque fills for depth, never semi-transparent legs showing through the body. Keep each complete leg/knee/hoof chain attached to its own anatomical root. A rearing body rotates about its hips while planted hind limbs retain their support. Do not add duplicate legs, disconnected spike paws or redraw all four legs across a side-view torso. Custom animals must obey this same layer rule. Native simple-pig owns its leg depth and contours; use its actual parts rather than inventing additional leg artwork.
 REACTION scene example: {"reactions":[{"actor":"person","kind":"look","toward":"building","start":0.4,"end":0.65,"cue":"exact narrated reaction"}]}. kind may also be "startle". toward is REQUIRED for look/startle and names a grounded target. Engine moves connected torso/head/eyes while feet remain planted. Do not duplicate upper-body/head-group rotation, eyes dx or mouth scaleY channels controlled by a reaction. No random head shaking. These commands compile to ordinary nodes/tracks and work across grounded locations; use names and geometry appropriate to the story.`;
 export const VECTOR_DIRECTOR_CONTRACT=`You are an animation filmmaker and SVG illustrator. Compose complete original vector animation using reusable rigs and location components where appropriate; draw any additional objects the story needs. Return ONLY compact JSON, without indentation.
+${REFERENCE_SETTING_CONTRACT}
+NATIVE ATMOSPHERE: nature-landscape and folk-setting accept atmosphere:"clear"|"mist"|"fog". Use clear for ordinary daylight, mist for a gentle damp/night mood, fog only when the story needs reduced distance visibility. Native fog is soft, layered and frame-driven; never draw translucent rectangles or hard-edged mist paths. folk-setting additionally accepts smoke:true for visible cooking-fire/cooking-smoke outdoors or lamp smoke indoors; only request it when there is a smoke source in the story. Reuse ground-mist/distant-haze for outdoor settings and valley-mist for nature. These groups may reveal/fade as needed, while their internal drift is automatic. Do not repaint or attach separate glow/fog blobs to the camera.
+APPROVED SCENERY ROUTING (mandatory for NEW folk-horror scenes): use nature-landscape for forests/bamboo/pine/clearings/rivers/waterfalls, folk-setting for market/village/street/room/corridor/riverside, folk-courtyard for the accepted courtyard, folk-river-boat for boats. illustrated-place, folk-room, folk-riverbank and raw full-scene drawings are legacy formats and are rejected for NEW production; saved projects stay unchanged. Do not copy legacy scenery into stage.nodes or vectorScene.nodes. New nature/settings use descriptors ONLY and native semantic IDs; their nodes are already painted. Never place mountains, rocks, trees, roofs, tables or full-size floor rectangles as new assets/overlays. For a truly distinct story prop author a small asset and place it with stage.objects:[{id:"clue",asset:"clue-asset",support:"floor",height:45,at:-0.4}]. Floor/table/stall-left/stall-right are real named supports; at is -1..1 along the available support. Height max200 on floor,90 on a table/counter. No x/y/parent in this placement API; the tool calculates contact and safe width. Put recurring props here once and animate the same ID in shots. Unknown supports or unsupported new places require a corrected plan, never a silent old-style fallback.
+FOLK SETTING GRAMMAR: vectorStages:{"market":{"template":"folk-setting","place":"market","light":"dusk","seed":309,"composition":"center","cast":{"person":"your-cast-asset"}}}. place is market/village/street/room/corridor/riverside; light day/dusk/night; integer seed -99999..99999; composition left/center/right. Shared hand-pressure ink and earthy flat colors match nature-landscape and the accepted courtyard. Outdoor IDs: terrain,forest-backdrop,trees,village,market,house-left,house-far,house-right,person. Market additionally supplies stall-left,stall-right,stall-back with real counters/baskets/goods; a non-market village supplies well. Room/corridor IDs: walls,terrain,window,door,mat,table,kettle,cups,lamp,lamp-flame,shelf,person. The table, teapot, cups and lamp already touch their native support; do not redraw them. Fade lamp-flame opacity for a flame going out; retain the actual lamp body. Native local world folk-setting-world is 1280x720, floor620, person height125. Declare extras on this same floor at local footY500..650; keep heights90..125 for wide scenes, varied depths. Empty tests use visibleCast:[] and a fixed full-frame 16:9 camera [{t:0,x:640,y:360,zoom:1}]. Repairs must keep this native paint unchanged; improve layout by changing descriptors, not raw path overlays.
+RIVERSIDE VILLAGE: for a village river landing, use folk-setting place:riverside with light, seed and composition. It supplies the approved timber cottage, distant cottages, rooted trees, a connected earth lane, river-bank, river-water, dock, boat, and house-left-door. Native supports: floor is the dry walking area; dock is a narrow measured surface for a small story prop. Do not add replacement buildings, plants, river shapes or another boat. Keep the world and imported house paint unchanged across shots. Other village/market/room places keep their existing painter.
+NATURE COMPOSITION GRAMMAR: For a NEW wilderness/forest/stream/waterfall/mountain overlook, prefer vectorStages:{"woods":{"template":"nature-landscape","terrain":"cliffs","water":"waterfall","vegetation":"mixed","composition":"right","light":"day","seed":117,"cast":{"person":"your-cast-asset"}}}. Native components generate the complete layered 1280x720 painted environment with shared variable ink, rock faces/crevices, foliage, roots, water and real supports. This is combinable terrain/hydrology/planting, not one fixed picture: terrain rolling/gorge/cliffs; water none/river/stream/waterfall; bridge boolean (requires water); vegetation mixed/pine/bamboo; composition left/center/right; light day/dusk/night; integer seed -99999..99999. Select different combinations, focal side and seeds to fit each place. Cliffs + river makes an elevated valley with a foreground ledge and distant winding river; gorge + stream + bridge gives a bridge resting on both banks; waterfall shares crest/impact/pool; rolling + none makes a woodland clearing. Existing accepted courtyard/cast are unchanged. DO NOT author full-landscape SVG assets and paste them onto this world or onto forest/waterside scaffolds. Use native semantic IDs for existing scenery: forest-backdrop, terrain, tree, valley-mist; water waterfall gives waterfall,pool,cliff; stream/river on rolling/gorge gives stream,stream-banks; bridge:true gives bridge; cliffs without waterfall gives cliff,pine-tree,river-water when water is not none. Only name IDs present in the selected combination. Native floor is y620 on nature-world, actor height125 and real ledge depth is already applied. Add only a necessary NEW story prop in the same world coordinates, not replacement mountains, rocks, bridge, river or opaque mist strips. Empty proofs use visibleCast:[] and a fixed full-view 16:9 camera [{t:0,x:640,y:360,zoom:1}]. valley-mist is the native bounded soft-fog group; its default opacity is zero in clear weather and one in mist/fog. Reveal or fade the same group for a weather change; internal motion is frame-driven. Keep native pressure ink/palette unchanged through repairs; improve a composition by changing the shared grammar descriptors, not replacing its paint with 8 flat polygons.
+APPROVED COURTYARD PAINT: folk-courtyard in folk-ink style uses the accepted hand-painted timber/thatch courtyard. Set light:day/dusk/night on the native template (night default). It supplies the curved thick ink, earthy palette, real doorway, brass ring, flowering tree/planter, bamboo fence, broom and water-jar. Do not redraw these objects, recolor their native paint, add fake grain/halos, or rebuild architecture. Its local scene is 1280x720, floor y620 on courtyard-world; the house base is y545 and the door leaf base y521, with native depth offsets. Door/ring retain their native LOCAL contact anchors; use resolved transforms rather than old x450/y610 placement. The native person is 125px high. Daytime lamp is hidden, night lamp has its own emitter. Empty scenery proof: visibleCast:[], no added people or replacement scenery, fixed full-frame view camera:[{t:0,x:640,y:360,zoom:1}] in 16:9. For an ordinary story reframe this SAME world and bind the approved cast; choose other existing native settings when the location differs.
+NATIVE SCENERY CONTACTS: village has house-mid, door and tree (the existing village-tree) with measured bounds. folk-courtyard has house, door, ring, tree, stone-path, water-jar and mounted lamp. folk-riverbank has river-water, foreground-earth, tree, mooring-stake, jetty and moon. Reuse these actual objects. Lamps already contain a correctly aligned emitter: never draw an independent glow ellipse at guessed coordinates. Native architecture and shore planes are complete; do not layer another roof, sky, river rectangle, detached tree crown or decorative pole across them. Put necessary new story props in vectorStages.nodes on its native ground parent with correct local coordinates and groundAnchor/footY; a world-local prop cannot use screen coordinates. Keep still scenery proofs free of needless additions.
+SELECTED FOLK-HORROR ART CONTRACT (enforced by the tool for new artwork): ${FOLK_INK_RULES} Only native simple-puppet descriptors may define people; do not supply anatomy node overrides. The tool owns the ink finish and bounded character palettes. Choose age, gender, hair, outfit, accessories and suitable story-specific props; preserve distinct cast identities. Native illustrated-place scenery supports village, forest, waterside, street, corridor and rural-interior; use these for a coherent base and add outlined original objects as needed.
 COMPACT MODEL A: When the brief selects Model A/simple-puppet, define each person through {"rig":"simple-puppet","hair":"side-part","outfit":"tunic","palette":{"shirt":"#596b62","skin":"#ead2b3"}} with the chosen distinct costume/hair/headwear options. Do not hand-draw replacement anatomy or add arms/legs. Stable parts are puppet-root, upper-body, head-group, eyes, mouth, hand-l and hand-r; address them directly as person/head-group, never person/head-group/eyes. For illustrated-place the protagonist ID is person (regardless of their name); extras use their own stable IDs. Native template cast has ONLY the person slot; extras belong only in extras. Add new props/anchors and carries in each vectorScene, NEVER inside the template definition, and do not replace native ground. Use a visible scene prop or expression for a clue; do not invent feet on a limbless puppet.
 BLOCKING IS EXECUTABLE: locked visibleCast is the list of actors present in this view, including cue-timed entrances. The compiler hides every other actor, and keeps held props/inventory for later views. Never change this plan to hide a staging error. Use a distinct shared stage for each viewpoint/interior/exterior; a person trapped inside cannot stand in front of the outside door. Native interior: vectorStages:{"room":{"template":"folk-room","cast":{"person":"SAME-puppet-asset-as-outside"}}}. It supplies room-wall, room-floor, window, table (group at 40,790; size180x190), bed, lamp (mounted), door (450,610; size140x370), latch (472,800; size106x25) and person (245,650; size212x330), ground y980. In landscape these local coordinates are under room-world with the same UNIFORM scale as courtyard-world. Parent additional room clues to room-world. All fixed objects must remain fixed through room cuts. walks to door with gap150 places person within reach of latch; use exact target-local contact points. The room has its own door/latch view; the brass ring is on the courtyard side. Use courtyard for an exterior insert with the inside person excluded. Do not draw the same actor twice at one location or place two faces on top of each other. When repairing actor overlap you MAY change only the actors' x/blocking on their existing support and associated root tracks, preserving hand attachments and scenery. Camera cropping is repaired by framing, not moving scenery or hiding an actor the plan requires.
 ${PHYSICAL_ACTIONS}
@@ -92,6 +110,7 @@ QUALITY: New motions should have head, shoulders, elbows, hands, hips, knees and
 SCENERY ART DIRECTION: design a complete recognizable PLACE, not detached clip-art: believable distant atmosphere, midground architecture or foliage, foreground support and carefully chosen local props. New optional reusable location grammar: vectorStages:{"setting":{"template":"illustrated-place","place":"forest","light":"night","seed":17,"cast":{"person":"YOUR-CUSTOM-CHARACTER-ASSET"}}}. Valid place values are village, forest, waterside, street, corridor and rural-interior (a lived-in traditional wooden room); light is day, dusk or night. Use rural-interior only when the script actually enters such a room, not as a shortcut for an office, hospital, school or open-air scene. These are OPTIONAL visual scaffolds with real environment layers and deterministic geometry, not a story, artist or character. The cast person slot MUST bind to a character asset chosen from the user's style, preserving its face/body/clothing, never a forced generic replacement. For an unlisted place such as hospital, office, classroom or spaceship, author an original location instead of forcing a river/forest/village into it. Do not invent irrelevant mountains, lanterns or moonlight. Reuse the SAME complete stage at the same location and seed; camera cuts reframe the stage, not redraw a different set. A valid background has recognizable architecture/vegetation/support surfaces plus appropriate small details, volume and hierarchy without clutter. For a night RIVERBANK or lakeshore scene use vectorStages:{"shore":{"template":"folk-riverbank","cast":{"person":"traveler"}}}; this reusable multilayer moonlit shoreline includes moon/glow, multiple hills, distant village silhouette, moving-water-looking ripple marks, embankment earth, a tree, vegetation, pebbles, mooring-stake, and a grounded person. It is NOT a prewritten story: bring new characters/clues into the same world only when mentioned. For rural house or courtyard use folk-courtyard, for a furnished interior use folk-room, for an ON-BOAT story use folk-river-boat; never force an unrelated story into any prefab setting. Portrait and landscape variants preserve actor/prop aspect ratio. Preserve the SAME complete environment, object positions and cast IDs across cuts; reframe with camera instead of rebuilding backgrounds. Wide establishing shots keep people small among the scenery (normally 10-25% of frame height); contextual action shots retain the environment and only motivated close shots enlarge the subject. Foreground props must remain readable. Night is colored moonlight with navy-blue sky, slate distant hills, olive vegetation and illuminated skin; not a flat black top and broad brown rectangle bottom. Hard cuts are appropriate between distinct angles; continuous action stays within the same environment and never teleports objects. No infographic overlay.`;
 
 export const VECTOR_REVIEW_CONTRACT=`Review ACTUAL rendered frames, never accept the declared plan as proof. Each numbered tile with a timestamp is a SEPARATE temporal frame, not an adjacent part of one panorama; repeated architecture in different tiles is not duplicate geometry. Return ONLY JSON {"pass":true,"issues":[]} or {"pass":false,"issues":[{"sceneId":"supplied id","problem":"visible concrete defect","fix":"specific geometry/part-track/composition repair"}]}.
+CAST DETAIL SHEETS show the SAME immutable generated assets at readable size, in neutral right/left mirrored poses. Use them to assess hair construction, eye shapes, beards, costume and identity; do not infer those details from a few pixels in a wide crowd. Use the chronological FILM frames for actual acting, occlusion, placement and cropping: a good asset sheet cannot excuse a person intersecting a post. Sheet cells are listed left-to-right, top-to-bottom by assetId; they are NOT additional film scenes. A scarf/hat keeps its cloth color in the back view; the black head beneath a conical hat is hair. Never request recoloring cloth as hair or replacing deliberately different native haircuts without a visible defect in the enlarged sheet. Do not invent beard length or color requirements absent from the brief. For an explicit character/model-sheet proof, judge character construction, style, variety and front/back coherence; unchanged incidental native scenery is not the requested artwork. Actual clipping, hidden cast or broken anatomy still fails.
 PERCEPTION IS NOT APPEARANCE: a motion beat saying someone notices an already existing feature may show that feature immediately in the new cut. Only a reveal/hide beat requires a visibility transition; do not invent a shadow or fade requirement. For carried puppet props, physicalEvidence.handOpacity is the actual rendered dot-hand visibility, which overrides raw opacity tracks while holding a visible prop. Do not report a missing hand from raw track opacity when the image and handOpacity show contact.
 SIMPLE-PUPPET EXCEPTION: framingEvidence.rig identifies the user's approved limbless chibi style. These characters have NO sleeves/arms/legs and their circular hands intentionally separate from the body during a reach. Do not call a dot hand detached anatomy or request an elbow/sleeve connection. Check its proximity, actual contact and carried-prop grip instead. motionEvidence.changes gives evaluated min/max transforms, not declared intentions: a root dx range is real translation. Do not report a stationary root when this range changes and the frames show its position changing. Directed 2-4 degree head turns or small eye shifts are valid looks; do not amplify them to repeated large head swings just to satisfy a threshold.
 WIDE ESTABLISHING EXCEPTION: framingEvidence.unzoomedWide identifies an unzoomed view of the complete location. Do NOT apply an acting-shot height threshold to this wide view or fail it solely because the actor is under 30%. Deliberate night sky/foreground space is valid when moon, architecture, feet and action remain readable. Never alternate incompatible repairs that zoom in for actor size and then zoom out for the moon. Other acting shots still require readable performance, and actual missing actions, broken anatomy or invisible clues remain failures.
@@ -164,8 +183,20 @@ export function vectorReviewFrameIndices(times:number[],scene:CanvasStudioScene)
 }
 export function buildVectorRepairContent(project:CanvasStudioProject,issues:VectorReviewIssue[],frames:VectorPreview[]){
   const allowed=new Set(issues.map(issue=>issue.sceneId));
-  const content:Array<Record<string,unknown>>=[{type:'text',text:JSON.stringify({brief:project.sourcePrompt,issues,vectorAssets:project.vectorAssets,
-    scenes:project.scenes.filter(s=>allowed.has(s.id)).map(s=>{const {id,name,durationMs,narration,visualBrief,vectorScene,vectorBeats,vectorDirection,dialogue}=s;const scene={id,name,durationMs,narration,visualBrief,vectorScene,vectorBeats,vectorDirection};return {...scene,physicalEvidence:vectorPhysicalEvidence(s,project.vectorAssets||{}),
+  const approvedIds=new Set(Object.entries(project.vectorAssets||{}).filter(([,a])=>a.nodes.some(n=>n.id===APPROVED_FOLK_STYLE)).map(([id])=>id));
+  // Immutable filled-ink contours are large and cannot be repaired by the AI.
+  // Supply contacts/part transforms and rendered pictures, retaining complete
+  // SVG geometry in the real project and all editable non-character artwork.
+  const vectorAssets=Object.fromEntries(Object.entries(project.vectorAssets||{}).map(([id,a])=>[id,approvedIds.has(id)
+    ?{...a,readOnly:true,sourceSha256:approvedFolkSourceHash,nodes:a.nodes.map(({d,...n})=>n)}:a]));
+  const content:Array<Record<string,unknown>>=[{type:'text',text:JSON.stringify({brief:project.sourcePrompt,issues,vectorAssets,
+    scenes:project.scenes.filter(s=>allowed.has(s.id)).map(s=>{const {id,name,durationMs,narration,visualBrief,vectorScene:fullScene,vectorBeats,vectorDirection,dialogue}=s;
+      const nativeScenery=fullScene&&naturePaintOwners(fullScene);
+      const vectorScene=fullScene?{...fullScene,nodes:fullScene.nodes.map(n=>nativeScenery?.has(n.id)?(({d,...rest})=>({...rest,readOnly:true}))(n):n),tracks:fullScene.tracks.map(t=>{
+        const [owner,part]=t.target.split('/'),instance=fullScene.nodes.find(n=>n.id===owner);
+        return part==='mouth'&&approvedIds.has(instance?.asset||'')?{...t,frames:t.frames.map(({d,...f})=>f)}:t;
+      })}:fullScene;
+      const scene={id,name,durationMs,narration,visualBrief,vectorScene,vectorBeats,vectorDirection};return {...scene,physicalEvidence:vectorPhysicalEvidence(s,project.vectorAssets||{}),
       dialogue:dialogue?.map(({text,atMs,durationMs,speechWindows})=>({text,atMs,durationMs,speechWindows})),
       continuityEvidence:vectorContinuityEvidence(s,project),
       resolvedTracks:scene.vectorScene?.tracks.map(track=>({target:track.target,...vectorTrackTiming(track,s)})),
@@ -197,8 +228,26 @@ function preserveApprovedCastParts(project:CanvasStudioProject,raw:unknown){
   }
   return assets;
 }
-export function applyVectorRedesign(project:CanvasStudioProject,raw:string){
-  const draft=json(raw);
+export function applyVectorRedesign(project:CanvasStudioProject,raw:string,requireApprovedScenery=false){
+  let draft=json(raw);
+  for(const [id,stage] of Object.entries(project.vectorStages||{}))if(stage.nodes.some(n=>n.id===NATURE_SCENERY_VERSION||n.id===SETTING_SCENERY_VERSION)){
+    const next=(draft.vectorStages as Record<string,Record<string,unknown>>|undefined)?.[id];
+    const template=stage.nodes.some(n=>n.id===SETTING_SCENERY_VERSION)?'folk-setting':'nature-landscape';
+    if(next?.template!==template&&!isDeepStrictEqual(JSON.parse(JSON.stringify(next??null)),JSON.parse(JSON.stringify(stage))))
+      throw new Error('Vector: native nature paint is read-only; keep the expanded stage or change nature-landscape descriptors');
+  }
+  const inkLocked=Object.values(project.vectorAssets||{}).some(a=>a.nodes.some(n=>n.id===FOLK_INK_STYLE));
+  if(inkLocked){
+    const incoming=(draft.vectorAssets||{}) as Record<string,unknown>,stages=(draft.vectorStages||{}) as Record<string,unknown>;
+    const kept=Object.fromEntries(Object.entries(stages).filter(([id,s])=>!(requireApprovedScenery&&project.vectorStages?.[id]?.nodes.some(n=>n.id==='illustrated-world'))&&isDeepStrictEqual(JSON.parse(JSON.stringify(s)),JSON.parse(JSON.stringify(project.vectorStages?.[id]??null)))));
+    const changed=Object.fromEntries(Object.entries(stages).filter(([id])=>!(id in kept)));
+    const approvedProject=requireApprovedScenery||Object.values(project.vectorStages||{}).some(s=>s.nodes.some(n=>n.id===NATURE_SCENERY_VERSION||n.id===SETTING_SCENERY_VERSION));
+    draft=json(applySelectedHorrorFinish(JSON.stringify({...draft,vectorAssets:{},vectorStages:changed}),'[folk-horror]',Object.keys(changed).length>0,undefined,approvedProject&&Object.keys(changed).length>0));
+    // Refinement cannot repaint approved assets, including props. New assets
+    // use exactly the same gate as initial creation and local visual repair.
+    draft.vectorAssets=Object.fromEntries(Object.entries(incoming).map(([id,a])=>[id,project.vectorAssets?.[id]??lockFolkInkAsset(a)]));
+    draft.vectorStages={...kept,...(draft.vectorStages||{}) as Record<string,unknown>};
+  }
   // Native extra slots validate their cast during expansion. Resolve retained
   // approved actors before that check, not only during later normalization.
   const retained=preserveApprovedCastParts(project,draft.vectorAssets);
@@ -209,7 +258,16 @@ export function applyVectorRedesign(project:CanvasStudioProject,raw:string){
         draft.vectorAssets={...(draft.vectorAssets||{}) as Record<string,unknown>,[extra.asset]:retained[extra.asset]};
     }
   }
-  const data=expandVectorStageLibrary(draft,project),assets=normalizeVectorAssets(preserveApprovedCastParts(project,data.vectorAssets));
+  const castIds=inkLocked?[...new Set(project.scenes.flatMap(s=>s.vectorDirection?.visibleCast??[]))]:undefined;
+  // A saved native world already contains its unused default cast slot.
+  // Re-expanding a nature descriptor creates that slot again; omit only this
+  // exact retained built-in here, then restore the approved cast below.
+  const expansionAssets={...(draft.vectorAssets||{}) as Record<string,unknown>};
+  if(project.vectorAssets?.['nature-person']&&Object.values((draft.vectorStages||{}) as Record<string,Record<string,unknown>>).some(s=>s.template==='nature-landscape')
+    &&isDeepStrictEqual(expansionAssets['nature-person'],project.vectorAssets['nature-person']))delete expansionAssets['nature-person'];
+  if(project.vectorAssets?.['setting-person']&&Object.values((draft.vectorStages||{}) as Record<string,Record<string,unknown>>).some(s=>s.template==='folk-setting')
+    &&isDeepStrictEqual(expansionAssets['setting-person'],project.vectorAssets['setting-person']))delete expansionAssets['setting-person'];
+  const data=expandVectorStageLibrary({...draft,vectorAssets:expansionAssets},project,castIds),assets=normalizeVectorAssets(preserveApprovedCastParts(project,inkLocked?{...data.vectorAssets as Record<string,unknown>,...project.vectorAssets}:data.vectorAssets));
   const vectorStages=normalizeStages(data.vectorStages,assets,project);
   if(!Array.isArray(data.scenes)||data.scenes.length!==project.scenes.length)throw new Error('Redesign must preserve every shot.');
   const edits=new Map<string,Record<string,unknown>>();
@@ -235,7 +293,7 @@ export function applyVectorRedesign(project:CanvasStudioProject,raw:string){
       vectorBeats:narrationBeats(edit.vectorBeats,normalized,assets,scene.narration||''),...(typeof edit.visualBrief==='string'?{visualBrief:edit.visualBrief.slice(0,1500)}:{})};
   })});
 }
-export function buildVectorReviewContent(project:CanvasStudioProject,frames:VectorPreview[],brief:string,only?:Set<string>){
+export function buildVectorReviewContent(project:CanvasStudioProject,frames:VectorPreview[],brief:string,only?:Set<string>,castDetails:VectorCastDetail[]=[]){
   const scenes=project.scenes.filter(scene=>!only||only.has(scene.id));
   const ids=new Set(scenes.map(scene=>scene.id));
   const content:Array<Record<string,unknown>>=[{type:'text',text:JSON.stringify({brief,scenes:scenes.map(scene=>({id:scene.id,name:scene.name,narration:scene.narration,visualBrief:scene.visualBrief,vectorStageId:scene.vectorStageId,vectorBeats:scene.vectorBeats,vectorDirection:scene.vectorDirection,sampleTimes:frames.find(f=>f.sceneId===scene.id)?.times,physicalEvidence:vectorPhysicalEvidence(scene,project.vectorAssets||{}),framingEvidence:vectorFramingEvidence(scene,project.vectorAssets||{}),motionEvidence:vectorMotionEvidence(scene),ensembleEvidence:vectorEnsembleCoverage(scene,project.vectorAssets||{})}))})}];
@@ -243,6 +301,12 @@ export function buildVectorReviewContent(project:CanvasStudioProject,frames:Vect
   content.push({type:'text',text:JSON.stringify({shotSubjects:scenes.map(scene=>({sceneId:scene.id,subjects:scene.vectorDirection?[...new Set([scene.vectorDirection.shot.focus,...scene.vectorDirection.shot.include])].map(id=>({id,samples:[.3,.65,.95].map(t=>vectorShotVisibility(scene,project.vectorAssets||{},id,t*scene.durationMs))})):[]}))})});
   content.push({type:'text',text:JSON.stringify({actorContinuity:scenes.map(scene=>({sceneId:scene.id,...vectorContinuityEvidence(scene,project)}))})});
   content.push(...vectorStyleReferenceContent(project.vectorStyleReferences));
+  for(const detail of castDetails){
+    content.push({type:'text',text:JSON.stringify({kind:'ACTUAL CAST DETAIL SHEET - NOT A FILM SHOT',view:detail.view,
+      cells:detail.assetIds.map((assetId,i)=>({assetId,row:Math.floor(i/4)+1,column:i%4+1,
+        instances:scenes.flatMap(s=>s.vectorScene?.nodes.filter(n=>n.asset===assetId).map(n=>({sceneId:s.id,actorId:n.id}))||[])}))})});
+    content.push({type:'image_url',image_url:{url:detail.imageUrl,detail:'high'}});
+  }
   for(const frame of frames.filter(frame=>ids.has(frame.sceneId)))content.push(...previewImages(frame));
   return {scenes,content};
 }
@@ -300,6 +364,7 @@ export function vectorContinuityEvidence(scene:CanvasStudioScene,project:CanvasS
 }
 
 export function vectorScreenplayCorrection(error:unknown){
+  if(String(error).includes('Screenplay needs location'))return `Repair the saved screenplay without changing its shots, narration, timing, beats or requested scenery. The location field is a STABLE STAGE ID, not a scene description or template options. Every shot.location must contain only letters, digits, underscore or hyphen, at most 100 characters: for example village-day, village-dusk, forest-night. Never put spaces, colons, template descriptors or full sentences in location. Keep all place/light/seed/atmosphere/smoke requirements in purpose instead. Use the same short ID for shots sharing the same world state. Return the complete corrected JSON.`;
   return `Repair the saved screenplay, preserving its story and all user events. Validation: ${String(error)}. Return complete JSON, not commentary. Check ALL shots now, not only the first reported beat. Every compact whole-body turn needs turn:{actor,from:"right",to:"left"} or the reverse (back for a rear view), with actor/upper-body in motionTargets. Keep the chosen facing through later shots; front and right are equivalent. Every compact travel needs travel:{actor,to,gap:80,followDepth:true}, its actor root in motionTargets and destination in targets; cue it at the spoken walking phrase, not the stop. Fear uses fear:{actor,level:"terrified"} with the actual face/body/sweat parts. An actor disappearing needs its own hide beat at a spoken phrase, not merely another person trembling. Every background visit needs a registered partner. Keep heldProps/propEvents/visibleCast on every shot. Narration must be natural Vietnamese WITH diacritics, never technical drawing instructions.`;
 }
 export function vectorMotionEvidence(scene:CanvasStudioScene){
@@ -361,7 +426,8 @@ function resolveStage(raw:unknown,stages:CanvasStudioProject['vectorStages'],ass
   const authored=(d.tracks as Array<{target?:unknown;frames?:Array<Record<string,unknown>>}>||[]);
   // Compile physical commands before merging stage channels. Otherwise a native
   // walk/light/reaction can conflict with the stage's quiet resting animation.
-  const compiled=normalizeVectorScene({...base,...d,camera:undefined,shot:undefined,nodes:[...base.nodes,...additions],tracks:authored},assets);
+  const ground=d.ground&&typeof d.ground==='object'&&!Array.isArray(d.ground)?{...base.ground,...d.ground}:d.ground??base.ground;
+  const compiled=normalizeVectorScene({...base,...d,ground,camera:undefined,shot:undefined,nodes:[...base.nodes,...additions],tracks:authored},assets);
   return {...compiled,stage:d.stage,...(d.camera!==undefined?{camera:d.camera}:{}),...(d.shot!==undefined?{shot:d.shot}:{}),tracks:mergeRepairTracks(base.tracks,compiled.tracks)};
 }
 function mergeRepairTracks(base:VectorTrack[],updates:VectorTrack[]):VectorTrack[]{
@@ -405,7 +471,7 @@ function stagePlannedPerformance(raw:unknown,stage:CanvasVectorScene,assets:NonN
     const authoredActors=new Set(planned.map(b=>b.travel!.actor));
     d.tracks=((d.tracks||[]) as VectorTrack[]).filter(t=>!authoredActors.has(t.target)||t.cue!==undefined&& !planned.some(b=>b.cue===t.cue));
   }
-  const world=normalizeVectorDrawing({...stage,nodes:[...stage.nodes,...(d.nodes||[]) as unknown[]]});
+  const world=normalizeVectorDrawing({...stage,nodes:[...stage.nodes,...(d.nodes||[]) as unknown[]]},MAX_SCENE_NODES);
   const rows:Array<Record<string,unknown>>=[],strikes:Array<Record<string,unknown>>=[];
   for(const beat of direction.beats){
     if(!['row','strike'].includes(beat.kind))continue;
@@ -436,6 +502,26 @@ function stagePlannedPerformance(raw:unknown,stage:CanvasVectorScene,assets:NonN
 }
 /** Visual review repairs only named nodes/channels. Unmentioned camera,
  * anatomy, acting and context survive instead of being regenerated. */
+function naturePaintOwners(scene:CanvasVectorScene):Set<string>{
+  const owned=new Set<string>();
+  if(!scene.nodes.some(n=>n.id===NATURE_SCENERY_VERSION||n.id===SETTING_SCENERY_VERSION))return owned;
+  const parents=new Map(scene.nodes.map(n=>[n.id,n.parent]));
+  for(const n of scene.nodes)if(n.id.startsWith('scenery-')||['sky','physical-ground-plane',NATURE_SCENERY_VERSION,SETTING_SCENERY_VERSION].includes(n.id)){
+    let id:string|undefined=n.id;
+    while(id&&!owned.has(id)){owned.add(id);id=parents.get(id);}
+  }
+  return owned;
+}
+function preserveNaturePaint(before:CanvasVectorScene,after:CanvasVectorScene){
+  for(const id of naturePaintOwners(before)){
+    const original=before.nodes.find(n=>n.id===id)!,next=after.nodes.find(n=>n.id===id);
+    // Semantic owners may perform mist/foliage actions; their paint and
+    // hierarchy remain native. Composition changes use grammar descriptors.
+    const paint=(n:VectorNode)=>Object.fromEntries(Object.entries(n).filter(([key])=>!['opacity'].includes(key)));
+    if(!next||!isDeepStrictEqual(paint(original),paint(next)))
+      throw new Error('Vector: native nature paint is read-only: '+id+'; repair motion/camera or use nature-landscape descriptors');
+  }
+}
 function patchVectorScene(base:CanvasVectorScene,raw:unknown,assets:NonNullable<CanvasStudioProject['vectorAssets']>,spoken:string,context?:CanvasStudioScene):CanvasVectorScene{
   if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new Error('Vector: invalid scene patch');
   const patch=raw as Record<string,unknown>;
@@ -460,8 +546,25 @@ function patchVectorScene(base:CanvasVectorScene,raw:unknown,assets:NonNullable<
   for(const raw of (patch.nodes||[]) as unknown[]){
     if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new Error('Vector: invalid patched node');
     const node=raw as CanvasVectorScene['nodes'][number];
-    if(typeof node.id!=='string'||updated.has(node.id)||removals.includes(node.id))throw new Error('Vector: invalid or duplicate patched node identity');
+    if(typeof node.id!=='string'||updated.has(node.id))throw new Error('Vector: invalid or duplicate patched node identity');
+    // A node the patch also removes is already gone; its stale update is
+    // moot, not a reason to reject the whole repair. Removal wins.
+    if(removals.includes(node.id))continue;
     updated.add(node.id);
+    if(node.id.includes('/')){
+      const [ownerId,partId,...extra]=node.id.split('/'),owner=nodes.find(n=>n.id===ownerId&&n.type==='instance');
+      const asset=assets[owner?.asset||''];
+      if(extra.length||!owner||!asset?.nodes.some(n=>n.id===partId))throw new Error(`Vector: unknown instance part ${node.id}`);
+      // Paint corrections belong to this prop instance, never its shared
+      // source asset or cast. Content IDs make cached repair replay idempotent.
+      if(asset.nodes.some(n=>n.id==='head-group'||n.id==='puppet-root')||Object.keys(node).some(k=>!['id','fill','stroke','strokeWidth','opacity'].includes(k)))
+        throw new Error(`Vector: ${node.id} part patches support prop paint only; use tracks for acting, and preserve cast assets`);
+      const {id:ignoredId,...paint}=node;
+      const view=normalizeVectorDrawing({...asset,nodes:asset.nodes.map(n=>n.id===partId?{...n,...paint}:n)});
+      const assetId='prop-view-'+createHash('sha256').update(JSON.stringify(view)).digest('hex');
+      assets[assetId]=view;owner.asset=assetId;
+      continue;
+    }
     const index=nodes.findIndex(n=>n.id===node.id);
     // A model may copy an unchanged native support under a new context ID.
     // Repainting that opaque path at the end covers the actors. Keep the ID
@@ -510,16 +613,36 @@ function narrationBeats(raw:unknown,scene:ReturnType<typeof normalizeVectorScene
   const targets=vectorTargets(scene,assets);
   if(!Array.isArray(raw)||raw.length>16)throw new Error('Vector: invalid narration beats');
   return raw.map(value=>{
-    const b=value as Record<string,unknown>;
+    const b={...value as Record<string,unknown>};
+    // A named scene group has a flat global ID. Accept its full verified
+    // ancestry as shorthand, without inventing a target or changing any art.
+    if(Array.isArray(b.targets))b.targets=b.targets.map(target=>{
+      if(typeof target!=='string'||targets.has(target))return target;
+      const chain=target.split('/');let node=scene.nodes.find(n=>n.id===chain.at(-1));
+      if(chain.length<2||chain.length>32||!node)return target;
+      for(let i=chain.length-2;i>=0;i--){if(node?.parent!==chain[i])return target;node=scene.nodes.find(n=>n.id===chain[i]);}
+      return chain.at(-1)!;
+    });
     // A directed beat combines up to eight participants and sixteen moving parts.
     if(!b||typeof b.cue!=='string'||!b.cue.trim()||!spoken.includes(b.cue)||!Array.isArray(b.targets)||!b.targets.length||b.targets.length>24||b.targets.some(t=>typeof t!=='string'||!targets.has(t)))throw new Error(`Vector: narration beat must name spoken words and existing targets; cue=${String(b?.cue)}, missing=${Array.isArray(b?.targets)?b.targets.filter(t=>typeof t!=='string'||!targets.has(t)).join(', '):'targets'}`);
     return {cue:b.cue,targets:b.targets as string[]};
   });
 }
 
-export function parseVectorPlan(raw:string,brief:string,size:{width:number;height:number},targetSeconds?:number,story?:VectorStory):CanvasStudioProject{
-  const authored=json(raw);if(story)assertVectorStoryFilm(authored,story);
-  const data=expandVectorStageLibrary(authored,size),assets=normalizeVectorAssets(data.vectorAssets);
+export function vectorPlanCorrection(error:unknown):string{
+  const reason=error instanceof Error?error.message:String(error);
+  const anchor=/Vector: ([a-zA-Z0-9_-]+) needs a grounded anchor on the same surface/.exec(reason);
+  const travel=/Vector: invalid puppet travel ([a-zA-Z0-9_-]+) to ([a-zA-Z0-9_-]+)/.exec(reason);
+  const bounds=/Vector: shot context ([a-zA-Z0-9_-]+) needs finite local bounds/.exec(reason);
+  return `Validation error: ${reason}. Fix only this failure. Preserve the locked screenplay, all vectorAssets, existing scenery geometry and IDs; do not simplify or redesign the artwork.`+
+    (anchor?` The destination ${anchor[1]} must share the actor's ground parent. Declare its actual local base anchor in vectorStages ground.targets or vectorScene ground.targets: {target:"${anchor[1]}",anchor:{x:LOCAL_BASE_X,y:LOCAL_BASE_Y}}. Native stages inherit their existing surface y/parent. For an object intentionally placed at a different depth, set its groundOffsetY so its authored x/y and current base position remain unchanged. Do not guess the anchor or move the scenery to the actor.`:'')+
+    (travel?` LAYOUT EXCEPTION: screenplay travel owns gap, actor and destination; changing vectorScene.walks.gap will be ignored. For this new drawing, adjust ONLY the initial x/y placement of the destination ${travel[2]} in its shared vectorStages nodes so ${travel[1]} has enough distance to approach with the locked gap. Keep the destination outline, scale, asset and identity unchanged, and reuse this one placement in every cut. Do not redraw people, move a whole native world or introduce a backward forward-walk.`:'')+
+    (bounds?` Add ONLY bounds metadata to the existing ${bounds[1]} node, covering its actual children including any negative local coordinates. This field measures framing and does not move, clip or redraw the group. Keep its groundAnchor unchanged.`:'');
+}
+
+export function parseVectorPlan(raw:string,brief:string,size:{width:number;height:number},targetSeconds?:number,story?:VectorStory,approvedScenery=false):CanvasStudioProject{
+  const authored=json(applySelectedHorrorFinish(raw,brief,Boolean(story),story?.cast[0]?.id,approvedScenery));if(story)assertVectorStoryFilm(authored,story);
+  const data=expandVectorStageLibrary(authored,size,story?.cast.map(c=>c.id)),assets=normalizeVectorAssets(data.vectorAssets);
   if(!Array.isArray(data.scenes)||!data.scenes.length||data.scenes.length>100)throw new Error('Vector film needs 1-100 complete shots');
   const stages=normalizeStages(data.vectorStages,assets,size);
   const now=new Date().toISOString();
@@ -608,7 +731,16 @@ export function parseVectorReview(raw:string,project:CanvasStudioProject){
 export function applyVectorRepairs(project:CanvasStudioProject,raw:string,allowed:Set<string>):CanvasStudioProject{
   const data=json(raw);
   if(!Array.isArray(data.scenes)||!data.scenes.length)throw new Error('Visual repair omitted the failed scenes');
-  const additions=normalizeVectorAssets(data.newAssets);
+  const inkLocked=Object.values(project.vectorAssets||{}).some(a=>a.nodes.some(n=>n.id===FOLK_INK_STYLE));
+  const rawAdditions=data.newAssets as Record<string,unknown>|undefined;
+  const additions=normalizeVectorAssets(inkLocked&&rawAdditions?Object.fromEntries(Object.entries(rawAdditions).map(([id,asset])=>{
+    const retained=project.vectorAssets?.[id],expanded=asset as {nodes?:Array<{id?:string}>};
+    // Replay may contain the original descriptor, or persisted expanded art.
+    // Apply the same creation policy only to a descriptor of a locked asset.
+    const alreadyExpanded=Array.isArray(expanded?.nodes)&&expanded.nodes.some(n=>n.id===FOLK_INK_STYLE);
+    const locked=retained?.nodes.some(n=>n.id===FOLK_INK_STYLE);
+    return [id,!retained||locked&&!alreadyExpanded?lockFolkInkAsset(asset):asset];
+  })):rawAdditions);
   for(const key of Object.keys(additions))if(project.vectorAssets?.[key]){
     // Checkpoints omit undefined optional fields; compare persisted geometry.
     if(!isDeepStrictEqual(JSON.parse(JSON.stringify(project.vectorAssets[key])),JSON.parse(JSON.stringify(additions[key]))))throw new Error('Visual repair may not replace a shared cast asset; add a new view instead');
@@ -628,9 +760,36 @@ export function applyVectorRepairs(project:CanvasStudioProject,raw:string,allowe
     if(edit.vectorScenePatch!==undefined&&edit.vectorScene!==undefined)throw new Error('Vector: choose a scene patch or full replacement');
     const nested=edit.vectorScenePatch as Record<string,unknown>|undefined;
     const {vectorBeats:nestedBeats,...geometryPatch}=nested||{};
+    // An empty establishing shot has no actor to frame. The generic repair
+    // example used to target the invisible default person, zooming a correct
+    // wide landscape by 2x. A descriptive "reveal the market" also faded its
+    // architecture into existence. Keep the established set/camera; local
+    // weather, props and light sources remain animatable.
+    const emptyWide=scene.vectorDirection?.shot.size==='wide'&&scene.vectorDirection.visibleCast?.length===0
+      &&scene.vectorScene!.nodes.some(n=>n.id===NATURE_SCENERY_VERSION||n.id===SETTING_SCENERY_VERSION);
+    if(emptyWide){
+      const fixed=new Set(['nature-world','folk-setting-world','terrain','forest-backdrop','village','market','built-layout','furniture-layout']);
+      const protectedTarget=(id:string)=>/^camera-world(?:-\d+)?$/.test(id)||fixed.has(id)
+        &&!scene.vectorDirection!.beats.some(b=>b.kind==='hide'&&b.motionTargets.includes(id));
+      delete geometryPatch.shot;delete geometryPatch.camera;
+      for(const key of ['nodes','tracks'] as const)if(Array.isArray(geometryPatch[key]))
+        geometryPatch[key]=(geometryPatch[key] as Array<{id?:string;target?:string}>).filter(n=>!protectedTarget(String(key==='nodes'?n.id:n.target)));
+      if(Array.isArray(geometryPatch.removeTracks))geometryPatch.removeTracks=geometryPatch.removeTracks.filter(id=>!protectedTarget(String(id)));
+    }
+    if(naturePaintOwners(scene.vectorScene!).size){
+      const additions=(geometryPatch.nodes??(edit.vectorScene as {nodes?:unknown[]}|undefined)?.nodes??[]) as VectorNode[];
+      if(additions.some(n=>n.type!=='group'&&!n.id.includes('/')&&!scene.vectorScene!.nodes.some(old=>old.id===n.id)))
+        throw new Error('Vector: native nature paint is read-only; approved scenery repair cannot add raw painted overlays; reuse native objects or redesign supported stage.objects on a real support');
+    }
+    if(inkLocked&&Array.isArray(geometryPatch.nodes))geometryPatch.nodes=geometryPatch.nodes.map(node=>{
+      const n=node as VectorNode;
+      const previous=scene.vectorScene!.nodes.find(old=>old.id===n.id);
+      return !n.type&&!n.d?n:handInkDrawing({nodes:[{...n,type:n.type??previous?.type}]} as VectorDrawing,false,true).nodes[0];
+    });
     const drawing=edit.vectorScenePatch!==undefined?
       patchVectorScene(scene.vectorScene!,geometryPatch,assets,scene.narration||'',scene):
       normalizeVectorScene(resolveStage(edit.vectorScene,project.vectorStages,assets),assets,scene.narration||'');
+    preserveNaturePaint(scene.vectorScene!,drawing);
     if(drawing.width!==project.width||drawing.height!==project.height)throw new Error('Visual repair changed frame orientation');
     // Preserve narrated visibility/light events. A holding-arm pose is free to
     // become steady while the lamp itself still visibly extinguishes.
@@ -672,43 +831,71 @@ export function vectorStoryCapabilities(brief:string){
     &&/\b(?:tu tren xuong|tren cao|elevated|high.angle)\b/.test(words);
   return {compactCast:compact&&!explicitHuman,nativePerson:/\billustrated-place\b/iu.test(brief)||elevatedVillage};
 }
-/** Selected horror recipes must affect NEW generated artwork even when a
- * provider omits the optional finish. Explicit finish=clean, custom SVG assets,
- * and already-saved projects remain untouched. Never add anatomy here. */
-export function applySelectedHorrorFinish(raw:string,brief:string):string{
+/** The recipe owns NEW artwork style, including provider omissions/overrides.
+ * Saved expanded project assets do not pass through this creation boundary. */
+export function applySelectedHorrorFinish(raw:string,brief:string,nativeWorlds=false,leadActorId='person',approvedScenery=false):string{
   if(!/\[(?:folk-horror|ma-xo)\]/iu.test(brief))return raw;
   const draft=json(raw);
-  const assets=draft.vectorAssets;
-  if(assets&&typeof assets==='object'&&!Array.isArray(assets))
-    for(const asset of Object.values(assets as Record<string,unknown>)){
-      if(asset&&typeof asset==='object'&&!Array.isArray(asset)){
-        const a=asset as Record<string,unknown>;
-        if(a.rig==='simple-puppet'){
-          if(a.finish===undefined)a.finish='handdrawn';
-          if(a.finish==='handdrawn'&&a.design===undefined)a.design='village';
-        }
-      }
+  if(approvedScenery){
+    const worlds=draft.vectorStages as Record<string,Record<string,unknown>>|undefined;
+    const allowed=['nature-landscape','folk-setting','folk-courtyard','folk-river-boat'];
+    if(!worlds||!Object.keys(worlds).length||Object.values(worlds).some(s=>!s||!allowed.includes(String(s.template))))
+      throw new Error('Vector: NEW folk scenery must use nature-landscape (forest, bamboo, pine, river, clearing, waterfall; select terrain/water/vegetation/light/seed) or folk-setting (place:market/village/street/room/corridor/riverside; light/seed/composition), approved folk-courtyard, or folk-river-boat for a boat story. illustrated-place, folk-room, folk-riverbank and raw full-scene SVG are legacy paths, not new approved scenery. Keep cast, screenplay IDs and narration. Replace the old descriptor AND discard its redrawn mountains/trees/buildings/tables/rectangles; these already exist natively. Use native object IDs, or add a distinct story prop with objects:[{id,asset,support:"floor"|"table"|"stall-left"|"stall-right",height:60,at:0}]. Do not transplant old screen-coordinate drawings into the new world.');
+    for(const world of Object.values(worlds))if(['nature-landscape','folk-setting'].includes(String(world.template)))world.sceneryPolicy='approved-v1';
+    for(const scene of (draft.scenes||[]) as Array<{vectorScene?:{stage?:string;nodes?:unknown[]}}>){
+      if(worlds[scene.vectorScene?.stage||'']?.sceneryPolicy==='approved-v1'&&scene.vectorScene?.nodes?.length)
+        throw new Error('Vector: new approved scenery has no raw per-shot overlays. Reuse native objects or declare supported objects in the shared stage; keep all animation in tracks/native commands.');
     }
+  }
+  if(nativeWorlds){
+    const worlds=draft.vectorStages as Record<string,{template?:unknown}>|undefined;
+    if(!worlds||!Object.keys(worlds).length||Object.values(worlds).some(s=>!s?.template))
+      throw new Error('Vector: folk-ink production requires a native scenery base for every world: use illustrated-place (village/forest/waterside/street/corridor/rural-interior), folk-courtyard, folk-room or folk-riverbank. Retain vectorAssets and narration unchanged. Replace only the raw scenery base with the matching native template; keep original story props as stage additions and put recurring cast instances in that shared stage. Use cast and extras bindings with the locked screenplay IDs. Do not redraw the cast or drop story objects.');
+  }
+  const assets=draft.vectorAssets;
+  if(assets&&typeof assets==='object'&&!Array.isArray(assets)){
+    const leadAssets=new Set<string>();
+    for(const world of Object.values((draft.vectorStages||{}) as Record<string,{cast?:Record<string,unknown>;nodes?:VectorNode[]}>)){
+      const asset=world.cast?.person??world.cast?.lam;if(typeof asset==='string')leadAssets.add(asset);
+      for(const node of world.nodes||[])if(node.id===leadActorId&&node.asset)leadAssets.add(node.asset);
+    }
+    for(const scene of (draft.scenes||[]) as Array<{vectorScene?:{nodes?:VectorNode[]}}>){
+      for(const node of scene.vectorScene?.nodes||[])if(node.id===leadActorId&&node.asset)leadAssets.add(node.asset);
+    }
+    draft.vectorAssets=lockFolkInkCast(assets as Record<string,unknown>,leadAssets);
+  }
   const stages=draft.vectorStages;
   if(stages&&typeof stages==='object'&&!Array.isArray(stages))
     for(const stage of Object.values(stages as Record<string,unknown>)){
       if(stage&&typeof stage==='object'&&!Array.isArray(stage)){
         const s=stage as Record<string,unknown>;
-        if(s.template==='illustrated-place'&&s.finish===undefined)s.finish='handdrawn';
+        if(s.template!==undefined)s.artStyle=FOLK_INK_STYLE;
+        if(s.template==='illustrated-place')s.finish='handdrawn';
         if(s.template==='illustrated-place'&&s.finish==='handdrawn'&&s.place==='village'&&s.view===undefined)s.view='elevated';
+        if(Array.isArray(s.nodes))s.nodes=handInkDrawing({nodes:s.nodes} as VectorDrawing,false,true).nodes;
+        if(s.template===undefined&&Array.isArray(s.nodes))s.nodes=handInkDrawing(s as unknown as VectorDrawing).nodes;
       }
     }
+  if(Array.isArray(draft.scenes))for(const scene of draft.scenes as Array<{vectorScene?:VectorDrawing}>){
+    const drawing=scene.vectorScene;if(drawing&&Array.isArray(drawing.nodes))drawing.nodes=handInkDrawing(drawing,false,true).nodes;
+  }
   return JSON.stringify(draft);
 }
 const pending=new Map<string,Promise<CanvasStudioProject>>();
 const MAX_VISUAL_REPAIRS=1;
+export function vectorNeedsSceneryUpgrade(project:CanvasStudioProject|undefined,brief:string){
+  return Boolean(project&&/\[(?:folk-horror|ma-xo)\]/iu.test(brief)&&project.scenes.some(s=>s.vectorScene?.nodes.some(n=>n.id==='illustrated-world')));
+}
 export async function generateCodeVectorVideo(input:CanvasAnimationGenerateInput){
+  // The UI reuses a project when Generate is clicked with the same brief.
+  // Upgrade only obsolete scenery, retaining the approved cast and audio.
+  if(vectorNeedsSceneryUpgrade(input.project,input.brief))input={...input,refineVisuals:true};
   input={...input,referenceImages:normalizeVectorReferenceImages(input.referenceImages??input.project?.vectorStyleReferences)};
   if(!input.referenceImages?.length)input={...input,referenceImages:await defaultVectorStyleReferences(input.brief)};
   if(input.refineVisuals&&!input.project)throw new Error('Visual redesign needs the retained project.');
-  const key=createHash('sha256').update(VECTOR_DIRECTOR_CONTRACT).update(VECTOR_REVIEW_CONTRACT).update(VECTOR_STORY_CONTRACT).update(vectorStageLibrarySignature).update(JSON.stringify({engine:'remotion-svg-v5-screenplay-direction',maxRepairs:MAX_VISUAL_REPAIRS,references:input.referenceImages,refineVisuals:input.refineVisuals,brief:input.brief,model:input.model,provider:input.provider.id,
+  const key=createHash('sha256').update(VECTOR_DIRECTOR_CONTRACT).update(VECTOR_REVIEW_CONTRACT).update(VECTOR_STORY_CONTRACT).update(vectorStageLibrarySignature).update(JSON.stringify({engine:'remotion-svg-v5-screenplay-direction',repairPolicy:'native-empty-wide-v1',maxRepairs:MAX_VISUAL_REPAIRS,references:input.referenceImages,refineVisuals:input.refineVisuals,brief:input.brief,model:input.model,provider:input.provider.id,
     retained:input.project?{id:input.project.id,assets:input.project.vectorAssets,scenes:input.project.scenes.map(s=>({id:s.id,narration:s.narration,vectorScene:s.vectorScene}))}:undefined,
-    width:input.width,height:input.height,target:input.targetDurationSeconds,narration:{provider:input.narration.provider.id,model:input.narration.model,voice:input.narration.voice,speed:input.narration.speed}})).digest('hex');
+    width:input.width,height:input.height,target:input.targetDurationSeconds,audioEnabled:input.audioProduction?.enabled!==false,narration:{provider:input.narration.provider.id,model:input.narration.model,voice:input.narration.voice,speed:input.narration.speed}})).digest('hex');
   const existing=pending.get(key);if(existing)return existing;
   const task=generate(input,key).finally(()=>pending.delete(key));pending.set(key,task);return task;
 }
@@ -727,8 +914,10 @@ async function generate(input:CanvasAnimationGenerateInput,key:string):Promise<C
     project=compileVectorProject({...input.project,vectorReview:undefined});
   }
   const sourceSignature=await animationRenderSourceSignature(fileURLToPath(new URL('../..',import.meta.url)));
+  let reviewSourceMatches=false;
   try{
     const saved=JSON.parse(await readFile(checkpoint,'utf8'));
+    reviewSourceMatches=saved.sourceSignature===sourceSignature;
     redesigned=saved.redesigned===true;
     // Stricter writing capabilities apply before drawing, never invalidate a
     // retained illustrated/voiced project from an earlier engine version.
@@ -777,25 +966,40 @@ async function generate(input:CanvasAnimationGenerateInput,key:string):Promise<C
       }
       messages.push({role:'user',content:`LOCKED SCREENPLAY: ${JSON.stringify(story)}\nIllustrate this approved writing plan, not a new story. Return every shot in this exact order, with its exact id, narration and durationMs. Each vectorScene.stage must equal its location ID; define that shared world once in vectorStages. Keep all named participants and motionTargets with these exact IDs. Implement EVERY beat with real cue-linked tracks or native commands. Do not use blinks or head turns to stand in for rowing, boarding, striking, payment or arrival. Preserve the ending's required setting and objects. For row and strike use the native rows/strikes commands. No duplicate rotation tracks on their controlled parts. Use dark wet sole silhouettes, not glowing mint dots. Neutral mouths by default, brief fear when justified. The engine frames actor action shots from this screenplay's focus and included partners/props. For a physical startle use a native reaction with a connected defensive arm and visible mouth/brow changes; articulated walking must follow planted steps; compact puppets use native walks with continuous whole-cutout progress, repeating small linked sway/lift during travel and a stable stop; head and occupied hands follow the body, with no articulated legs or mandatory idle cloth/hair wobble. Draw complete actors with grounded feet in supported middle-depth sets.`});
       let response:string|undefined,planError:string|undefined;
-      try{response=await readFile(path.join(directory,'response.txt'),'utf8');project=parseVectorPlan(applySelectedHorrorFinish(response,input.brief),input.brief,{width,height},target,story);}catch(error){if(response)planError=String(error);}
+      messages.push({role:'user',content:'For a story object drawn as a group, declare bounds:{x:localLeft,y:localTop,width,height} covering its children, including negative local coordinates. This is framing metadata, not a clip or transform. Declare its groundAnchor separately at its actual base. Never infer width from a centered groundAnchor.x=0.'});
+      const retainInvalid=async(error:unknown)=>{
+        planError=vectorPlanCorrection(error);
+        await writeFile(path.join(directory,`drawing-invalid-${randomUUID()}.json`),JSON.stringify({error:String(error),raw:response},null,2));
+      };
+      try{response=await readFile(path.join(directory,'response.txt'),'utf8');project=parseVectorPlan(response,input.brief,{width,height},target,story,true);}catch(error){if(response)await retainInvalid(error);}
+      // Parser fixes can recover an earlier unchanged provider response.
+      // Reuse it before spending another request or discarding its screenplay.
+      if(!project)for(const file of (await readdir(directory)).filter(name=>/^drawing-invalid-.*\.json$/.test(name)).sort()){
+        try{
+          const candidate=JSON.parse(await readFile(path.join(directory,file),'utf8')).raw;
+          if(typeof candidate!=='string')continue;
+          const recovered=parseVectorPlan(candidate,input.brief,{width,height},target,story,true);
+          response=candidate;project=recovered;await writeFile(path.join(directory,'response.txt'),candidate);break;
+        }catch{/* Invalid historical drawings remain preserved. */}
+      }
       for(let attempt=0;!project&&attempt<3;attempt++){
-        if(response)messages.push({role:'user',content:`The prior JSON could not be rendered. ${planError?`Validation error: ${planError}. `:''}Correct the complete film, using ONLY the documented geometry and fields. Prior response: ${response}`});
+        if(response)messages.push({role:'user',content:`The prior JSON could not be rendered. ${planError||''} Return the complete corrected film, using ONLY the documented geometry and fields. Prior response: ${response}`});
         response=await chat(input.provider,input.model,messages,AbortSignal.timeout(600000),budget);
         await writeFile(path.join(directory,'response.txt'),response);
-        try{project=parseVectorPlan(applySelectedHorrorFinish(response,input.brief),input.brief,{width,height},target,story);}catch(error){planError=String(error);messages.push({role:'user',content:`Validation error: ${planError}. Fix this exact failure without dropping the story or its ending.`});}
+        try{project=parseVectorPlan(response,input.brief,{width,height},target,story,true);}catch(error){await retainInvalid(error);}
       }
-      if(!project)throw new Error('AI chưa tạo được bản vẽ vector hợp lệ; phản hồi đã được lưu để tiếp tục.');
+      if(!project)throw new Error(`AI chưa tạo được bản vẽ vector hợp lệ; phản hồi đã được lưu để tiếp tục. ${planError||''}`);
       await save('planned');
     }
     if(input.refineVisuals&&!redesigned){
       const approvedCastModels=Object.entries(project.vectorAssets||{}).filter(([,asset])=>asset.nodes.some(n=>['head-group','face','puppet-root'].includes(n.id))).slice(0,12).map(([assetId,asset])=>({
-        assetId,width:asset.width,height:asset.height,styleFeatures:asset.nodes.map(n=>({...n})),
+        assetId,width:asset.width,height:asset.height,readOnly:true,styleFeatures:asset.nodes.map(n=>asset.nodes.some(p=>p.id===APPROVED_FOLK_STYLE)?(({d,...rest})=>rest)(n):{...n}),
       }));
       const content:Array<Record<string,unknown>>=[{type:'text',text:JSON.stringify({brief:input.brief,frame:{width,height},approvedCastModels,
-        scenes:project.scenes.map(({id,name,durationMs,narration,visualBrief})=>({id,name,durationMs,narration,visualBrief}))})}];
+        scenes:project.scenes.map(({id,name,durationMs,narration,visualBrief,vectorStageId,vectorDirection})=>({id,name,durationMs,narration,visualBrief,vectorStageId,vectorDirection}))})}];
       for(const url of input.referenceImages||[])content.push({type:'image_url',image_url:{url,detail:'high'}});
       let response:string|undefined;
-      try{response=await readFile(path.join(directory,'redesign.txt'),'utf8');project=applyVectorRedesign(project,response);}catch{response=undefined;}
+      try{response=await readFile(path.join(directory,'redesign.txt'),'utf8');project=applyVectorRedesign(project,response,true);}catch{response=undefined;}
       const redesignMessages:Parameters<typeof chat>[2]=[{role:'system',content:VECTOR_DIRECTOR_CONTRACT+'\nIMPROVE ARTWORK WITHOUT CHANGING THE APPROVED CHARACTER STYLE. User-uploaded images, the existing cast asset and selected recipe have priority. If the story takes place on an existing night boat, reuse the documented folk-river-boat geometry and native contacts; otherwise use the actual location in the story. Do not force a generic brown robe, a replacement head/body ratio, another hairstyle, or a river/boat prop into an unrelated film. Return {"vectorAssets":{...reuse existing approved simple-puppet assets unchanged; other non-character assets may improve...},"vectorStages":{...complete unframed worlds...},"scenes":[{"id":"existing UUID","vectorBeats":[...updated narration cues and targets...],"visualBrief":"updated acting","vectorScene":{"stage":"world-id","shot":{"target":"actor-instance","height":0.45},"tracks":[...]}}]}. Keep ALL shot IDs, narration, durations and audio unchanged. Match the supplied visual references and previously approved cast identity: preserve head/body ratio, clothing construction, hair silhouette, facial anatomy, stylization, expressive language, and outline weight while improving workmanship. Never interpret this as permission to redesign the cast. Make the drawings at least as clear and well-composed as the reference style. Use rounded, curved anatomy, not spiky geometric wedges. Reuse the SAME approved original character asset across establishing and acting shots. Animate supported pose parts, concealed pivots and small hands rather than swapping to an exposed long-limbed doll or drawing an unrelated body. For quadrupeds, use a horizontal torso, short neck, readable muzzle and four grounded legs. Do not stretch a neck into a giraffe. Keep action shots contextual: full puppets around 30-40% of frame height, with partner, hands, prop and setting visible. A reaction defaults to a contextual view; only explicit shot.framing close requests a closer full-body composition. Reserve tight detail inserts for a specific narrated clue. Existing approved simple-puppet assets are immutable during scene refinement: return them unchanged; improve staging and scenery instead. Night silhouettes need readable filled shapes and edge contrast, no spotlight blobs. Fill the stage with meaningful landscape/architecture instead of leaving half the picture empty. Show preparation, action and the resulting pose. Follow the actual story, including a clear ending.'},{role:'user',content}];
       // Redesign has the same bounded validation recovery as initial planning.
       // A malformed provider reply must not discard retained narration/audio.
@@ -803,17 +1007,17 @@ async function generate(input:CanvasAnimationGenerateInput,key:string):Promise<C
       if(!response)for(let attempt=0;attempt<3;attempt++){
         response=await chat(input.provider,input.model,redesignMessages,AbortSignal.timeout(600000),budget);
         await writeFile(path.join(directory,'redesign.txt'),response);
-        try{applyVectorRedesign(project,response);validationError=undefined;break;}
+        try{applyVectorRedesign(project,response,true);validationError=undefined;break;}
         catch(error){validationError=error;redesignMessages.push({role:'user',content:`Validation error: ${String(error)}. Correct the COMPLETE JSON film below. Use valid quoted JSON keys, exact narrated cue substrings and grounded destinations. Do not invent extra spoken actions. Preserve all shot IDs and narration. Prior response: ${response}`});}
       }
       if(validationError)throw validationError;
       if(!response)throw new Error('Vector redesign returned no artwork');
       await writeFile(path.join(directory,'redesign.txt'),response);
-      project=applyVectorRedesign(project,response);redesigned=true;await save('redesigned');
+      project=applyVectorRedesign(project,response,true);redesigned=true;await save('redesigned');
     }
     // A redesigned model/world needs a fresh frame review; old complaints
     // describe different pixels and must not trigger another blind repair.
-    const priorReview=input.refineVisuals||restoredCast?undefined:project.vectorReview?.pass===false?project.vectorReview:input.project?.vectorReview;
+    const priorReview=input.refineVisuals||restoredCast||!reviewSourceMatches?undefined:project.vectorReview?.pass===false?project.vectorReview:input.project?.vectorReview;
     const currentDirection=vectorDirectionIssues(project);
     const retainedIssues=priorReview?.pass===false?priorReview.issues?.filter(issue=>!issue.problem.startsWith('No evaluated ')
       ||currentDirection.some(current=>current.sceneId===issue.sceneId&&current.problem===issue.problem)):undefined;
@@ -825,9 +1029,10 @@ async function generate(input:CanvasAnimationGenerateInput,key:string):Promise<C
     const retainAudio=Boolean(input.project)&&project.scenes.every(scene=>Boolean(scene.audioUrl))
       &&(input.refineVisuals||project.scenes.every(scene=>!scene.dialogue?.some(line=>line.audioUrl)));
     const retainedWithoutVoice=retainAudio&&project.scenes.every(scene=>!scene.dialogue?.some(line=>line.audioUrl));
-    project=compileVectorProject(retainedWithoutVoice?project:await prepareCanvasProjectAudio({project,narration:input.narration,autoSound:input.audioProduction?.autoSound,reuseNarration:retainAudio}));
-    await save('voiced');
-    for(let attempt=0;!retainAudio&&project.scenes.reduce((sum,s)=>sum+s.durationMs,0)>target*1100&&attempt<2;attempt++){
+    const audioEnabled=input.audioProduction?.enabled!==false;
+    project=compileVectorProject(!audioEnabled||retainedWithoutVoice?project:await prepareCanvasProjectAudio({project,narration:input.narration,autoSound:input.audioProduction?.autoSound,reuseNarration:retainAudio}));
+    await save(audioEnabled?'voiced':'planned-preview');
+    for(let attempt=0;audioEnabled&&!retainAudio&&project.scenes.reduce((sum,s)=>sum+s.durationMs,0)>target*1100&&attempt<2;attempt++){
       // Use the existing duration editor on measured speech, preserving artwork
       // and exact vector action cues instead of abandoning a complete film.
       await writeFile(path.join(directory,`voiced-before-duration-${attempt}.json`),JSON.stringify(project));
@@ -855,7 +1060,17 @@ async function generate(input:CanvasAnimationGenerateInput,key:string):Promise<C
         // or confusing separate tiles with duplicated/cropped actors.
         frames:await Promise.all(vectorReviewFrameIndices(sheet.times,previewScenes.find(s=>s.id===sheet.sceneId)!).map(async i=>({atMs:sheet.times[i]!,imageUrl:'data:image/png;base64,'+(await readFile(sheet.frameFiles![i]!)).toString('base64')}))),
       })));
-      const {scenes:reviewedScenes,content}=buildVectorReviewContent(project,frames,input.brief,reviewOnly);
+      const castPreview=buildVectorCastReview({...project,scenes:project.scenes.filter(s=>!reviewOnly||reviewOnly.has(s.id))});
+      const castDetails:VectorCastDetail[]=[];
+      if(castPreview){
+        const castSheets=await renderCanvasPreviewFrames(castPreview.project,path.join(previewDirectory,'cast-details'),{signature:sourceSignature,executable,
+          assetOrigin:`http://127.0.0.1:${Number(process.env.AUTOSUB_PORT||8787)}`,saveFrames:true});
+        for(const sheet of castSheets){
+          const page=castPreview.pages.find(p=>p.id===sheet.sceneId)!;
+          castDetails.push({view:page.view,assetIds:page.assetIds,imageUrl:'data:image/png;base64,'+(await readFile(sheet.frameFiles![0]!)).toString('base64')});
+        }
+      }
+      const {scenes:reviewedScenes,content}=buildVectorReviewContent(project,frames,input.brief,reviewOnly,castDetails);
       const response=round===0&&retainedIssues?.length?JSON.stringify({pass:false,issues:retainedIssues}):await chat(input.provider,input.model,[
         {role:'system',content:VECTOR_REVIEW_CONTRACT},
         {role:'user',content},
@@ -865,7 +1080,7 @@ async function generate(input:CanvasAnimationGenerateInput,key:string):Promise<C
       // A focused repair can leave another cut with an incompatible prop state.
       // Before approval, inspect the complete film once more for continuity.
       if(review.pass&&reviewOnly){
-        const all=buildVectorReviewContent(project,frames,input.brief);
+        const all=buildVectorReviewContent(project,frames,input.brief,undefined,castDetails);
         const finalReview=await chat(input.provider,input.model,[{role:'system',content:VECTOR_REVIEW_CONTRACT},{role:'user',content:all.content}],AbortSignal.timeout(300000),5000);
         await writeFile(path.join(previewDirectory,'review-all.txt'),finalReview);
         review=parseVectorReview(finalReview,project);reviewOnly=undefined;
